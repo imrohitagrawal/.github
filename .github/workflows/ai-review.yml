@@ -1,0 +1,60 @@
+name: AI Code Review (reusable)
+
+# Reusable workflow called from each consuming repo's .github/workflows/ai-review.yml.
+# The CALLER owns the pull_request trigger; this file defines the job body.
+# Review failures MUST NOT block merges — see `continue-on-error: true`.
+
+on:
+  workflow_call:
+    inputs:
+      claude-model:
+        description: "Claude model id to use for review"
+        required: false
+        type: string
+        default: "claude-opus-4-8"
+      max-diff-lines:
+        description: "Skip deep review if diff exceeds this many lines"
+        required: false
+        type: number
+        default: 600
+    secrets:
+      anthropic_api_key:
+        description: "Anthropic API key passed through from caller"
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  claude-review:
+    name: Claude review
+    runs-on: ubuntu-latest
+    # Review is advisory — failures surface as a missing/incomplete comment, never block merge.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch shared review instructions
+        run: |
+          mkdir -p .github
+          curl -fsSL \
+            https://raw.githubusercontent.com/imrohitagrawal/.github/main/.github/review-instructions.md \
+            -o .github/review-instructions.md
+
+      - name: Run Claude Code review
+        uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
+        with:
+          claude_args: |
+            /review
+            --model ${{ inputs.claude-model }}
+            --max-diff-lines ${{ inputs.max-diff-lines }}
+            Review this PR. Use the instructions in .github/review-instructions.md as your system prompt.
+            Output a Summary, Findings (with severity tags [blocking]/[should-fix]/[nit]), and Risks.
