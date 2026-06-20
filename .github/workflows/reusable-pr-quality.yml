@@ -60,6 +60,21 @@ jobs:
           echo "has_package_json=$([ -f package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "has_python=$([ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f setup.py ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "has_mypy_config=$([ -f mypy.ini ] || [ -f .mypy.ini ] || [ -f pyproject.toml ] && grep -q '\[tool.mypy\]' pyproject.toml 2>/dev/null && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "uses_uv=$([ -f Makefile ] && grep -qE '(^|[^a-zA-Z])uv([^a-zA-Z]|$)' Makefile && echo true || ([ -f pyproject.toml ] && [ -f uv.lock ] && echo true || echo false))" >> "$GITHUB_OUTPUT"
+          echo "uses_node=$([ -f .nvmrc ] || [ -f .node-version ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      # ---------- Tooling install (needed by Path 1 — make ci) ----------
+      - name: Install uv
+        if: steps.detect.outputs.uses_uv == 'true'
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install Node.js
+        if: steps.detect.outputs.has_package_json == 'true' || steps.detect.outputs.uses_node == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       # ---------- Path 1: Makefile-driven ----------
       - name: Run make ci
