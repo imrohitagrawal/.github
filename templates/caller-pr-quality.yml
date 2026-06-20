@@ -16,4 +16,4 @@ concurrency:
 jobs:
   quality-gate:
     if: github.event.pull_request.draft == false
-    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@v1
+    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@v2
