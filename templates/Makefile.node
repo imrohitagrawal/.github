@@ -1,0 +1,19 @@
+install:
+	npm ci
+
+lint:
+	npm run lint --if-present
+
+typecheck:
+	npm run typecheck --if-present
+
+test:
+	npm test --if-present
+
+build:
+	npm run build --if-present
+
+audit:
+	npm audit --audit-level=high
+
+ci: install lint typecheck test build audit

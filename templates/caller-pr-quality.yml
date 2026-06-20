@@ -1,0 +1,19 @@
+name: PR Quality Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+
+concurrency:
+  group: pr-quality-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    if: github.event.pull_request.draft == false
+    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@v1

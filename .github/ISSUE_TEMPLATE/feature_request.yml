@@ -1,0 +1,68 @@
+name: Feature Request
+description: Propose a new feature or improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem first, then the proposed solution. Alternatives and acceptance criteria help reviewers give meaningful feedback.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or business need does this address? Why is it worth solving now?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you solve it? Be specific about behavior, API surface, or UX.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider, and why is the proposed one better?
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will we know this is done? List testable criteria.
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+        - [ ] Tests added for X
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How urgent is this?
+      options:
+        - Low — nice to have
+        - Medium — should do this quarter
+        - High — needed for current milestone
+        - Critical — blocking a release
+      validations:
+        required: true
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks
+      description: What could go wrong? Compatibility, performance, security, rollback.
+    validations:
+      required: false

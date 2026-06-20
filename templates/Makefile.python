@@ -1,0 +1,19 @@
+install:
+	python -m pip install --upgrade pip
+	pip install -r requirements.txt || true
+	pip install ruff pytest mypy bandit pip-audit
+
+lint:
+	ruff check .
+
+typecheck:
+	mypy . || true
+
+test:
+	pytest -q
+
+security:
+	bandit -r . -x tests
+	pip-audit || true
+
+ci: install lint typecheck test security
