@@ -64,17 +64,25 @@ jobs:
           echo "uses_node=$([ -f .nvmrc ] || [ -f .node-version ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       # ---------- Tooling install (needed by Path 1 — make ci) ----------
-      - name: Install uv
+      - name: Install uv (Python 3.12)
         if: steps.detect.outputs.uses_uv == 'true'
         uses: astral-sh/setup-uv@v3
         with:
           version: "latest"
+          python-version: "3.12"
 
       - name: Install Node.js
         if: steps.detect.outputs.has_package_json == 'true' || steps.detect.outputs.uses_node == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # ---------- System Python for non-uv Python projects ----------
+      - name: Set up Python
+        if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.uses_uv != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       # ---------- Path 1: Makefile-driven ----------
       - name: Run make ci
