@@ -1,84 +1,47 @@
-# Engineering Standards & AI Delivery System
+# Engineering Standards
 
-> Reusable CI quality gates, security checks, AI-assisted review guidance, and community standards across the `@imrohitagrawal` engineering portfolio.
+Shared repository standards for [`@imrohitagrawal`](https://github.com/imrohitagrawal).
 
-This repository is the shared delivery control plane for my public projects. It turns the principles behind my work—evidence over claims, deterministic validation, secure defaults, visible degradation, and human-reviewed AI—into reusable repository assets.
+This repository contains reusable CI workflows, security controls, contribution policies, and AI-assisted review guidance used across software and AI engineering projects.
 
-## Portfolio map
+## Operating principles
 
-| Repository | Product / system | Engineering signal |
-|---|---|---|
-| [CiteVyn](https://github.com/imrohitagrawal/citevyn) | Citation-grounded Q&A over official AI documentation | RAG, pgvector, secure APIs, observability, refusal as a product capability |
-| [Quorum-AI](https://github.com/imrohitagrawal/quorum-ai) | Multi-model LLM orchestration with critique and synthesis | Parallel execution, cost guardrails, source support, readiness and security controls |
-| [SaafSaans](https://github.com/imrohitagrawal/saaf-saans) | Persona-aware Delhi/NCR air-quality companion | Grounded guidance, graceful fallback, privacy boundaries, accessibility, extensive testing |
-| [NarraTwin AI](https://github.com/imrohitagrawal/narratwin-ai) | Grounded multilingual project-walkthrough platform | RAG, unsupported-claim evaluation, provider abstraction, responsible synthetic-media rules |
-| [Project Documentation Skills](https://github.com/imrohitagrawal/project-doc-skills) | Eight reusable AI documentation and review skills | Diátaxis, independent critique, deterministic packaging, integrity manifests, release gates |
+- **Evidence over claims** — important behavior should be supported by tests, telemetry, security checks, or reproducible artifacts.
+- **Deterministic delivery gates** — linting, type checks, tests, dependency audits, and secret detection belong in the merge path.
+- **Secure defaults** — credentials, dependencies, untrusted inputs, and release boundaries are handled explicitly.
+- **Visible system state** — degraded, simulated, cached, and unavailable states should not be presented as normal operation.
+- **Human accountability** — AI can accelerate implementation and review; maintainers remain responsible for engineering decisions.
 
-## What this repository provides
+## Repository assets
 
-- **Default community files** — `CONTRIBUTING.md`, `SECURITY.md`, `PULL_REQUEST_TEMPLATE.md`, and `CODE_OF_CONDUCT.md`. These apply to a target repository only when that repository does not override them.
-- **Issue templates** — `.github/ISSUE_TEMPLATE/bug_report.yml` and `.github/ISSUE_TEMPLATE/feature_request.yml`.
-- **Reusable GitHub Actions workflows** — deterministic quality and security checks under `.github/workflows/`.
-- **Repository templates** — `AGENTS.md`, `CODEOWNERS`, Dependabot configuration, caller workflows, and language-specific Makefiles.
-- **Operating documentation** — onboarding, branch protection, and Codex review setup.
-- **GitHub profile brand kit** — recruiter-facing profile copy, repository positioning, and publishing steps under [`docs/github-profile/`](docs/github-profile/).
+| Area | Purpose |
+|---|---|
+| Default community files | Shared contribution, security, conduct, and pull-request standards |
+| Issue templates | Consistent bug reports and feature proposals |
+| Reusable GitHub Actions | Portfolio-wide quality and security checks |
+| Repository templates | `AGENTS.md`, `CODEOWNERS`, Dependabot, caller workflows, and language Makefiles |
+| Operating guidance | Repository onboarding, branch protection, and Codex review setup |
 
-## Review and delivery model
+## Review model
 
-| Layer | Tool | Role |
-|---|---|---|
-| **Hard gate** | GitHub Actions `quality-gate` workflow | Tests, lint, type checks, security scans, secret detection, and dependency audit |
-| **Intelligent reviewer** | Codex through ChatGPT / `@codex review` | Correctness, security reasoning, design feedback, and missing-test analysis |
-| **Human judgment** | Pull-request review | Product intent, acceptable risk, architectural trade-offs, and final accountability |
-| **Repository guidance** | `AGENTS.md` | Severity rules, review checklist, boundaries, and expected output style |
+| Layer | Responsibility |
+|---|---|
+| **GitHub Actions** | Deterministic tests, linting, type checks, security scans, secret detection, and dependency audit |
+| **AI-assisted review** | Advisory analysis of correctness, design, security reasoning, and missing tests |
+| **Maintainer review** | Product intent, architectural trade-offs, acceptable risk, and final approval |
 
-**Operating rule:** green CI is necessary, but not sufficient. AI review is advisory; accountable human review remains part of the merge decision.
+A green automated gate is necessary, but not sufficient. AI review does not replace accountable human judgment.
 
-## What this repository does not do
+## Adoption
 
-- It does **not** automatically run inside every repository. Each target repository adds a small caller workflow that references the reusable workflow here.
-- It does **not** enforce branch protection by itself. Enforcement remains in each target repository's rulesets and CI configuration.
-- It does **not** treat AI-generated review as an approval substitute.
+Reusable workflows and defaults do not execute automatically in every repository. Each target repository must add the appropriate caller workflow and configure its own rulesets or branch-protection policy.
 
-## Repository onboarding
+Start with:
 
-Every target repository needs a short setup pass. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps.
+- [`docs/repo-onboarding.md`](docs/repo-onboarding.md)
+- [`docs/branch-protection.md`](docs/branch-protection.md)
+- [`docs/codex-pr-review.md`](docs/codex-pr-review.md)
 
-## GitHub Free compatibility
+## Scope
 
-- **Public repositories on GitHub Free:** rulesets can require the quality-gate status check.
-- **Private repositories on GitHub Free:** Actions still run and failures remain visible, while hard merge blocking may depend on plan capabilities. In that case, the gate is process-enforced through PR discipline, review checklists, and CODEOWNERS.
-
-## Layout
-
-```text
-.github/
-  ISSUE_TEMPLATE/
-    bug_report.yml
-    feature_request.yml
-  workflows/
-    reusable-pr-quality.yml
-
-docs/
-  repo-onboarding.md
-  codex-pr-review.md
-  branch-protection.md
-  github-profile/
-    PROFILE_README.md
-    PUBLISH_CHECKLIST.md
-    REPOSITORY_METADATA.md
-
-templates/
-  AGENTS.md
-  CODEOWNERS
-  caller-pr-quality.yml
-  Makefile.python
-  Makefile.node
-  dependabot.yml
-
-README.md
-CONTRIBUTING.md
-SECURITY.md
-PULL_REQUEST_TEMPLATE.md
-CODE_OF_CONDUCT.md
-```
+This repository is intentionally limited to shared engineering governance and delivery standards. Personal profile branding belongs in the dedicated public profile repository named [`imrohitagrawal`](https://github.com/imrohitagrawal/imrohitagrawal).
