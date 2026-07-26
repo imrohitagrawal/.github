@@ -1,63 +1,47 @@
-# imrohitagrawal/.github
+# Engineering Standards
 
-Global GitHub defaults, reusable CI gates, and Codex review guidance for `@imrohitagrawal` repositories.
+Shared repository standards for [`@imrohitagrawal`](https://github.com/imrohitagrawal).
 
-## What this repository provides
+This repository contains reusable CI workflows, security controls, contribution policies, and AI-assisted review guidance used across software and AI engineering projects.
 
-- **Default community files** — `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PULL_REQUEST_TEMPLATE.md`, `CODE_OF_CONDUCT.md`. These apply to a target repo **only when the target repo does not override them**.
-- **Issue templates** — `.github/ISSUE_TEMPLATE/bug_report.yml`, `.github/ISSUE_TEMPLATE/feature_request.yml`.
-- **Reusable GitHub Actions workflows** — see `.github/workflows/`.
-- **Templates** that every target repo can copy: `AGENTS.md` (Codex review guidance), `CODEOWNERS`, dependabot config, language Makefiles.
-- **Documentation** for onboarding, branch protection, and Codex review setup.
+## Operating principles
 
-## What this repository does NOT do
+- **Evidence over claims** — important behavior should be supported by tests, telemetry, security checks, or reproducible artifacts.
+- **Deterministic delivery gates** — linting, type checks, tests, dependency audits, and secret detection belong in the merge path.
+- **Secure defaults** — credentials, dependencies, untrusted inputs, and release boundaries are handled explicitly.
+- **Visible system state** — degraded, simulated, cached, and unavailable states should not be presented as normal operation.
+- **Human accountability** — AI can accelerate implementation and review; maintainers remain responsible for engineering decisions.
 
-- It does **not** automatically run in any target repo. GitHub Actions cannot be inherited across repos — every target repo must add a small caller workflow that references this repo's reusable workflow.
-- It does **not** enforce anything by itself. Enforcement happens in each target repo's branch protection / rulesets and in their own CI configuration.
+## Repository assets
+
+| Area | Purpose |
+|---|---|
+| Default community files | Shared contribution, security, conduct, and pull-request standards |
+| Issue templates | Consistent bug reports and feature proposals |
+| Reusable GitHub Actions | Portfolio-wide quality and security checks |
+| Repository templates | `AGENTS.md`, `CODEOWNERS`, Dependabot, caller workflows, and language Makefiles |
+| Operating guidance | Repository onboarding, branch protection, and Codex review setup |
 
 ## Review model
 
-| Layer | Tool | Role |
-|---|---|---|
-| **Hard gate** | GitHub Actions (`quality-gate` workflow) | Deterministic checks: tests, lint, type check, security scans (bandit, semgrep, gitleaks), dependency audit. |
-| **Intelligent reviewer** | Codex (via ChatGPT UI / `@codex review` PR comment) | Correctness, security reasoning, design feedback, missing tests, review-worthy judgment calls. |
-| **Soft guidance** | `AGENTS.md` in each repo | Severity rules, review checklist, output style for Codex. |
+| Layer | Responsibility |
+|---|---|
+| **GitHub Actions** | Deterministic tests, linting, type checks, security scans, secret detection, and dependency audit |
+| **AI-assisted review** | Advisory analysis of correctness, design, security reasoning, and missing tests |
+| **Maintainer review** | Product intent, architectural trade-offs, acceptable risk, and final approval |
 
-**Rule:** GitHub Actions is the hard merge gate. Codex review is advisory. A green CI is **necessary** but not **sufficient** — human review (and Codex review) is required on top of it.
+A green automated gate is necessary, but not sufficient. AI review does not replace accountable human judgment.
 
-## GitHub Free compatibility
+## Adoption
 
-- **Public repositories on GitHub Free:** branch protection / rulesets can require status checks. The hard gate works fully.
-- **Private repositories on GitHub Free:** GitHub Actions still runs and fails visibly. However, **hard merge blocking through branch protection rulesets may require GitHub Pro / Team / Enterprise**. On the free plan, the gate is process-enforced: never merge red PRs, use the PR template checklist, use Codex review, use CODEOWNERS.
-- **Codex itself is free with ChatGPT Plus.** Connecting GitHub repos to Codex is a one-time UI step per repo.
+Reusable workflows and defaults do not execute automatically in every repository. Each target repository must add the appropriate caller workflow and configure its own rulesets or branch-protection policy.
 
-## Repo-onboarding
+Start with:
 
-Every target repo needs a 5-minute setup. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps.
+- [`docs/repo-onboarding.md`](docs/repo-onboarding.md)
+- [`docs/branch-protection.md`](docs/branch-protection.md)
+- [`docs/codex-pr-review.md`](docs/codex-pr-review.md)
 
-## Layout
+## Scope
 
-```
-.github/
-  ISSUE_TEMPLATE/
-    bug_report.yml
-    feature_request.yml
-  workflows/
-    reusable-pr-quality.yml      # The reusable quality-gate workflow
-templates/
-  AGENTS.md                      # Codex review guidance
-  CODEOWNERS
-  caller-pr-quality.yml          # Caller workflow for each target repo
-  Makefile.python
-  Makefile.node
-  dependabot.yml
-docs/
-  repo-onboarding.md
-  codex-pr-review.md
-  branch-protection.md
-README.md
-CONTRIBUTING.md
-SECURITY.md
-PULL_REQUEST_TEMPLATE.md
-CODE_OF_CONDUCT.md
-```
+This repository is intentionally limited to shared engineering governance and delivery standards. Personal profile branding belongs in the dedicated public profile repository named [`imrohitagrawal`](https://github.com/imrohitagrawal/imrohitagrawal).
