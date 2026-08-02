@@ -1,49 +1,50 @@
 # imrohitagrawal/.github
 
-Global GitHub defaults, reusable CI gates, and Codex review guidance for `@imrohitagrawal` repositories.
+Reusable GitHub governance assets, opt-in CI workflows, and Codex review guidance for `@imrohitagrawal` repositories.
 
 ## What this repository provides
 
-- **Default community files** — `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PULL_REQUEST_TEMPLATE.md`, `CODE_OF_CONDUCT.md`. These apply to a target repo **only when the target repo does not override them**.
+- **Eligible default community-health files** such as `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue templates, and pull-request templates. GitHub may use an eligible default only when the target repository does not provide its own version. This repository's root `README.md` is documentation for this repository and is not inherited by other repositories.
 - **Issue templates** — `.github/ISSUE_TEMPLATE/bug_report.yml`, `.github/ISSUE_TEMPLATE/feature_request.yml`.
 - **Reusable GitHub Actions workflows** — see `.github/workflows/`.
-- **Templates** that every target repo can copy: `AGENTS.md` (Codex review guidance), `CODEOWNERS`, dependabot config, language Makefiles.
-- **Documentation** for onboarding, branch protection, and Codex review setup.
+- **Templates** that target repositories can copy: `AGENTS.md`, `CODEOWNERS`, Dependabot configuration, caller workflows, and language-specific Makefiles.
+- **Documentation** for repository onboarding, branch protection, and Codex review setup.
 
-## What this repository does NOT do
+## What this repository does not do
 
-- It does **not** automatically run in any target repo. GitHub Actions cannot be inherited across repos — every target repo must add a small caller workflow that references this repo's reusable workflow.
-- It does **not** enforce anything by itself. Enforcement happens in each target repo's branch protection / rulesets and in their own CI configuration.
+- It does **not** automatically run workflows in target repositories. Each target repository must add a caller workflow that references the reusable workflow.
+- It does **not** automatically enforce account-wide policy. Enforcement depends on each target repository's required checks, branch protection or rulesets, and local CI configuration.
+- It does **not** make every configured check blocking. The current reusable workflow contains both blocking and advisory steps; consuming repositories must review the workflow and decide which failures should block merges.
 
 ## Review model
 
-| Layer | Tool | Role |
+| Layer | Tool | Current role |
 |---|---|---|
-| **Hard gate** | GitHub Actions (`quality-gate` workflow) | Deterministic checks: tests, lint, type check, security scans (bandit, semgrep, gitleaks), dependency audit. |
-| **Intelligent reviewer** | Codex (via ChatGPT UI / `@codex review` PR comment) | Correctness, security reasoning, design feedback, missing tests, review-worthy judgment calls. |
-| **Soft guidance** | `AGENTS.md` in each repo | Severity rules, review checklist, output style for Codex. |
+| **Deterministic CI** | GitHub Actions (`quality-gate` workflow) | Runs available tests, lint, type checks, security scans, and dependency audits. Some current steps are blocking and some are advisory. |
+| **Intelligent reviewer** | Codex through the supported ChatGPT/GitHub workflow | Reviews correctness, security reasoning, design trade-offs, and missing tests. Advisory unless the target repository explicitly adds an enforcement mechanism. |
+| **Repository guidance** | `AGENTS.md` in each repository | Defines severity rules, review expectations, and output conventions. |
 
-**Rule:** GitHub Actions is the hard merge gate. Codex review is advisory. A green CI is **necessary** but not **sufficient** — human review (and Codex review) is required on top of it.
+**Rule:** A reusable workflow becomes a merge gate only when the consuming repository calls it and configures the resulting check as required. A green check is useful evidence, but human review remains required.
 
-## GitHub Free compatibility
+## Plan and repository compatibility
 
-- **Public repositories on GitHub Free:** branch protection / rulesets can require status checks. The hard gate works fully.
-- **Private repositories on GitHub Free:** GitHub Actions still runs and fails visibly. However, **hard merge blocking through branch protection rulesets may require GitHub Pro / Team / Enterprise**. On the free plan, the gate is process-enforced: never merge red PRs, use the PR template checklist, use Codex review, use CODEOWNERS.
-- **Codex itself is free with ChatGPT Plus.** Connecting GitHub repos to Codex is a one-time UI step per repo.
+- GitHub Actions can run in public and private repositories subject to the repository owner's plan and usage limits.
+- Availability of protected branches, rulesets, and required checks can depend on repository visibility and the current GitHub plan.
+- Codex availability and usage limits are plan-dependent and should be verified against current official OpenAI documentation rather than treated as a permanent repository fact.
 
-## Repo-onboarding
+## Repository onboarding
 
-Every target repo needs a 5-minute setup. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps.
+Every target repository must opt in. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the setup steps.
 
 ## Layout
 
-```
+```text
 .github/
   ISSUE_TEMPLATE/
     bug_report.yml
     feature_request.yml
   workflows/
-    reusable-pr-quality.yml      # The reusable quality-gate workflow
+    reusable-pr-quality.yml      # Opt-in reusable workflow
 templates/
   AGENTS.md                      # Codex review guidance
   CODEOWNERS
@@ -61,3 +62,7 @@ SECURITY.md
 PULL_REQUEST_TEMPLATE.md
 CODE_OF_CONDUCT.md
 ```
+
+## Known current limitation
+
+The reusable workflow currently mixes hard-failing and soft-failing checks. Workflow behaviour must be reconciled separately before this repository is described as providing a universal hard gate.
