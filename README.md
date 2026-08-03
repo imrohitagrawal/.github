@@ -4,8 +4,9 @@ Global GitHub defaults, reusable CI gates, and Codex review guidance for `@imroh
 
 ## What this repository provides
 
-- **Default community files** — `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PULL_REQUEST_TEMPLATE.md`, `CODE_OF_CONDUCT.md`. These apply to a target repo **only when the target repo does not override them**.
+- **Default community files** — `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `PULL_REQUEST_TEMPLATE.md`, `CODE_OF_CONDUCT.md`. These apply to a target repo **only when the target repo does not override them**.
 - **Issue templates** — `.github/ISSUE_TEMPLATE/bug_report.yml`, `.github/ISSUE_TEMPLATE/feature_request.yml`.
+- **Discussion category forms** — `.github/DISCUSSION_TEMPLATE/` guidance for General, Q&A, Ideas, and Show and tell categories.
 - **Reusable GitHub Actions workflows** — see `.github/workflows/`.
 - **Templates** that every target repo can copy: `AGENTS.md` (Codex review guidance), `CODEOWNERS`, dependabot config, language Makefiles.
 - **Documentation** for onboarding, branch protection, and Codex review setup.
@@ -42,6 +43,11 @@ Every target repo needs a 5-minute setup. See [`docs/repo-onboarding.md`](docs/r
   ISSUE_TEMPLATE/
     bug_report.yml
     feature_request.yml
+  DISCUSSION_TEMPLATE/
+    general.yml
+    ideas.yml
+    q-a.yml
+    show-and-tell.yml
   workflows/
     reusable-pr-quality.yml      # The reusable quality-gate workflow
 templates/
@@ -58,6 +64,7 @@ docs/
 README.md
 CONTRIBUTING.md
 SECURITY.md
+SUPPORT.md
 PULL_REQUEST_TEMPLATE.md
 CODE_OF_CONDUCT.md
 ```

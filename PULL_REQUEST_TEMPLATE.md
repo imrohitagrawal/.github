@@ -26,6 +26,8 @@ What changed?
 ## Risk review
 
 - [ ] Security impact checked
+- [ ] Privacy, safety, and licensing impact checked
+- [ ] Maturity, deployment, and evidence claims remain accurate
 - [ ] Performance impact checked
 - [ ] Backward compatibility checked
 - [ ] Rollback plan documented

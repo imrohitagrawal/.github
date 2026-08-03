@@ -1,0 +1,21 @@
+title: ""
+labels: ["discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use General for project conversation that is not a bug report, support question, feature proposal, or showcase. Search existing Discussions and Issues first.
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What would you like to discuss, and what relevant context should others know?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or references
+      description: Add links, examples, logs with secrets removed, or other supporting material when relevant.
+    validations:
+      required: false

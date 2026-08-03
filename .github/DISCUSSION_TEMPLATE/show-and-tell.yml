@@ -1,0 +1,21 @@
+title: "Show and tell: "
+labels: ["discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share a project, integration, learning, or result related to this repository. Be explicit about what is implemented, tested, deployed, or still experimental.
+  - type: textarea
+    id: showcase
+    attributes:
+      label: What did you build or learn?
+      description: Explain the practical result and how it relates to the project.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence, demo, or source
+      description: Add public links, screenshots, or reproducible steps. Do not include secrets or private data.
+    validations:
+      required: false

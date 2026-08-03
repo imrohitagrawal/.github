@@ -1,0 +1,21 @@
+title: "Q: "
+labels: ["discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use Q&A for help understanding, installing, or using the project. Search the README, documentation, existing Discussions, and Issues first. Never include secrets or private data.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to understand or accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Share relevant commands, configuration, and sanitized output.
+    validations:
+      required: false
