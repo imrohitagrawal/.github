@@ -1,0 +1,28 @@
+title: "Idea: "
+labels: ["discussion", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use Ideas for early feature proposals. Discuss large or architectural changes here before implementation, and preserve the project's maturity, security, privacy, safety, licensing, and evidence boundaries.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: Who has this need, and what outcome would improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Describe the smallest useful change, alternatives, and important tradeoffs.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: What evidence or experiment would show that this idea is worth implementing?
+    validations:
+      required: false
