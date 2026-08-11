@@ -23,15 +23,75 @@ name: PR Quality Gate (reusable)
 #   - Node:   npm ci, npm audit
 #   - Cross-language: gitleaks (secrets, always), semgrep OSS (only if the repo
 #     ships its own semgrep config - see the step)
+#
+# WP6 (per-stack directory inputs): `python-directory`/`node-directory` let a
+# monorepo (Python in one subdirectory, Node in another - e.g. citevyn's
+# backend/ + frontend/) declare its real layout instead of relying on
+# root-only auto-detect, which sees nothing there and skips every native
+# step. Both default to '.', so a caller that passes neither input gets
+# exactly today's root-only behavior - this is additive and backward
+# compatible for v3/v4-pinned consumers, who don't get this file at all
+# until they repin, and for any v5+ consumer that doesn't set the inputs.
+# An explicitly-passed value that's empty or doesn't exist fails the job
+# fast (see "Validate directory inputs" below) instead of silently
+# disabling that stack while the gate still reports green - default:
+# only applies when the input is omitted, not when it's passed as ''.
+#
+# Single job, deliberately (see the "Aggregator" note below `jobs:`) - one
+# job name is already the one stable required-status-check name branch
+# protection needs, regardless of which stacks are present.
 
 on:
   workflow_call:
+    inputs:
+      python-directory:
+        description: >-
+          Directory (relative to repo root) containing the Python project
+          (pyproject.toml/requirements.txt/setup.py, mypy config, tests).
+          Defaults to '.' - today's root-only behavior. If explicitly set,
+          must reference a directory that exists - the gate fails fast
+          rather than silently skipping the Python stack.
+        required: false
+        type: string
+        default: '.'
+      node-directory:
+        description: >-
+          Directory (relative to repo root) containing the Node project
+          (package.json). Defaults to '.' - today's root-only behavior. If
+          explicitly set, must reference a directory that exists - the gate
+          fails fast rather than silently skipping the Node stack.
+        required: false
+        type: string
+        default: '.'
 
 permissions:
   contents: read
   security-events: write
   pull-requests: read
 
+# Aggregator note (WP6, target architecture point 2): the plan's default
+# design splits Python/Node checks into their own jobs plus a final
+# `needs: [...]` + `if: always()` aggregator job, so branch protection can
+# require one stable name while stacks run/report independently. This PR
+# deliberately keeps the single-job design instead:
+#   - A single job's name is already the one stable check branch protection
+#     requires, whether Python, Node, both, or neither ran - steps skip via
+#     `if:`, the job itself does not, so there is no "a required job quietly
+#     reports skipped and counts as green" failure mode to guard against.
+#     That failure mode is specific to the *multi-job* design the plan
+#     considered - splitting into jobs would introduce it, then need the
+#     aggregator to fix it. A single job never has it.
+#   - Splitting python/node into parallel jobs would also require deciding
+#     where gitleaks/semgrep (today: always-run, once, ahead of both stacks)
+#     and `make ci` (today: a fallback ahead of both native paths) live in a
+#     multi-job graph, plus whether existing consumers' branch protection
+#     (pinned to today's single check name, e.g. "quality-gate") breaks on
+#     upgrade - real design questions, out of scope for "add per-stack
+#     directory inputs."
+# Restructuring into parallel per-stack jobs remains a legitimate follow-up
+# if/when Python and Node checks need to run concurrently for wall-clock
+# time (they run sequentially today, same as before this change) - tracked
+# as explicit future work, not silently dropped.
 jobs:
   quality-gate:
     name: quality-gate
@@ -42,6 +102,39 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ---------- WP6 hardening: fail closed on bad directory inputs ----------
+      # `default: '.'` only kicks in when an input is OMITTED. A caller that computes
+      # python-directory/node-directory dynamically and passes '' gets that empty
+      # string verbatim, which then flows into "$DIR/pyproject.toml" etc. as
+      # "/pyproject.toml" - a filesystem-root check that quietly finds nothing. A
+      # misspelled or moved directory has the same failure shape: the stack it names
+      # is just treated as absent. Either way the gate can still report green while an
+      # explicitly-declared stack silently gets no lint/typecheck/test/build/audit -
+      # exactly the "check quietly finds nothing, job still reports green" failure
+      # mode WP6 exists to fix. Reject both cases here, before any other step relies
+      # on these values, rather than failing open.
+      - name: Validate directory inputs
+        env:
+          PYTHON_DIR: ${{ inputs.python-directory }}
+          NODE_DIR: ${{ inputs.node-directory }}
+        run: |
+          if [ -z "$PYTHON_DIR" ]; then
+            echo "::error::python-directory was explicitly set to an empty string. Omit the input (or pass '.') to use the repo root."
+            exit 1
+          fi
+          if [ -z "$NODE_DIR" ]; then
+            echo "::error::node-directory was explicitly set to an empty string. Omit the input (or pass '.') to use the repo root."
+            exit 1
+          fi
+          if [ ! -d "$PYTHON_DIR" ]; then
+            echo "::error::python-directory '$PYTHON_DIR' does not exist in this repository."
+            exit 1
+          fi
+          if [ ! -d "$NODE_DIR" ]; then
+            echo "::error::node-directory '$NODE_DIR' does not exist in this repository."
+            exit 1
+          fi
 
       # ---------- Always run: secret scan ----------
       - name: Detect secrets with gitleaks
@@ -68,23 +161,29 @@ jobs:
                  'p/security-audit p/secrets p/owasp-top-ten' }}
 
       # ---------- Detect language and dispatch ----------
+      # WP6: file checks below are relative to python-directory/node-directory
+      # (both default '.', i.e. repo root - today's behavior when unset).
+      # has_makefile_ci stays root-only, deliberately - see "Run make ci" below.
       - name: Detect project layout
         id: detect
+        env:
+          PYTHON_DIR: ${{ inputs.python-directory }}
+          NODE_DIR: ${{ inputs.node-directory }}
         run: |
           echo "has_makefile_ci=$([ -f Makefile ] && grep -q '^ci:' Makefile && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "has_package_json=$([ -f package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "has_python=$([ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f setup.py ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "has_package_json=$([ -f "$NODE_DIR/package.json" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "has_python=$([ -f "$PYTHON_DIR/pyproject.toml" ] || [ -f "$PYTHON_DIR/requirements.txt" ] || [ -f "$PYTHON_DIR/setup.py" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           # Written as an if/else, not a chain: `A || B || C && grep` binds as
           # `((A||B||C) && grep)`, so the grep on pyproject.toml gated ALL three
           # branches and a repo configured via mypy.ini reported false - mypy silently
           # never ran for it.
-          if [ -f mypy.ini ] || [ -f .mypy.ini ] || grep -q '^\[tool\.mypy\]' pyproject.toml 2>/dev/null; then
+          if [ -f "$PYTHON_DIR/mypy.ini" ] || [ -f "$PYTHON_DIR/.mypy.ini" ] || grep -q '^\[tool\.mypy\]' "$PYTHON_DIR/pyproject.toml" 2>/dev/null; then
             echo "has_mypy_config=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_mypy_config=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "uses_uv=$([ -f Makefile ] && grep -qE '(^|[^a-zA-Z])uv([^a-zA-Z]|$)' Makefile && echo true || ([ -f pyproject.toml ] && [ -f uv.lock ] && echo true || echo false))" >> "$GITHUB_OUTPUT"
-          echo "uses_node=$([ -f .nvmrc ] || [ -f .node-version ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "uses_uv=$([ -f Makefile ] && grep -qE '(^|[^a-zA-Z])uv([^a-zA-Z]|$)' Makefile && echo true || ([ -f "$PYTHON_DIR/pyproject.toml" ] && [ -f "$PYTHON_DIR/uv.lock" ] && echo true || echo false))" >> "$GITHUB_OUTPUT"
+          echo "uses_node=$([ -f "$NODE_DIR/.nvmrc" ] || [ -f "$NODE_DIR/.node-version" ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       # ---------- Tooling install (needed by Path 1 — make ci) ----------
       - name: Install uv
@@ -115,6 +214,14 @@ jobs:
           python-version: '3.12'
 
       # ---------- Path 1: Makefile-driven ----------
+      # Root-only detection kept as-is (WP6 scope: directory inputs for the
+      # native npm/Python steps, not the Makefile path). A Makefile that
+      # drives `make ci` for a subdirectory-only stack is real but rarer than
+      # the root-Makefile-orchestrating-subdirectories shape citevyn already
+      # uses (its root Makefile's `ci:` target itself cds into backend/); a
+      # `makefile-directory` input, and discrete `make lint`/`typecheck`/
+      # `test` target invocation with workflow-owned severity, is WP7's
+      # explicit scope (target architecture point 3), not this one.
       - name: Run make ci
         if: steps.detect.outputs.has_makefile_ci == 'true'
         run: make ci
@@ -122,22 +229,27 @@ jobs:
       # ---------- Path 2: Node ----------
       - name: npm ci
         if: steps.detect.outputs.has_package_json == 'true'
+        working-directory: ${{ inputs.node-directory }}
         run: npm ci
 
       - name: npm lint
         if: steps.detect.outputs.has_package_json == 'true'
+        working-directory: ${{ inputs.node-directory }}
         run: npm run lint --if-present
 
       - name: npm typecheck
         if: steps.detect.outputs.has_package_json == 'true'
+        working-directory: ${{ inputs.node-directory }}
         run: npm run typecheck --if-present
 
       - name: npm test
         if: steps.detect.outputs.has_package_json == 'true'
+        working-directory: ${{ inputs.node-directory }}
         run: npm test --if-present
 
       - name: npm build
         if: steps.detect.outputs.has_package_json == 'true'
+        working-directory: ${{ inputs.node-directory }}
         run: npm run build --if-present
 
       # ADVISORY. A transitive dev-dependency advisory with no fix available would
@@ -146,6 +258,7 @@ jobs:
       # replace the `|| echo` below with a bare run.
       - name: npm audit (high+) — advisory
         if: steps.detect.outputs.has_package_json == 'true'
+        working-directory: ${{ inputs.node-directory }}
         run: npm audit --audit-level=high || echo "::warning::npm audit found high+ advisories (advisory step, not blocking)"
 
       # ---------- Path 3: Python ----------
@@ -162,12 +275,14 @@ jobs:
 
       - name: pip install -r requirements.txt
         if: steps.detect.outputs.has_python == 'true'
+        working-directory: ${{ inputs.python-directory }}
         run: |
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f pyproject.toml ]; then pip install -e . || true; fi
 
       - name: ruff check
         if: steps.detect.outputs.has_python == 'true'
+        working-directory: ${{ inputs.python-directory }}
         run: ruff check .
 
       # BLOCKING. This previously read `pytest -q || echo "pytest failed"`, which
@@ -177,12 +292,24 @@ jobs:
       # rule out: `pyproject.toml` satisfies it whether or not a suite exists. A repo
       # with no tests must not go red for having nothing to run - but a FAILING suite
       # must, so only 5 is tolerated and it says so in the log.
+      # hashFiles patterns are always relative to GITHUB_WORKSPACE (they ignore
+      # working-directory), so python-directory is spliced into each pattern via
+      # format() to check for tests inside the declared Python subdirectory.
       - name: pytest
-        if: steps.detect.outputs.has_python == 'true' && hashFiles('tests/**', 'test/**', 'pytest.ini', 'pyproject.toml') != ''
+        if: >-
+          steps.detect.outputs.has_python == 'true' &&
+          hashFiles(
+            format('{0}/tests/**', inputs.python-directory),
+            format('{0}/test/**', inputs.python-directory),
+            format('{0}/pytest.ini', inputs.python-directory),
+            format('{0}/pyproject.toml', inputs.python-directory)
+          ) != ''
+        working-directory: ${{ inputs.python-directory }}
         run: pytest -q || { c=$?; [ $c -eq 5 ] && echo "::warning::pytest collected no tests" || exit $c; }
 
       - name: mypy
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_mypy_config == 'true'
+        working-directory: ${{ inputs.python-directory }}
         run: mypy .
 
       # ADVISORY. Bandit's false-positive rate on application code is high enough that
@@ -190,12 +317,14 @@ jobs:
       # ships a `.bandit` / `bandit.yaml` baseline, so a finding is a NEW finding.
       - name: bandit — advisory
         if: steps.detect.outputs.has_python == 'true'
+        working-directory: ${{ inputs.python-directory }}
         run: bandit -r . -x tests,test,node_modules,.venv,venv || echo "::warning::bandit reported findings (advisory step, not blocking)"
 
       # ADVISORY, same reasoning as npm audit. BLOCKING WHEN: the repo pins an
       # ignore-list, so a finding means an unreviewed one.
       - name: pip-audit — advisory
         if: steps.detect.outputs.has_python == 'true'
+        working-directory: ${{ inputs.python-directory }}
         run: pip-audit || echo "::warning::pip-audit reported findings (advisory step, not blocking)"
 
       # ---------- Fallback: nothing matched ----------
