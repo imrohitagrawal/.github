@@ -4,7 +4,9 @@ This document describes the exact steps to add the quality-gate + Codex review s
 
 The shared source of truth lives in [`imrohitagrawal/.github`](https://github.com/imrohitagrawal/.github). Files in `templates/` are copied into the target repo.
 
-## 5-minute setup
+## Setup steps (~10 steps, two products)
+
+This is not a 5-minute task. It's roughly 10 hand-run steps spanning local Git/repository file changes (copying the caller workflow, dependabot config, and other templates in, then opening a PR), GitHub itself (branch protection is configured in repo **Settings**), and the ChatGPT UI (for Codex, which requires a paid **ChatGPT Plus** subscription or higher — see [`docs/codex-pr-review.md`](codex-pr-review.md#prerequisites)). Budget real time for it, especially the first time through a given repo. A future minimal template repo plus a retrofit script (a planned follow-up, not yet built or tracked anywhere in this repo) is intended to shrink this considerably — until that ships, the steps below are the real path.
 
 For every target repo, in order:
 
@@ -60,7 +62,7 @@ For every target repo, in order:
 
 8. **Configure branch protection** to require the `quality-gate` check. See [`docs/branch-protection.md`](branch-protection.md) for the exact UI steps. This step is **mandatory for the hard gate to actually block** — without it, red checks are visible but don't block merge.
 
-9. **Enable Codex review** for the repo. See [`docs/codex-pr-review.md`](codex-pr-review.md) for the exact UI steps. One-time setup per repo.
+9. **Enable Codex review** for the repo (requires a paid ChatGPT Plus subscription or higher). See [`docs/codex-pr-review.md`](codex-pr-review.md) for the exact UI steps. One-time setup per repo.
 
 10. **Open a test PR** to confirm:
     - `quality-gate` runs and shows a green check.
@@ -86,3 +88,7 @@ The reusable workflow runs on private repos too — GitHub Actions is free for p
 ## What if the repo is not a typical code project?
 
 The reusable workflow has a fallback: if no `Makefile` ci target, `package.json`, or Python manifest is found, it runs only the secret scan and posts a notice. This is fine for repos that hold only documentation, schemas, or other non-executable content — Codex + manual review are the only quality layer for those.
+
+## Why there's no "new workflow" picker entry for these templates
+
+GitHub can surface starter workflows directly in a repo's **Actions → New workflow** picker when they live in `.github/workflow-templates/` of an *Organization*-owned `.github` repo. `imrohitagrawal` is a personal User account, not an Organization (`gh api orgs/imrohitagrawal` → `404`) — there is no verified evidence that mechanism works the same way for a user-owned `.github` repo, and GitHub's documented procedure for it is written for org-owned repos specifically. Rather than ship `.github/workflow-templates/` and hope it gets picked up, the intended path (a planned follow-up, not yet built) is a separate, minimal template repo that a new repo can be created from directly via "Use this template" — that route doesn't depend on the unverified picker behavior.

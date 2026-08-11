@@ -14,7 +14,7 @@ Branch protection and rulesets work fully on public repos under GitHub Free. Set
    - ☑ **Require a pull request before merging**
    - ☑ **Require status checks to pass**
    - ☑ **Require branches to be up to date before merging** (if available)
-   - ☑ **Require conversation resolution before merging**
+   - ☑ **Require conversation resolution before merging** — recommended here, but not yet applied even on `citevyn` (the best-adopted repo): `gh api repos/imrohitagrawal/citevyn/branches/main/protection --jq '.required_conversation_resolution'` currently returns `{"enabled":false}`. This checklist is the target state, not a claim that every repo already matches it — turn it on as you go through this list.
    - ☑ **Do not allow force pushes**
    - ☑ **Do not allow deletions**
 6. In **Status checks that are required**, search for `quality-gate` and select it.
@@ -37,7 +37,7 @@ If you see the option greyed out or the ruleset cannot be enforced, fall back to
 1. **Never merge a red PR.** Make it a hard rule for yourself and any contributors.
 2. **Use the PR template checklist** (`.github/PULL_REQUEST_TEMPLATE.md`) — it forces the author to acknowledge risk review.
 3. **Use Codex review** — `@codex review` comments give a second opinion before merge.
-4. **Use CODEOWNERS** — the owner is the only person who can approve.
+4. **Use CODEOWNERS for routing, not as a required-review gate.** CODEOWNERS is useful for directing review requests to the right person as a repo grows. For a genuinely solo repo, do **not** pair it with branch protection's "Require review from Code Owners" setting: a sole code owner can't approve their own PR, so with **admin bypass disabled** (`enforce_admins: true`) that setting deadlocks every PR the owner opens. With GitHub's **default** admin bypass left on, the owner can still merge without the approval — so instead of a deadlock, the requirement just does nothing; either way it provides no real protection for a solo repo. (Explicit bypass-actor lists, the other way around a deadlock, are only configurable on organization-owned repos — not available here per the account-type note below.) Leave code-owner review unrequired until a second maintainer genuinely exists.
 5. **Use rulesets that don't require paid features.** Some rules (force-push prevention, deletion prevention, conversation resolution) are free even on private repos.
 
 ## Verification
@@ -60,4 +60,8 @@ To prove the gate works after setup:
 | Required reviewers | ✅ Yes | ⚠️ May require Pro for private repos |
 | Code scanning (CodeQL) | ✅ Free | ❌ Requires GitHub Advanced Security (paid) |
 
-This is why `aegis-contracts` (private) has Codex review only and no CodeQL — the cost-benefit doesn't make sense for a small contracts repo. See [`docs/codex-pr-review.md`](codex-pr-review.md) for the alternative enforcement on private repos.
+CodeQL requiring GitHub Advanced Security on private repos (paid) is the practical reason a private repo might lean on Codex review and process enforcement instead of code scanning. See [`docs/codex-pr-review.md`](codex-pr-review.md) for the alternative enforcement on private repos.
+
+**Org-level rulesets are not an option for this account.** `imrohitagrawal` is a personal GitHub *User* account, not an Organization — `gh api orgs/imrohitagrawal` returns `404`. Organization-level repository rulesets, which let you define one ruleset that applies across every repo in an org, don't exist for user accounts. Every setting on this page has to be configured per-repo; there's no account-wide mechanism to fall back on, and converting to an Organization is a separate decision this doc doesn't make for you. (Recorded here so this isn't re-proposed later without checking account type first.)
+
+**The GitHub "new workflow" starter picker is a separate, unverified thing.** GitHub can surface starter workflows in a repo's Actions → New workflow picker when they live in `.github/workflow-templates/` of an *Organization*-owned `.github` repo — that's not what this section is about, and it's not confirmed to work the same way for a personal-account `.github` repo like this one. See [`docs/repo-onboarding.md`](repo-onboarding.md) for how this repo actually intends to solve fast repo setup instead.
