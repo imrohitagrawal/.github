@@ -166,24 +166,44 @@ jobs:
       # something to silently widen as a side effect of fixing the step underneath it.
       #
       # WP4/F9: direct CLI, not returntocorp/semgrep-action@v1 or semgrep/semgrep-action
-      # - both confirmed archived/deprecated 2026-08-12 via `gh api repos/<owner>/semgrep-action`.
+      # - both confirmed deprecated/archived 2026-08-12 via `gh api repos/<owner>/semgrep-action`.
       # returntocorp/semgrep-action's own description reads "This project is deprecated.
-      # Use https://github.com/semgrep/semgrep instead" (last pushed 2024-01-22); its
-      # named successor, semgrep/semgrep-action, is itself `archived:true` and its
-      # description points back to "returntocorp/semgrep" - a dead circular pointer, not
-      # a real successor. Neither wrapper Action is safe to depend on. Using the
-      # semgrep/semgrep Docker image directly (pinned by digest, same no-floating-tag
-      # rule WP2 applied to every GitHub Action here) avoids both, and avoids a bare
-      # `pip install semgrep` hitting PEP 668's "externally managed environment" block
-      # on the runner's system Python - this step runs before "Set up Python" below,
-      # which is itself gated on has_python and would skip entirely for a Node-only
-      # repo with a semgrep config.
+      # Use https://github.com/semgrep/semgrep instead"; the same-vintage semgrep/semgrep-action
+      # is `archived:true` and its description points to "returntocorp/semgrep" - which
+      # itself resolves (GitHub's org-rename redirect, returntocorp -> semgrep) to that
+      # same live, actively-maintained semgrep/semgrep CLI repo (pushed within the last
+      # day as of this check), not to a dead or circular target. Both wrapper Actions
+      # converge on the one thing that's actually still maintained: the CLI itself -
+      # which is exactly what this step now runs directly, so neither wrapper is worth
+      # depending on. Using the semgrep/semgrep Docker image directly (pinned by digest,
+      # same no-floating-tag rule WP2 applied to every GitHub Action here) avoids both
+      # wrappers, and avoids a bare `pip install semgrep` hitting PEP 668's "externally
+      # managed environment" block on the runner's system Python - this step runs before
+      # "Set up Python" below, which is itself gated on has_python and would skip
+      # entirely for a Node-only repo with a semgrep config.
       #
       # WP4/F21: the `if:` above already requires one of the four config paths below
       # to exist before this step runs at all, so the config-source expression can
       # never fall through to "none matched" - the old 5th branch (a default ruleset)
       # was dead code by construction, removed here rather than left for the next
       # person to puzzle over.
+      #
+      # WP4 review fix: `semgrep ci` (what returntocorp/semgrep-action ran) only reports
+      # findings introduced by the current PR/MR diff; plain `semgrep scan` has no such
+      # awareness and blocks on every finding in the whole current tree every time. But
+      # `semgrep ci` also flatly refuses a custom `--config` ("Not supported in 'ci'
+      # mode" - confirmed via `semgrep ci --help` against this pinned image), which this
+      # step needs to run the repo's own config instead of a Semgrep-App-managed policy.
+      # `--baseline-commit` on `semgrep scan` restores the diff-aware behavior without
+      # giving up `--config`: verified locally that a pre-existing finding untouched by
+      # the PR's commits is correctly excluded (exit 0) while a finding newly introduced
+      # by the PR's commits is still caught (exit 1). Every real caller of this reusable
+      # workflow is pull_request-triggered (templates/caller-pr-quality.yml), and a
+      # reusable workflow's jobs share the same run/event payload as the caller, so
+      # `github.event.pull_request.base.sha` is populated here exactly as it would be in
+      # a plain (non-reusable) job on that same trigger. `fetch-depth: 0` on the checkout
+      # step above already gives the container's bind-mounted .git the full history
+      # `--baseline-commit` needs to diff against.
       - name: Semgrep OSS security scan
         if: hashFiles('semgrep.yml', '.semgrep.yml', '.semgrep/', 'semgrep/') != ''
         env:
@@ -192,10 +212,15 @@ jobs:
                  hashFiles('.semgrep.yml') != '' && '.semgrep.yml' ||
                  hashFiles('.semgrep/') != '' && '.semgrep/' ||
                  'semgrep/' }}
+          SEMGREP_BASELINE_COMMIT: ${{ github.event.pull_request.base.sha }}
         run: |
+          BASELINE_ARGS=()
+          if [ -n "$SEMGREP_BASELINE_COMMIT" ]; then
+            BASELINE_ARGS=(--baseline-commit "$SEMGREP_BASELINE_COMMIT")
+          fi
           docker run --rm -v "$PWD:/src" -w /src \
-            semgrep/semgrep@sha256:2e01772afbd85789464594ca86e22896748cbc78a5d9751dfc947a40b214ccc2 \
-            semgrep scan --error --config "$SEMGREP_CONFIG"
+            semgrep/semgrep@sha256:a8298d1c09c84b9a0bbc75ec915e37023fc4657360b6dbfa645261d2353a366c \
+            semgrep scan --error --config "$SEMGREP_CONFIG" "${BASELINE_ARGS[@]}"
 
       # ---------- Detect language and dispatch ----------
       # WP6: file checks below are relative to python-directory/node-directory
