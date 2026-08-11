@@ -30,11 +30,11 @@ Global GitHub defaults, reusable CI gates, and Codex review guidance for `@imroh
 
 - **Public repositories on GitHub Free:** branch protection / rulesets can require status checks. The hard gate works fully.
 - **Private repositories on GitHub Free:** GitHub Actions still runs and fails visibly. However, **hard merge blocking through branch protection rulesets may require GitHub Pro / Team / Enterprise**. On the free plan, the gate is process-enforced: never merge red PRs, use the PR template checklist, use Codex review, use CODEOWNERS.
-- **Codex itself is free with ChatGPT Plus.** Connecting GitHub repos to Codex is a one-time UI step per repo.
+- **Codex review requires a paid ChatGPT Plus subscription (or higher).** It's bundled into that plan rather than billed separately, but it is not free on its own. Connecting GitHub repos to Codex is a one-time UI step per repo.
 
 ## Repo-onboarding
 
-Every target repo needs a 5-minute setup. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps.
+Onboarding a target repo is roughly 10 hand-run steps across two separate products — GitHub Settings and the ChatGPT UI — not a 5-minute task. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps. A future minimal template repo and retrofit script (tracked as WP10) are intended to shrink this considerably; until then, budget real time for the manual steps.
 
 ## Layout
 

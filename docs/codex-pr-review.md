@@ -2,6 +2,8 @@
 
 Codex (from OpenAI / ChatGPT) is the **intelligent reviewer** in this setup. It runs on top of the deterministic `quality-gate` workflow and provides reasoning that static analysis cannot — design feedback, security implications, missing tests, judgment calls.
 
+**This requires a paid ChatGPT Plus subscription (or higher).** There is no free tier of Codex review — factor this in before counting on it as part of a repo's setup.
+
 This document covers how to set up Codex for a target repo and how to use it day-to-day.
 
 ## Prerequisites
