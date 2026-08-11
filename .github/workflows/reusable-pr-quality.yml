@@ -94,8 +94,10 @@ name: PR Quality Gate (reusable)
 # '^lint:' etc. - see "Detect project layout" below), this workflow invokes that
 # target as ITS OWN step, with ITS OWN severity - blocking, exactly like the native
 # npm/Python step for that same check - and the native step for that SAME check is
-# skipped (its `if:` now also requires the matching `has_makefile_<check> == 'false'`).
-# That makes there be exactly ONE severity decision per check (lint, typecheck, test),
+# skipped (its `if:` now also requires the matching `has_makefile_<check> == 'false'`,
+# AND - see the STACK-DIRECTORY-AWARE SKIP bullet below, a review fix, not part of the
+# original design - that stack's own directory input to be '.'). That makes there be
+# exactly ONE severity decision per check (lint, typecheck, test) for a root-only repo,
 # never two that can silently disagree about which one's exit code the job actually
 # obeys.
 #   - `make ci` remains a FALLBACK ONLY, for a Makefile with a `ci:` target but NONE
@@ -110,9 +112,46 @@ name: PR Quality Gate (reusable)
 #     wins. This is a deliberate, documented gap for that one shape of repo, distinct
 #     from repos with discrete targets (citevyn's own Makefile already has separate
 #     lint/typecheck/test targets), which get the real fix described above.
-#   - Security/audit steps (bandit, npm audit, pip-audit) are unaffected - they keep
-#     running independently of Makefile detection entirely, per-stack-directory as
-#     WP5 already wired them, regardless of which Makefile path is in play.
+#   - KNOWN, ACCEPTED RESIDUAL (review-caught, not the original design intent): the
+#     `make ci` fallback's `if:` (see "Run make ci" below) requires ALL THREE
+#     has_makefile_<check> outputs to be 'false' before it runs. A Makefile with, say,
+#     only a discrete `lint:` target plus a `ci:` recipe that does more than
+#     `lint typecheck test` (a bundled build/artifact-check step with no discrete-target
+#     equivalent) would have that extra work silently never invoked - `make lint`
+#     covers the lint part, nothing runs the rest of `ci:`. citevyn's own `ci:` target
+#     is exactly `lint typecheck test`, the literal union of the three discrete
+#     targets (verified against its Makefile), so this doesn't lose any coverage for
+#     the one real consumer today - but it's a real gap for a differently-shaped repo,
+#     and this workflow has no way to inspect what a `ci:` recipe actually does to
+#     detect that case from the outside. Left undetected/unfixed rather than guessed
+#     at, same posture as the opaque-`make ci`-only residual above.
+#   - STACK-DIRECTORY-AWARE SKIP (review fix, not part of the original design):
+#     root-only Makefile detection (has_makefile_<check>) cannot tell WHICH stack a
+#     discrete target actually covers - citevyn's own `test:` target, for example, runs
+#     only `cd backend && uv run pytest`, never touching `frontend/`. Skipping the
+#     native step for BOTH stacks whenever a root Makefile target merely exists (the
+#     original WP7 design) would silently drop frontend test coverage entirely the
+#     moment citevyn repins with `node-directory: frontend` - exactly the "an
+#     explicitly-declared stack silently gets no lint/typecheck/test... while the gate
+#     still reports green" failure mode this file exists to prevent (see the WP6
+#     hardening comment below). Fixed by only trusting the root-Makefile skip when
+#     that stack's OWN directory input is '.' (the stack lives at repo root, the same
+#     place the Makefile does) - see each native step's `if:` below. For a genuine
+#     split-directory monorepo (any stack directory != '.'), the native step now runs
+#     IN ADDITION to the discrete Makefile target for that check - reintroducing
+#     F6/F7's double-run collision for that narrower case, deliberately: a redundant
+#     double-run is a far smaller defect than a silent coverage hole, and root-only
+#     repos (today's only real shape, until a consumer sets a non-'.' directory input)
+#     are unaffected either way.
+#   - Security/audit steps (bandit, npm audit, pip-audit) are unaffected by WHICH
+#     Makefile path (discrete targets vs. `make ci` fallback vs. neither) is in play -
+#     they keep running per-stack-directory as WP5 already wired them, based on
+#     has_python/has_package_json alone. That independence is from Makefile-path
+#     *selection* only, not from the job's own step-to-step control flow: like every
+#     step in this job, they still carry GitHub's implicit `success()` AND, so an
+#     earlier failing step (native or Makefile-driven) still skips them outright -
+#     that's the separate, already-recorded WP6-residual immediately below, not
+#     something this bullet claims to have solved.
 #
 # WP6-residual evaluation (deferred, not silently dropped): WP6's own review left a
 # recorded residual - GitHub Actions implicitly ANDs `success()` onto any step whose
@@ -426,7 +465,9 @@ jobs:
       # for a subdirectory-only stack is real but rarer than the
       # root-Makefile-orchestrating-subdirectories shape citevyn already uses (its
       # root Makefile's `ci:` target itself cds into backend/). A `makefile-directory`
-      # input remains out of scope here, same as before WP7.
+      # input remains out of scope here, same as before WP7. (This is a different
+      # question from which STACK a root Makefile target actually covers once it
+      # exists - see the STACK-DIRECTORY-AWARE SKIP note above `jobs:` for that.)
       #
       # WP7 (F6/F7, target architecture point 3): discrete targets get invoked
       # individually, each with this workflow's own blocking severity - see the WP7
@@ -479,25 +520,43 @@ jobs:
         working-directory: ${{ inputs.node-directory }}
         run: npm ci
 
-      # WP7: skipped when the root Makefile has its own discrete `lint:` target -
-      # `make lint` above runs instead, so this check gets exactly one severity
-      # decision, not two that can disagree (F6/F7).
+      # WP7: skipped when the root Makefile has its own discrete `lint:` target AND
+      # node-directory is '.' - `make lint` above runs instead, so this check gets
+      # exactly one severity decision, not two that can disagree (F6/F7). If
+      # node-directory points at a subdirectory, the root Makefile's target can't be
+      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
+      # `jobs:`), so this step runs alongside `make lint` rather than being skipped.
       - name: npm lint
-        if: steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.has_makefile_lint == 'false'
+        if: >-
+          steps.detect.outputs.has_package_json == 'true' &&
+          (steps.detect.outputs.has_makefile_lint == 'false' || inputs.node-directory != '.')
         working-directory: ${{ inputs.node-directory }}
         run: npm run lint --if-present
 
-      # WP7: skipped when the root Makefile has its own discrete `typecheck:` target -
-      # `make typecheck` above runs instead (F6/F7).
+      # WP7: skipped when the root Makefile has its own discrete `typecheck:` target
+      # AND node-directory is '.' - `make typecheck` above runs instead (F6/F7). If
+      # node-directory points at a subdirectory, the root Makefile's target can't be
+      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
+      # `jobs:`), so this step runs alongside `make typecheck` rather than skipping.
       - name: npm typecheck
-        if: steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.has_makefile_typecheck == 'false'
+        if: >-
+          steps.detect.outputs.has_package_json == 'true' &&
+          (steps.detect.outputs.has_makefile_typecheck == 'false' || inputs.node-directory != '.')
         working-directory: ${{ inputs.node-directory }}
         run: npm run typecheck --if-present
 
-      # WP7: skipped when the root Makefile has its own discrete `test:` target -
-      # `make test` above runs instead (F6/F7).
+      # WP7: skipped when the root Makefile has its own discrete `test:` target AND
+      # node-directory is '.' - `make test` above runs instead (F6/F7). If
+      # node-directory points at a subdirectory (e.g. citevyn's `frontend/`), the root
+      # Makefile's `test:` target can't be trusted to cover it - citevyn's own `test:`
+      # runs only `cd backend && uv run pytest`, never touching `frontend/` - so
+      # skipping this step in that case would silently drop frontend test coverage
+      # entirely while the gate stayed green (review fix - see STACK-DIRECTORY-AWARE
+      # SKIP above `jobs:`). This step runs alongside `make test` instead.
       - name: npm test
-        if: steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.has_makefile_test == 'false'
+        if: >-
+          steps.detect.outputs.has_package_json == 'true' &&
+          (steps.detect.outputs.has_makefile_test == 'false' || inputs.node-directory != '.')
         working-directory: ${{ inputs.node-directory }}
         run: npm test --if-present
 
@@ -601,10 +660,15 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f pyproject.toml ]; then pip install -e . || true; fi
 
-      # WP7: skipped when the root Makefile has its own discrete `lint:` target -
-      # `make lint` above runs instead (F6/F7).
+      # WP7: skipped when the root Makefile has its own discrete `lint:` target AND
+      # python-directory is '.' - `make lint` above runs instead (F6/F7). If
+      # python-directory points at a subdirectory, the root Makefile's target can't be
+      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
+      # `jobs:`), so this step runs alongside `make lint` rather than being skipped.
       - name: ruff check
-        if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_makefile_lint == 'false'
+        if: >-
+          steps.detect.outputs.has_python == 'true' &&
+          (steps.detect.outputs.has_makefile_lint == 'false' || inputs.python-directory != '.')
         working-directory: ${{ inputs.python-directory }}
         run: ruff check .
 
@@ -618,12 +682,15 @@ jobs:
       # hashFiles patterns are always relative to GITHUB_WORKSPACE (they ignore
       # working-directory), so python-directory is spliced into each pattern via
       # format() to check for tests inside the declared Python subdirectory.
-      # WP7: skipped when the root Makefile has its own discrete `test:` target -
-      # `make test` above runs instead (F6/F7).
+      # WP7: skipped when the root Makefile has its own discrete `test:` target AND
+      # python-directory is '.' - `make test` above runs instead (F6/F7). If
+      # python-directory points at a subdirectory, the root Makefile's target can't be
+      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
+      # `jobs:`), so this step runs alongside `make test` rather than being skipped.
       - name: pytest
         if: >-
           steps.detect.outputs.has_python == 'true' &&
-          steps.detect.outputs.has_makefile_test == 'false' &&
+          (steps.detect.outputs.has_makefile_test == 'false' || inputs.python-directory != '.') &&
           hashFiles(
             format('{0}/tests/**', inputs.python-directory),
             format('{0}/test/**', inputs.python-directory),
@@ -633,10 +700,16 @@ jobs:
         working-directory: ${{ inputs.python-directory }}
         run: pytest -q || { c=$?; [ $c -eq 5 ] && echo "::warning::pytest collected no tests" || exit $c; }
 
-      # WP7: skipped when the root Makefile has its own discrete `typecheck:` target -
-      # `make typecheck` above runs instead (F6/F7).
+      # WP7: skipped when the root Makefile has its own discrete `typecheck:` target
+      # AND python-directory is '.' - `make typecheck` above runs instead (F6/F7). If
+      # python-directory points at a subdirectory, the root Makefile's target can't be
+      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
+      # `jobs:`), so this step runs alongside `make typecheck` rather than skipping.
       - name: mypy
-        if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_mypy_config == 'true' && steps.detect.outputs.has_makefile_typecheck == 'false'
+        if: >-
+          steps.detect.outputs.has_python == 'true' &&
+          steps.detect.outputs.has_mypy_config == 'true' &&
+          (steps.detect.outputs.has_makefile_typecheck == 'false' || inputs.python-directory != '.')
         working-directory: ${{ inputs.python-directory }}
         run: mypy .
 
