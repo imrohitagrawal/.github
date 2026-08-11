@@ -99,9 +99,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # ---------- WP6 hardening: fail closed on bad directory inputs ----------
       # `default: '.'` only kicks in when an input is OMITTED. A caller that computes
@@ -137,8 +138,14 @@ jobs:
           fi
 
       # ---------- Always run: secret scan ----------
+      # v3, not v2: v2.3.9 runs on the node20 Actions runtime, which GitHub is
+      # actively deprecating — Node 24 became the runner default on 2026-06-02
+      # (node20 actions keep running only with ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true,
+      # not set here) and node20 is removed from GitHub-hosted runners entirely on
+      # 2026-09-16, breaking this step outright. v3.0.0 is a drop-in node24 rebuild
+      # with, per its release notes, "no changes to inputs, outputs, or behavior".
       - name: Detect secrets with gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
@@ -151,7 +158,7 @@ jobs:
       # decision with real noise, not a comment fix.
       - name: Semgrep OSS security scan
         if: hashFiles('semgrep.yml', '.semgrep.yml', '.semgrep/', 'semgrep/') != ''
-        uses: returntocorp/semgrep-action@v1
+        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
         with:
           config: >-
             ${{ hashFiles('semgrep.yml') != '' && 'semgrep.yml' ||
@@ -188,16 +195,16 @@ jobs:
       # ---------- Tooling install (needed by Path 1 — make ci) ----------
       - name: Install uv
         if: steps.detect.outputs.uses_uv == 'true'
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
           # No `python-version` here: setup-uv@v3 does not accept one (added in v5)
           # and Actions ignores unknown inputs with only a warning. Python comes from
           # the setup-python step below, for uv and non-uv alike.
-          version: "latest"
+          version: "0.12.3"
 
       - name: Install Node.js
         if: steps.detect.outputs.has_package_json == 'true' || steps.detect.outputs.uses_node == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
 
@@ -209,7 +216,7 @@ jobs:
       # binary. Every Python repo gets exactly one interpreter, here, at 3.12.
       - name: Set up Python
         if: steps.detect.outputs.has_python == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -267,11 +274,17 @@ jobs:
       # step above and silently undid the v3 commit titled "Pin Python 3.12 in reusable
       # quality gate". Python is set up once, above, at 3.12.
 
+      # These versions are pinned by hand, not by a manifest file, so
+      # dependabot.yml (github-actions ecosystem only, by design — see its own
+      # header comment) cannot bump them: there is no automated update path.
+      # That's an accepted tradeoff of pinning over floating "latest", not an
+      # oversight — but it means pip-audit and bandit here can go stale against
+      # newly-disclosed CVEs/rules until someone manually revisits this list.
       - name: pip install tools
         if: steps.detect.outputs.has_python == 'true'
         run: |
           python -m pip install --upgrade pip
-          pip install ruff pytest mypy bandit pip-audit
+          pip install ruff==0.16.2 pytest==9.1.1 mypy==2.3.0 bandit==1.9.4 pip-audit==2.10.1
 
       - name: pip install -r requirements.txt
         if: steps.detect.outputs.has_python == 'true'
