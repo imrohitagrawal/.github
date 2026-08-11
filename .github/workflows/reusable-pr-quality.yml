@@ -161,21 +161,41 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ---------- Cross-language security patterns ----------
-      # NOT "always run", despite what this comment said for three tags: the `if`
-      # requires the repo to ship its own semgrep config, which also makes the
-      # default ruleset in the `config:` expression below unreachable. Left as-is
-      # rather than silently widened - turning semgrep on for every repo is a real
-      # decision with real noise, not a comment fix.
+      # NOT "always run": the `if` requires the repo to ship its own semgrep config -
+      # turning semgrep on for every repo is a real decision with real noise, not
+      # something to silently widen as a side effect of fixing the step underneath it.
+      #
+      # WP4/F9: direct CLI, not returntocorp/semgrep-action@v1 or semgrep/semgrep-action
+      # - both confirmed archived/deprecated 2026-08-12 via `gh api repos/<owner>/semgrep-action`.
+      # returntocorp/semgrep-action's own description reads "This project is deprecated.
+      # Use https://github.com/semgrep/semgrep instead" (last pushed 2024-01-22); its
+      # named successor, semgrep/semgrep-action, is itself `archived:true` and its
+      # description points back to "returntocorp/semgrep" - a dead circular pointer, not
+      # a real successor. Neither wrapper Action is safe to depend on. Using the
+      # semgrep/semgrep Docker image directly (pinned by digest, same no-floating-tag
+      # rule WP2 applied to every GitHub Action here) avoids both, and avoids a bare
+      # `pip install semgrep` hitting PEP 668's "externally managed environment" block
+      # on the runner's system Python - this step runs before "Set up Python" below,
+      # which is itself gated on has_python and would skip entirely for a Node-only
+      # repo with a semgrep config.
+      #
+      # WP4/F21: the `if:` above already requires one of the four config paths below
+      # to exist before this step runs at all, so the config-source expression can
+      # never fall through to "none matched" - the old 5th branch (a default ruleset)
+      # was dead code by construction, removed here rather than left for the next
+      # person to puzzle over.
       - name: Semgrep OSS security scan
         if: hashFiles('semgrep.yml', '.semgrep.yml', '.semgrep/', 'semgrep/') != ''
-        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        with:
-          config: >-
+        env:
+          SEMGREP_CONFIG: >-
             ${{ hashFiles('semgrep.yml') != '' && 'semgrep.yml' ||
                  hashFiles('.semgrep.yml') != '' && '.semgrep.yml' ||
                  hashFiles('.semgrep/') != '' && '.semgrep/' ||
-                 hashFiles('semgrep/') != '' && 'semgrep/' ||
-                 'p/security-audit p/secrets p/owasp-top-ten' }}
+                 'semgrep/' }}
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src \
+            semgrep/semgrep@sha256:2e01772afbd85789464594ca86e22896748cbc78a5d9751dfc947a40b214ccc2 \
+            semgrep scan --error --config "$SEMGREP_CONFIG"
 
       # ---------- Detect language and dispatch ----------
       # WP6: file checks below are relative to python-directory/node-directory
