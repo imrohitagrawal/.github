@@ -433,10 +433,33 @@ jobs:
       # audit-ci's own exit code doesn't need extra output-sniffing to tell those apart
       # for this step's purposes, because both cases are "this needs a human" once the
       # repo has opted in to blocking.
+      # Gated on has_package_json too, matching every other stack-conditional pair in
+      # this file (the advisory sibling above, and both bandit/pip-audit blocking
+      # steps). A stray audit-ci.json with no package.json alongside it (leftover
+      # frontend, mid-migration monorepo) would otherwise run this step anyway and hit
+      # audit-ci's own hard `resolvePackageManagerType` error for a missing lockfile -
+      # an opaque failure instead of a clean skip. has_package_json being true also
+      # guarantees `npm ci` above already found a real lockfile (npm ci itself requires
+      # one), so audit-ci's package-manager auto-detection has something to find.
+      # --high is passed explicitly on the CLI, not left to the repo's config file.
+      # Verified against audit-ci 7.1.0's source (lib/model.ts mapVulnerabilityLevelInput
+      # / lib/config.ts): if a config sets none of low/moderate/high/critical, the
+      # resulting severity map is all-false and Model.process() silently drops every
+      # advisory - the step exits 0 and prints "Passed npm security audit." even against
+      # a real, unignored critical vulnerability. Reproduced locally: an audit-ci.json
+      # containing only an allowlist (no severity field - a config a maintainer could
+      # easily write by copying just the allowlist section of the README) let a pinned
+      # critical lodash CVE through with EXIT=0. --high forces a floor of "high or
+      # higher" regardless of what the config omits, matching this step's own name;
+      # it does NOT loosen a stricter repo choice, because audit-ci's level-selection
+      # picks the strictest of low/moderate/high/critical that's set to true from any
+      # source (CLI or config) - reproduced locally too: the same fixture with --high
+      # added correctly failed (EXIT=1, "Failed security audit due to critical, high
+      # vulnerabilities").
       - name: npm audit (high+, audit-ci) — blocking
-        if: steps.detect.outputs.has_audit_ci_config == 'true'
+        if: steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.has_audit_ci_config == 'true'
         working-directory: ${{ inputs.node-directory }}
-        run: npx --yes audit-ci@7.1.0 --config "${{ steps.detect.outputs.audit_ci_config_path }}"
+        run: npx --yes audit-ci@7.1.0 --config "${{ steps.detect.outputs.audit_ci_config_path }}" --high
 
       # ---------- Path 3: Python ----------
       # NOTE: no `setup-python` here. A second one used to sit at this point pinned to
@@ -533,6 +556,13 @@ jobs:
       # declaring its existing findings reviewed-and-accepted — anything new fails. No
       # swallow: same crash-vs-finding exit-code split as the advisory step (0/1 = ran,
       # >= 2 = bandit itself failed).
+      # Note: a malformed `.bandit-baseline.json` is NOT one of those exit-code paths.
+      # Verified against bandit 1.9.4's source (bandit/core/manager.py,
+      # populate_baseline()): on invalid JSON, bandit logs a warning and continues with
+      # an empty baseline rather than raising - so every pre-existing finding then reads
+      # as "new" and this step fails at exit 1 (over-blocks), not exit >= 2. That's a
+      # fail-safe outcome, not a security gap, but it means a corrupted baseline reads
+      # in the log as ordinary new findings, not as "your baseline file is broken."
       - name: bandit (baseline) — blocking
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_bandit_baseline == 'true'
         working-directory: ${{ inputs.python-directory }}
