@@ -138,8 +138,14 @@ jobs:
           fi
 
       # ---------- Always run: secret scan ----------
+      # v3, not v2: v2.3.9 runs on the node20 Actions runtime, which GitHub is
+      # actively deprecating — Node 24 became the runner default on 2026-06-02
+      # (node20 actions keep running only with ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true,
+      # not set here) and node20 is removed from GitHub-hosted runners entirely on
+      # 2026-09-16, breaking this step outright. v3.0.0 is a drop-in node24 rebuild
+      # with, per its release notes, "no changes to inputs, outputs, or behavior".
       - name: Detect secrets with gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
@@ -268,6 +274,12 @@ jobs:
       # step above and silently undid the v3 commit titled "Pin Python 3.12 in reusable
       # quality gate". Python is set up once, above, at 3.12.
 
+      # These versions are pinned by hand, not by a manifest file, so
+      # dependabot.yml (github-actions ecosystem only, by design — see its own
+      # header comment) cannot bump them: there is no automated update path.
+      # That's an accepted tradeoff of pinning over floating "latest", not an
+      # oversight — but it means pip-audit and bandit here can go stale against
+      # newly-disclosed CVEs/rules until someone manually revisits this list.
       - name: pip install tools
         if: steps.detect.outputs.has_python == 'true'
         run: |
