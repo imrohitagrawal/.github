@@ -1,0 +1,20 @@
+# Dependabot config for THIS repo (dot-github) only — not the consumer-facing
+# template at templates/dependabot.yml, which is copied into target repos and
+# covers their npm/pip ecosystems too.
+#
+# This repo has no npm or pip project of its own (see AGENTS.md) — just GitHub
+# Actions workflows — so github-actions is the only relevant ecosystem here.
+# WP2 (SHA-pinning workstream): keeps the actions pinned above current without
+# an unreviewed floating tag. WP1 should not re-create this file — it already
+# exists as of WP2.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]
