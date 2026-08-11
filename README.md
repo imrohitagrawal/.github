@@ -34,7 +34,7 @@ Global GitHub defaults, reusable CI gates, and Codex review guidance for `@imroh
 
 ## Repo-onboarding
 
-Onboarding a target repo is roughly 10 hand-run steps across two separate products — GitHub Settings and the ChatGPT UI — not a 5-minute task. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps. A future minimal template repo and retrofit script (tracked as WP10) are intended to shrink this considerably; until then, budget real time for the manual steps.
+Onboarding a target repo is roughly 10 hand-run steps spanning local Git/repository file changes, GitHub itself (branch protection lives in repo Settings), and the ChatGPT UI for Codex — not a 5-minute task. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps. A future minimal template repo and retrofit script (a planned follow-up, not yet built or tracked anywhere in this repo) are intended to shrink this considerably; until then, budget real time for the manual steps.
 
 ## Layout
 

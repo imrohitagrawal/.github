@@ -14,7 +14,7 @@ Branch protection and rulesets work fully on public repos under GitHub Free. Set
    - ☑ **Require a pull request before merging**
    - ☑ **Require status checks to pass**
    - ☑ **Require branches to be up to date before merging** (if available)
-   - ☑ **Require conversation resolution before merging**
+   - ☑ **Require conversation resolution before merging** — recommended here, but not yet applied even on `citevyn` (the best-adopted repo): `gh api repos/imrohitagrawal/citevyn/branches/main/protection --jq '.required_conversation_resolution'` currently returns `{"enabled":false}`. This checklist is the target state, not a claim that every repo already matches it — turn it on as you go through this list.
    - ☑ **Do not allow force pushes**
    - ☑ **Do not allow deletions**
 6. In **Status checks that are required**, search for `quality-gate` and select it.
@@ -37,7 +37,7 @@ If you see the option greyed out or the ruleset cannot be enforced, fall back to
 1. **Never merge a red PR.** Make it a hard rule for yourself and any contributors.
 2. **Use the PR template checklist** (`.github/PULL_REQUEST_TEMPLATE.md`) — it forces the author to acknowledge risk review.
 3. **Use Codex review** — `@codex review` comments give a second opinion before merge.
-4. **Use CODEOWNERS for routing, not as a required-review gate.** CODEOWNERS is useful for directing review requests to the right person as a repo grows. For a genuinely solo repo, do **not** pair it with branch protection's "Require review from Code Owners" setting: GitHub does not let a PR author approve their own PR, so that setting deadlocks every PR the owner opens (there's no second code owner to approve it) unless you also add an explicit bypass list — at which point the requirement is ceremonial. Leave code-owner review unrequired until a second maintainer genuinely exists.
+4. **Use CODEOWNERS for routing, not as a required-review gate.** CODEOWNERS is useful for directing review requests to the right person as a repo grows. For a genuinely solo repo, do **not** pair it with branch protection's "Require review from Code Owners" setting: a sole code owner can't approve their own PR, so with **admin bypass disabled** (`enforce_admins: true`) that setting deadlocks every PR the owner opens. With GitHub's **default** admin bypass left on, the owner can still merge without the approval — so instead of a deadlock, the requirement just does nothing; either way it provides no real protection for a solo repo. (Explicit bypass-actor lists, the other way around a deadlock, are only configurable on organization-owned repos — not available here per the account-type note below.) Leave code-owner review unrequired until a second maintainer genuinely exists.
 5. **Use rulesets that don't require paid features.** Some rules (force-push prevention, deletion prevention, conversation resolution) are free even on private repos.
 
 ## Verification
