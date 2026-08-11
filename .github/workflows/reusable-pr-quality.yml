@@ -32,6 +32,10 @@ name: PR Quality Gate (reusable)
 # exactly today's root-only behavior - this is additive and backward
 # compatible for v3/v4-pinned consumers, who don't get this file at all
 # until they repin, and for any v5+ consumer that doesn't set the inputs.
+# An explicitly-passed value that's empty or doesn't exist fails the job
+# fast (see "Validate directory inputs" below) instead of silently
+# disabling that stack while the gate still reports green - default:
+# only applies when the input is omitted, not when it's passed as ''.
 #
 # Single job, deliberately (see the "Aggregator" note below `jobs:`) - one
 # job name is already the one stable required-status-check name branch
@@ -44,14 +48,18 @@ on:
         description: >-
           Directory (relative to repo root) containing the Python project
           (pyproject.toml/requirements.txt/setup.py, mypy config, tests).
-          Defaults to '.' - today's root-only behavior.
+          Defaults to '.' - today's root-only behavior. If explicitly set,
+          must reference a directory that exists - the gate fails fast
+          rather than silently skipping the Python stack.
         required: false
         type: string
         default: '.'
       node-directory:
         description: >-
           Directory (relative to repo root) containing the Node project
-          (package.json). Defaults to '.' - today's root-only behavior.
+          (package.json). Defaults to '.' - today's root-only behavior. If
+          explicitly set, must reference a directory that exists - the gate
+          fails fast rather than silently skipping the Node stack.
         required: false
         type: string
         default: '.'
@@ -94,6 +102,39 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ---------- WP6 hardening: fail closed on bad directory inputs ----------
+      # `default: '.'` only kicks in when an input is OMITTED. A caller that computes
+      # python-directory/node-directory dynamically and passes '' gets that empty
+      # string verbatim, which then flows into "$DIR/pyproject.toml" etc. as
+      # "/pyproject.toml" - a filesystem-root check that quietly finds nothing. A
+      # misspelled or moved directory has the same failure shape: the stack it names
+      # is just treated as absent. Either way the gate can still report green while an
+      # explicitly-declared stack silently gets no lint/typecheck/test/build/audit -
+      # exactly the "check quietly finds nothing, job still reports green" failure
+      # mode WP6 exists to fix. Reject both cases here, before any other step relies
+      # on these values, rather than failing open.
+      - name: Validate directory inputs
+        env:
+          PYTHON_DIR: ${{ inputs.python-directory }}
+          NODE_DIR: ${{ inputs.node-directory }}
+        run: |
+          if [ -z "$PYTHON_DIR" ]; then
+            echo "::error::python-directory was explicitly set to an empty string. Omit the input (or pass '.') to use the repo root."
+            exit 1
+          fi
+          if [ -z "$NODE_DIR" ]; then
+            echo "::error::node-directory was explicitly set to an empty string. Omit the input (or pass '.') to use the repo root."
+            exit 1
+          fi
+          if [ ! -d "$PYTHON_DIR" ]; then
+            echo "::error::python-directory '$PYTHON_DIR' does not exist in this repository."
+            exit 1
+          fi
+          if [ ! -d "$NODE_DIR" ]; then
+            echo "::error::node-directory '$NODE_DIR' does not exist in this repository."
+            exit 1
+          fi
 
       # ---------- Always run: secret scan ----------
       - name: Detect secrets with gitleaks
