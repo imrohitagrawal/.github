@@ -143,11 +143,18 @@ jobs:
       # not set here) and node20 is removed from GitHub-hosted runners entirely on
       # 2026-09-16, breaking this step outright. v3.0.0 is a drop-in node24 rebuild
       # with, per its release notes, "no changes to inputs, outputs, or behavior".
-      # No GITLEAKS_LICENSE: this is the OSS gitleaks scan, which doesn't need one.
-      # A license env var only matters for gitleaks' paid/Enterprise features, and
-      # even if this repo had one, workflow_call callers don't get secrets unless
-      # they set `secrets: inherit` (neither templates/caller-pr-quality.yml nor any
-      # live caller does) - so a var referenced here would always evaluate empty.
+      # No GITLEAKS_LICENSE: gitleaks-action only requires one for
+      # Organization-owned callers (it looks up the calling repo owner's
+      # GitHub account type and hard-fails with process.exit(1) if the var
+      # is missing there) - not for OSS-vs-paid gitleaks features generically.
+      # Every caller of this workflow lives under the personal account
+      # @imrohitagrawal (this repo's own scope - see README.md), which
+      # gitleaks-action exempts from the license check, so no caller needs
+      # one today. Note for the future: if this workflow is ever reused by
+      # an organization-owned caller, that caller must set `secrets: inherit`
+      # (workflow_call callers get no secrets otherwise) AND this step must
+      # re-add `GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}` -
+      # otherwise gitleaks-action fails every PR for that org.
       - name: Detect secrets with gitleaks
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
