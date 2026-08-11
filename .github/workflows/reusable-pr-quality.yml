@@ -4,7 +4,16 @@ name: PR Quality Gate (reusable)
 # Performs deterministic checks: lint, type check, tests, security scans (bandit, semgrep,
 # gitleaks), and dependency audit. Adapts to whatever language/tooling the target repo has.
 #
-# Severity rule: any failure here fails the check. Branch protection / rulesets in the
+# Severity rule: lint, type check, tests and build FAIL the check. Dependency and
+# static-security scanners (npm audit, bandit, pip-audit) are ADVISORY and each says
+# so at its own step, with the condition that would make it blocking. Nothing here is
+# silently advisory: a gate whose header promises more than its steps deliver is a
+# badge, not a gate.
+#
+# History: until 2026-08-11 npm lint/typecheck/test/build all carried
+# `continue-on-error: true` and pytest/bandit/pip-audit were `|| echo ...`, so for a
+# Node repo NOTHING but gitleaks could fail this gate while the header said
+# "any failure here fails the check". Branch protection / rulesets in the
 # consuming repo decide whether a failed check blocks merge. On GitHub Free for public
 # repos, branch protection can require this check. On GitHub Free for private repos,
 # branch protection / rulesets may be limited — see docs/branch-protection.md.
@@ -97,33 +106,32 @@ jobs:
       - name: npm lint
         if: steps.detect.outputs.has_package_json == 'true'
         run: npm run lint --if-present
-        continue-on-error: true
 
       - name: npm typecheck
         if: steps.detect.outputs.has_package_json == 'true'
         run: npm run typecheck --if-present
-        continue-on-error: true
 
       - name: npm test
         if: steps.detect.outputs.has_package_json == 'true'
         run: npm test --if-present
-        continue-on-error: true
 
       - name: npm build
         if: steps.detect.outputs.has_package_json == 'true'
         run: npm run build --if-present
-        continue-on-error: true
 
-      - name: npm audit (high+)
+      # ADVISORY. A transitive dev-dependency advisory with no fix available would
+      # otherwise block every unrelated PR in the repo. BLOCKING WHEN: the repo adds an
+      # `audit-ci` config or an allowlist, so a finding means an unreviewed one — then
+      # drop the `|| true`.
+      - name: npm audit (high+) — advisory
         if: steps.detect.outputs.has_package_json == 'true'
-        run: npm audit --audit-level=high || true
+        run: npm audit --audit-level=high || echo "::warning::npm audit found high+ advisories (advisory step, not blocking)"
 
       # ---------- Path 3: Python ----------
-      - name: Set up Python
-        if: steps.detect.outputs.has_python == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # NOTE: no `setup-python` here. A second one used to sit at this point pinned to
+      # '3.11', running unconditionally for any Python repo — so it overrode the 3.12
+      # step above and silently undid the v3 commit titled "Pin Python 3.12 in reusable
+      # quality gate". Python is set up once, above, at 3.12.
 
       - name: pip install tools
         if: steps.detect.outputs.has_python == 'true'
@@ -141,21 +149,29 @@ jobs:
         if: steps.detect.outputs.has_python == 'true'
         run: ruff check .
 
+      # BLOCKING. This previously read `pytest -q || echo "pytest failed"`, which
+      # swallowed the exit code AND printed a line that reads like a failure report
+      # while the job went green. A red test suite must fail the gate.
       - name: pytest
         if: steps.detect.outputs.has_python == 'true' && hashFiles('tests/', 'test/', 'pytest.ini', 'pyproject.toml') != ''
-        run: pytest -q || echo "pytest failed"
+        run: pytest -q
 
       - name: mypy
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_mypy_config == 'true'
         run: mypy .
 
-      - name: bandit
+      # ADVISORY. Bandit's false-positive rate on application code is high enough that
+      # blocking on a bare run would train people to ignore it. BLOCKING WHEN: the repo
+      # ships a `.bandit` / `bandit.yaml` baseline, so a finding is a NEW finding.
+      - name: bandit — advisory
         if: steps.detect.outputs.has_python == 'true'
-        run: bandit -r . -x tests,test,node_modules,.venv,venv || echo "bandit findings reported"
+        run: bandit -r . -x tests,test,node_modules,.venv,venv || echo "::warning::bandit reported findings (advisory step, not blocking)"
 
-      - name: pip-audit
+      # ADVISORY, same reasoning as npm audit. BLOCKING WHEN: the repo pins an
+      # ignore-list, so a finding means an unreviewed one.
+      - name: pip-audit — advisory
         if: steps.detect.outputs.has_python == 'true'
-        run: pip-audit || echo "pip-audit findings reported"
+        run: pip-audit || echo "::warning::pip-audit reported findings (advisory step, not blocking)"
 
       # ---------- Fallback: nothing matched ----------
       - name: No recognized project files
