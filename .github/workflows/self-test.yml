@@ -16,7 +16,9 @@ name: Self-test (reusable-pr-quality.yml)
 # wouldn't exist yet for an in-flight PR and wouldn't validate what's
 # actually changing.
 #
-# Eight jobs:
+# Nine jobs (the six workflow_call scenario jobs below, two assert jobs
+# that invert the two deliberately-failing scenarios' results, and the
+# final aggregate job):
 #   - node-only, python-only, monorepo (WP6 python-directory/node-directory
 #     inputs), no-manifest (this repo's own root - genuinely has no
 #     Makefile/package.json/pyproject.toml/requirements.txt/setup.py today,
@@ -101,18 +103,24 @@ name: Self-test (reusable-pr-quality.yml)
 # negative fixture and its assert job exist to catch, then reverted.
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/reusable-pr-quality.yml'
-      - '.github/workflows/self-test.yml'
-      - '.github/self-test-fixtures/**'
+  pull_request: {}
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/reusable-pr-quality.yml'
-      - '.github/workflows/self-test.yml'
-      - '.github/self-test-fixtures/**'
   workflow_dispatch: {}
+# No `paths:` filter (round-1 fix, real Codex finding): a required
+# status check whose triggering workflow has a `paths:` filter never gets
+# CREATED at all for a PR that doesn't touch those paths - GitHub then
+# shows that required check as permanently "Expected"/pending, and the
+# merge button never unblocks, for e.g. a docs-only or CODEOWNERS-only PR
+# that never touches .github/workflows/**. This also directly matches
+# section 5 of the governing plan (audit-and-redesign-fancy-cascade.md):
+# "self-test + first-party lint (new, WP1) ... Blocking condition: Always"
+# - a path-filtered trigger would silently contradict that. Runs on every
+# PR and every push to main instead; the fixture-scenario jobs are small
+# and fast (minimal, dependency-free fixtures - see
+# .github/self-test-fixtures/), so the cost of running unconditionally is
+# low and the alternative (a required check that can hang forever) is not
+# an acceptable trade either way.
 
 permissions:
   contents: read
@@ -159,6 +167,27 @@ jobs:
     with:
       python-directory: .github/self-test-fixtures/python-test-failure
 
+  # KNOWN LIMITATION, argued down not fully closed (real Codex finding,
+  # round-1 review): this job (and assert-python-negative-fixture-blocks
+  # below) can only observe node-lint-violation's overall JOB result via
+  # `needs.<job>.result` - "failure" doesn't, by itself, prove the FAILURE
+  # was specifically the lint step (checkout/npm-ci/audit or an unrelated
+  # step failing first would look identical from here; see the "STRUCTURAL
+  # LIMITATION" comment above `on:`). This is mitigated, not eliminated, by
+  # fixture design: node-lint-violation/package.json declares ONLY a
+  # "lint" script (no typecheck/test/build scripts for `--if-present` to
+  # even find), has zero dependencies (npm ci / npm audit both verified
+  # locally to succeed cleanly against it), and has no semgrep config (that
+  # step's `if:` doesn't even fire) - so of every step the reusable
+  # workflow could run against this fixture, "npm lint" is the only one
+  # that plausibly fails, verified by having actually run every other step
+  # against this exact fixture locally (see the WP1 commit message). That
+  # is fixture-design evidence, not a step-level guarantee - a genuinely
+  # unrelated future breakage (e.g. actions/checkout itself failing) would
+  # still be misread by this assertion as "the lint gate is working". A
+  # full fix needs `outputs:` on reusable-pr-quality.yml itself, out of
+  # this package's additive-only scope - flagged as a follow-up, not
+  # silently left as if it were fully solved.
   assert-negative-fixture-blocks:
     name: assert node-lint-violation actually blocked
     needs: [node-lint-violation]
@@ -178,6 +207,14 @@ jobs:
           fi
           echo "Confirmed: the reusable workflow correctly failed the job on a real lint violation."
 
+  # Same known limitation and same fixture-design mitigation as
+  # assert-negative-fixture-blocks above: python-test-failure/requirements.txt
+  # is empty (pip install succeeds trivially), has no mypy.ini
+  # (has_mypy_config is false, so mypy doesn't run at all for it), and its
+  # only .py file lives under tests/ (bandit's own -x excludes it, so
+  # bandit scans nothing and can't fail), leaving pytest as the only step
+  # that plausibly fails - verified by actually running every other step
+  # against this exact fixture locally (see the WP1 commit message).
   assert-python-negative-fixture-blocks:
     name: assert python-test-failure actually blocked
     needs: [python-test-failure]

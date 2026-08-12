@@ -2,10 +2,10 @@
   "name": "self-test-node-only",
   "private": true,
   "version": "1.0.0",
-  "description": "WP1 self-test fixture: Node-only project (no Python manifest), calls the reusable workflow with default python-directory/node-directory so it exercises the root-detect Node path against a real, checked-in package.json rather than an asserted result.",
+  "description": "WP1 self-test fixture: Node-only project (no Python manifest), calls the reusable workflow with default python-directory/node-directory so it exercises the root-detect Node path against a real, checked-in package.json rather than an asserted result. lint/typecheck run real syntax/parse checks (node --check / requiring package.json), not print-only stubs, per round-1 review feedback that a script which only echoes 'ok' doesn't actually exercise anything.",
   "scripts": {
-    "lint": "node -e \"console.log('fixture lint: ok')\"",
-    "typecheck": "node -e \"console.log('fixture typecheck: ok')\"",
+    "lint": "node --check smoke.test.js",
+    "typecheck": "node -e \"require('./package.json')\"",
     "test": "node --test",
     "build": "node -e \"console.log('fixture build: ok')\""
   }

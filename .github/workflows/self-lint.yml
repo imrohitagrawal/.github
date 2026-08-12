@@ -29,21 +29,20 @@ name: Self-lint (first-party quality)
 # findings and nothing else got swept up in the suppression net as of this
 # commit).
 #
-# KNOWN, ACCEPTED IMPRECISION (caught during WP1's own Phase-3 adversarial
-# review, not fixed): `-ignore` is a regular expression matched against the
-# diagnostic MESSAGE TEXT across every scanned file, with no file- or
-# line-scoping (confirmed via `actionlint -h`). It does not pin these two
-# suppressions to their two specific, originally-intended locations - any
-# future SC2015 or SC2129 finding introduced anywhere in the four scanned
-# files would also be silently swallowed, not just the two pre-existing
-# ones this comment describes. actionlint has no more precise ignore
-# mechanism (e.g. no inline `# shellcheck disable=SC2015` support scoped
-# to just that line without editing the target file itself, which would
-# mean touching reusable-pr-quality.yml - out of this package's additive-
-# only scope). Accepted as a real, recorded trade-off rather than silently
-# left for a reviewer to rediscover: re-run the "with vs. without -ignore"
-# diff (see the WP1 commit message) whenever this file changes, to catch a
-# new finding hiding behind the same two codes.
+# FIXED, not just documented (round-1 review fix, real Codex finding):
+# `-ignore` is a regular expression matched against the diagnostic MESSAGE
+# TEXT, with no file- or line-scoping (confirmed via `actionlint -h`) - an
+# earlier version of this step ran all four files through one suppressed
+# command, which would have ALSO silently swallowed a new SC2015/SC2129 in
+# self-test.yml/self-lint.yml themselves, not just the two originally-
+# intended pre-existing findings. Fixed below by running actionlint twice:
+# once for reusable-pr-quality.yml/caller-pr-quality.yml WITH the two
+# suppressions (still imprecise WITHIN those two files - a new SC2015 in
+# either one would still be swallowed too - but that residual imprecision
+# is now scoped to exactly the two files it was ever verified against, not
+# the four this repo's own new workflow files never should have shared it
+# with), and once for this repo's own self-test.yml/self-lint.yml with NO
+# suppressions at all.
 # rhysd/actionlint's official Docker image bundles shellcheck already
 # (verified locally: `docker run --rm --entrypoint sh rhysd/actionlint ...
 # which shellcheck` -> /usr/local/bin/shellcheck), pinned by digest - same
@@ -71,30 +70,19 @@ name: Self-lint (first-party quality)
 # than left as consumer-facing template text (see its own header).
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/reusable-pr-quality.yml'
-      - '.github/workflows/self-test.yml'
-      - '.github/workflows/self-lint.yml'
-      - 'templates/caller-pr-quality.yml'
-      - 'docs/**.md'
-      - 'README.md'
-      - 'templates/AGENTS.md'
-      - 'AGENTS.md'
-      - '.markdownlint.jsonc'
+  pull_request: {}
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/reusable-pr-quality.yml'
-      - '.github/workflows/self-test.yml'
-      - '.github/workflows/self-lint.yml'
-      - 'templates/caller-pr-quality.yml'
-      - 'docs/**.md'
-      - 'README.md'
-      - 'templates/AGENTS.md'
-      - 'AGENTS.md'
-      - '.markdownlint.jsonc'
   workflow_dispatch: {}
+# No `paths:` filter (round-1 fix, real Codex finding, same reasoning as
+# self-test.yml's identical fix): a required status check whose triggering
+# workflow has a `paths:` filter never gets CREATED for a PR that doesn't
+# touch those paths - GitHub then shows it as permanently "Expected" and
+# the merge button never unblocks. Matches the governing plan's section 5
+# ("self-test + first-party lint (new, WP1) ... Blocking condition:
+# Always"). Runs on every PR/push to main instead; this job is a single
+# docker run + one npx call, cheap enough that running it unconditionally
+# isn't a real cost.
 
 permissions:
   contents: read
@@ -115,7 +103,18 @@ jobs:
 
       # actionlint + shellcheck (bundled in the image) on this repo's own
       # workflow files. Digest-pinned, matching WP2's convention.
-      - name: "actionlint (+ shellcheck on embedded run: blocks)"
+      #
+      # TWO invocations, not one (round-1 fix, real Codex finding): the
+      # -ignore flags below are message-text regexes with no file/line
+      # scoping (see the header comment above), so running every file
+      # through one suppressed command would ALSO silently swallow a new
+      # SC2015/SC2129 in self-test.yml/self-lint.yml themselves - the exact
+      # files most likely to change, and least reviewed for this kind of
+      # residual so far. Splitting means the suppression only ever applies
+      # to the two pre-existing files it was actually verified against;
+      # this repo's own two new workflow files are scanned with zero
+      # suppressions.
+      - name: "actionlint (+ shellcheck): reusable-pr-quality.yml, caller-pr-quality.yml"
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
             rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
@@ -123,7 +122,13 @@ jobs:
             -ignore 'SC2015' \
             -ignore 'SC2129' \
             .github/workflows/reusable-pr-quality.yml \
-            templates/caller-pr-quality.yml \
+            templates/caller-pr-quality.yml
+
+      - name: "actionlint (+ shellcheck): self-test.yml, self-lint.yml (no suppressions)"
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color \
             .github/workflows/self-test.yml \
             .github/workflows/self-lint.yml
 
