@@ -592,28 +592,39 @@ jobs:
             ${{ inputs.python-directory }}/pyproject.toml
             ${{ inputs.python-directory }}/requirements*.txt
 
-      # H8: `cache:` (a documented, zero-extra-infra option on this exact
-      # action) is gated on has_package_json specifically, NOT this step's own
-      # broader `if:` above - the step also runs when only uses_node is true
-      # (Makefile-only Node detection, no package.json at all), and enabling a
-      # cache there would point cache-dependency-path at a lockfile that
-      # doesn't exist, which actions/setup-node treats as an error (unlike
-      # setup-uv's glob, which has a documented graceful empty case - verified
-      # against actions/setup-node's own behavior notes, not assumed the same).
-      # H1: cache TYPE matches the detected package manager (npm/pnpm/yarn -
-      # actions/setup-node supports all three natively), and
-      # cache-dependency-path points at exactly that manager's own lockfile,
-      # not a multi-pattern guess across all three.
+      # H8 review fix (CRITICAL, confirmed independently by 3 reviewers):
+      # `cache: pnpm`/`cache: yarn` here USED to hard-crash "Install Node.js"
+      # for every real pnpm consumer - actions/setup-node's cache resolution
+      # shells out to `pnpm store path --silent`/`yarn cache dir` SYNCHRONOUSLY
+      # inside this same step (verified against its pinned source,
+      # cache-utils.ts), and pnpm isn't on PATH yet at this point - "Enable
+      # Corepack" (which provides the pnpm/yarn shims) runs AFTER this step,
+      # and stock GitHub-hosted ubuntu-latest runners don't preinstall pnpm
+      # (verified against actions/runner-images' own Ubuntu2404-Readme.md -
+      # yarn 1.22.22 ships preinstalled, pnpm does not). `io.which()` throws on
+      # a missing binary rather than degrading to a cache-miss - reproduced
+      # directly with the real @actions/exec package. Fixed by restricting
+      # `cache:` to npm only, which never needs Corepack (npm ships with
+      # Node.js itself) - genuinely gated on has_package_json specifically,
+      # not this step's own broader `if:` above (the step also runs when only
+      # uses_node is true, no package.json at all, where there's no lockfile
+      # for cache-dependency-path to point at).
+      # KNOWN, ACCEPTED RESIDUAL: pnpm/yarn consumers get no dependency
+      # caching yet (H8's original goal for those two managers) - restoring it
+      # correctly needs either reordering "Enable Corepack" before this step
+      # (which itself needs Node.js already on PATH, i.e. splitting this step
+      # in two) or a manual actions/cache step keyed on the resolved store
+      # path AFTER Corepack runs - real design work deferred rather than
+      # rushed back in under this fix's own review-response scope. npm - the
+      # only manager most consumers use today (verified: every current
+      # self-test fixture except node-pnpm-only) - keeps the real caching win.
       - name: Install Node.js
         if: steps.detect.outputs.has_package_json == 'true' || steps.detect.outputs.uses_node == 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
-          cache: ${{ steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.node_package_manager || '' }}
-          cache-dependency-path: >-
-            ${{ steps.detect.outputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.node-directory) ||
-                 steps.detect.outputs.node_package_manager == 'yarn' && format('{0}/yarn.lock', inputs.node-directory) ||
-                 format('{0}/package-lock.json', inputs.node-directory) }}
+          cache: ${{ steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.node_package_manager == 'npm' && 'npm' || '' }}
+          cache-dependency-path: ${{ format('{0}/package-lock.json', inputs.node-directory) }}
 
       # H1: only needed for pnpm/yarn - npm ships with Node itself. If
       # `packageManager` is set, Corepack pins the exact declared version on
