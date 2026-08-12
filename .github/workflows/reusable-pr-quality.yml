@@ -560,6 +560,19 @@ jobs:
             echo "has_mypy_config=false" >> "$GITHUB_OUTPUT"
           fi
           echo "uses_uv=$([ -f Makefile ] && grep -qE '(^|[^a-zA-Z])uv([^a-zA-Z]|$)' Makefile && echo true || ([ -f "$PYTHON_DIR/pyproject.toml" ] && [ -f "$PYTHON_DIR/uv.lock" ] && echo true || echo false))" >> "$GITHUB_OUTPUT"
+          # H8 review fix (HIGH, confirmed): uses_uv can be true via the bare
+          # Makefile-grep path above with NONE of uv.lock/pyproject.toml/
+          # requirements*.txt existing in python-directory (e.g. a Makefile
+          # comment or a variable named uv_version, before any of those files
+          # exist). setup-uv's cache-dependency-glob THROWS when it's non-empty
+          # but matches zero files (verified against its pinned source,
+          # restore-cache.ts's computeKeys - contrary to this file's own
+          # earlier comment claiming a graceful degrade, which conflated that
+          # with the action's genuinely-graceful EMPTY-STRING-glob case, a
+          # different code path). Gates enable-cache on at least one of those
+          # three files actually existing, so caching is only ever attempted
+          # when there's real content for the glob to match.
+          echo "has_uv_cache_target=$([ -f "$PYTHON_DIR/uv.lock" ] || [ -f "$PYTHON_DIR/pyproject.toml" ] || ls "$PYTHON_DIR"/requirements*.txt >/dev/null 2>&1 && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "uses_node=$([ -f "$NODE_DIR/.nvmrc" ] || [ -f "$NODE_DIR/.node-version" ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
           # WP5: audit-ci has no default config filename of its own (its CLI always
@@ -590,15 +603,27 @@ jobs:
       # ---------- Tooling install (needed by Path 1 — make ci) ----------
       # H8: enable-cache/cache-dependency-glob are documented, zero-extra-infra
       # options on this exact action (verified against astral-sh/setup-uv's own
-      # README, v3.2.4) - not previously used anywhere in this file. Multiple
-      # glob lines (the action's own documented multi-pattern syntax) because
-      # uses_uv can be true via the Makefile-grep path without uv.lock
-      # necessarily existing - an empty-string glob is the action's own
-      # documented "never invalidate" behavior, not a hard failure, so an
-      # unmatched pattern here degrades to a less-precise cache key, not an
-      # error. Globs are relative to the repo root per the action's own docs,
-      # so python-directory is spliced in via format() to scope correctly for
-      # a monorepo, same pattern this file already uses for hashFiles below.
+      # README, v3.2.4) - not previously used anywhere in this file.
+      # H8 review fix (HIGH, confirmed): an earlier version of this comment
+      # claimed an unmatched glob "degrades to a less-precise cache key, not
+      # an error" - false. Verified against setup-uv's pinned source
+      # (restore-cache.ts computeKeys): a non-empty glob that matches ZERO
+      # files THROWS ("No file in <cwd> matched to [...]"), failing the step
+      # outright - the action's genuinely-graceful case is an EXPLICIT EMPTY
+      # STRING glob (its documented "never invalidate the cache" behavior), a
+      # different code path this file was conflating with the zero-match
+      # case. Since uses_uv can be true via the bare Makefile-grep path with
+      # none of uv.lock/pyproject.toml/requirements*.txt existing yet,
+      # enable-cache/cache-dependency-glob are now gated on
+      # has_uv_cache_target (at least one of those three files actually
+      # existing in python-directory) so caching is only attempted when
+      # there's real content for the glob to match - falls back to no caching
+      # (today's pre-H8 behavior) rather than failing the job outright.
+      # Multiple glob lines (the action's own documented multi-pattern
+      # syntax); globs are relative to the repo root per the action's own
+      # docs, so python-directory is spliced in via format() to scope
+      # correctly for a monorepo, same pattern this file already uses for
+      # hashFiles below.
       - name: Install uv
         if: steps.detect.outputs.uses_uv == 'true'
         uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
@@ -607,7 +632,7 @@ jobs:
           # and Actions ignores unknown inputs with only a warning. Python comes from
           # the setup-python step below, for uv and non-uv alike.
           version: "0.12.3"
-          enable-cache: true
+          enable-cache: ${{ steps.detect.outputs.has_uv_cache_target }}
           cache-dependency-glob: |
             ${{ inputs.python-directory }}/uv.lock
             ${{ inputs.python-directory }}/pyproject.toml
