@@ -54,8 +54,8 @@ set -euo pipefail
 # --- imrohitagrawal/.github's current pinned tag, per its versioning policy
 # (SHA + human-readable tag comment, not the mutable tag alone). Bump both
 # together when a new tag ships.
-PINNED_SHA="8f4ee577b8ce0ecab419b2d3f0ade5fddf54333c"
-PINNED_TAG="v5"
+PINNED_SHA="6bd9eec68b0fa7db8b60de89ee541666893febaa"
+PINNED_TAG="v6"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_DIR="$SCRIPT_DIR/../templates"
