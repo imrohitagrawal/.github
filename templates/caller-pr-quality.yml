@@ -15,4 +15,19 @@ concurrency:
 jobs:
   quality-gate:
     if: github.event.pull_request.draft == false
-    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@v4
+    # Pinned by commit SHA, not the mutable `vN` tag, per this repo's own
+    # versioning policy (see docs/repo-onboarding.md and the redesign plan's
+    # section 4) -- the same SHA-pin treatment applied to third-party actions
+    # inside the reusable workflow, applied one level up to the reusable
+    # workflow reference itself. The `# v6` comment is for human readability
+    # only; it is not consumed by GitHub. To bump: resolve the new tag's
+    # commit (`git -C <clone of imrohitagrawal/.github> rev-parse vN^{commit}`)
+    # and replace both the SHA and the comment together -- and check
+    # scripts/retrofit-quality-gate.sh's PINNED_SHA/PINNED_TAG and
+    # repo-template's own caller workflow at the same time, so this file
+    # (the one docs/repo-onboarding.md tells people to copy by hand) doesn't
+    # silently drift behind the others the way it did from v4 to v6.
+    #
+    # For a monorepo, add `python-directory`/`node-directory` inputs here
+    # (see docs/repo-onboarding.md) -- both default to '.', the repo root.
+    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@6bd9eec68b0fa7db8b60de89ee541666893febaa # v6
