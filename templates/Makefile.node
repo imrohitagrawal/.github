@@ -121,10 +121,23 @@ else \
 fi
 endef
 
+# The yarn arm picks its flag at RUNTIME, by major version (round-4 fix, P1).
+# `--immutable` is Yarn Berry's; Yarn Classic accepts and SILENTLY IGNORES it,
+# so a stale lockfile is quietly rewritten and the install "succeeds" -
+# measured against real yarn 1.22.22, exit 0 with "success Saved lockfile",
+# versus `--frozen-lockfile` which exits 1 with "Your lockfile needs to be
+# updated" and leaves the file alone. Detection is at runtime because Corepack
+# chooses its own yarn major when a repo has only a lockfile and no
+# `packageManager` field. Mirrors the reusable workflow's native path exactly.
 install:
 	@case "$(PKG_MANAGER)" in \
 	pnpm) pnpm install --frozen-lockfile ;; \
-	yarn) yarn install --immutable ;; \
+	yarn) \
+		if yarn --version 2>/dev/null | grep -q '^1\.'; then \
+			yarn install --frozen-lockfile; \
+		else \
+			yarn install --immutable; \
+		fi ;; \
 	*) npm ci ;; \
 	esac
 

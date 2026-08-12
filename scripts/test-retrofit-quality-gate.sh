@@ -438,6 +438,70 @@ makefile_pm_case "T13e unknown packageManager falls back to npm" npm \
 	'{"name":"x","version":"1.0.0","packageManager":"bun@1.0.0"}' ""
 
 # ============================================================================
+# T14: the copied Makefile REALLY enforces yarn lockfile integrity (round-4,
+# P1 from Codex review on PR #21, independently found by that round's SRE lens).
+#
+# T13 only inspects `make -n` output, which cannot catch a runtime flag that
+# the tool accepts and ignores - and that was exactly the bug: `--immutable` is
+# a Yarn Berry flag, and Yarn Classic accepts it, ignores it, and rewrites the
+# lockfile. Measured against real yarn 1.22.22:
+#   yarn install --immutable       -> exit 0, "success Saved lockfile", rewritten
+#   yarn install --frozen-lockfile -> exit 1, "Your lockfile needs to be updated"
+#
+# This case asserts the PROPERTY, not the flag: whatever yarn ends up on PATH,
+# a package.json whose dependency is absent from yarn.lock must FAIL `make
+# install` and must not rewrite the lockfile. That statement is true for Yarn
+# Classic (--frozen-lockfile) and Berry (--immutable) alike, so this test does
+# not need updating when the runner's default yarn major changes.
+#
+# WHICH CHANGE TURNS THIS RED: revert templates/Makefile.node's install target
+# to an unconditional `yarn install --immutable`. Verified.
+#
+# Yarn source: the runner's preinstalled yarn if present (ubuntu-latest ships
+# 1.22.22), else a pinned `npx yarn@1.22.22` shim - so this runs everywhere
+# rather than silently skipping on a machine without yarn.
+yarn_shim_dir=""
+if command -v yarn >/dev/null 2>&1; then
+	echo "T14: using preinstalled yarn $(yarn --version 2>/dev/null)"
+else
+	yarn_shim_dir="$(mktemp -d)"
+	track "$yarn_shim_dir"
+	printf '#!/bin/sh\nexec npx --yes yarn@1.22.22 "$@"\n' >"$yarn_shim_dir/yarn"
+	chmod +x "$yarn_shim_dir/yarn"
+	echo "T14: no yarn on PATH; using a pinned npx yarn@1.22.22 shim"
+fi
+
+CURRENT_TEST="T14 (yarn lockfile integrity is really enforced)"
+echo "$CURRENT_TEST"
+repo="$(new_scratch_repo)"
+track "$repo"
+# A declared dependency that the lockfile does not cover: the minimal input
+# every yarn major must refuse under an immutable-install flag.
+printf '{"name":"y","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}' >"$repo/package.json"
+printf '# yarn lockfile v1\n' >"$repo/yarn.lock"
+git -C "$repo" add -A && git -C "$repo" commit -q -m "yarn manifest with a stale lockfile"
+run_script "$repo"
+assert_exit_code "T14: retrofit succeeded" 0 "$SCRIPT_EXIT"
+
+lock_before="$(cksum <"$repo/yarn.lock")"
+set +e
+if [ -n "$yarn_shim_dir" ]; then
+	YARN_INSTALL_OUTPUT="$(cd "$repo" && PATH="$yarn_shim_dir:$PATH" make install 2>&1)"
+else
+	YARN_INSTALL_OUTPUT="$(cd "$repo" && make install 2>&1)"
+fi
+YARN_INSTALL_EXIT=$?
+set -e
+lock_after="$(cksum <"$repo/yarn.lock")"
+
+if [ "$YARN_INSTALL_EXIT" -ne 0 ]; then
+	pass "T14: stale yarn.lock fails make install (exit $YARN_INSTALL_EXIT)"
+else
+	fail "T14: stale yarn.lock did NOT fail make install -- yarn accepted an install flag it ignores, so this repo's lockfile integrity is not enforced at all. Output: $(printf '%s' "$YARN_INSTALL_OUTPUT" | tail -3 | tr '\n' ' ')"
+fi
+assert_eq "T14: yarn.lock was not rewritten" "$lock_before" "$lock_after"
+
+# ============================================================================
 
 echo ""
 echo "============================================================"

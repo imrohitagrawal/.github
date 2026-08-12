@@ -822,9 +822,37 @@ jobs:
         env:
           NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
         run: |
+          # ROUND-4 FIX (P1, Codex review on PR #21; independently found by
+          # this round's own SRE lens): `--immutable` is a Yarn BERRY flag.
+          # Yarn Classic does not reject it - it ACCEPTS and SILENTLY IGNORES
+          # it, which is worse than failing. Measured against real
+          # yarn 1.22.22 with a deliberately stale lockfile:
+          #   yarn install --immutable        -> exit 0, "success Saved
+          #                                      lockfile", yarn.lock REWRITTEN
+          #   yarn install --frozen-lockfile  -> exit 1, "Your lockfile needs
+          #                                      to be updated", lockfile
+          #                                      untouched, fails at
+          #                                      "Resolving packages"
+          # So every yarn-classic consumer had NO lockfile-integrity
+          # enforcement at all, while npm (`npm ci`) and pnpm
+          # (`--frozen-lockfile`) both had it - a PR could silently change
+          # dependency resolution and this gate would not notice. Note the
+          # Codex comment described the symptom as an install FAILURE; the
+          # real behaviour is the opposite, and the silent version is the
+          # reason this mattered.
+          # Corepack picks its own "known good" yarn when a repo has only a
+          # lockfile and no `packageManager` field, so which major shows up
+          # is not knowable from the repo's files - detect it at runtime
+          # rather than assume.
           case "$NODE_PACKAGE_MANAGER" in
           pnpm) pnpm install --frozen-lockfile ;;
-          yarn) yarn install --immutable ;;
+          yarn)
+            if yarn --version 2>/dev/null | grep -q '^1\.'; then
+              yarn install --frozen-lockfile
+            else
+              yarn install --immutable
+            fi
+            ;;
           *) npm ci ;;
           esac
 
