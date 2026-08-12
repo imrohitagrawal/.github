@@ -665,26 +665,41 @@ jobs:
             # this way raised ModuleNotFoundError for both packages, then failed 6
             # real tests with them missing.
             #
-            # Round-1 Codex review caught two real bugs in the first version of this
-            # fix: (1) a grep-based `[dependency-groups]`/`dev` check both misses
-            # valid TOML (compact `dev=[...]`, quoted `"dev"`, indented, spaced
-            # `[ dependency-groups ]`) and false-positives on an unrelated table also
-            # containing a `dev` key elsewhere in the file - fixed by parsing with
-            # `tomllib` (stdlib since Python 3.11, and this step runs after "Set up
-            # Python" pins 3.12) instead, verified against 9 real-world TOML variants
-            # including both failure modes above; (2) `uv` is only installed earlier
-            # in this job when `uses_uv` is true (a Makefile mentions "uv", or
-            # pyproject.toml+uv.lock both exist) - a dependency-groups repo with
-            # neither would silently skip the dev-group install (`|| true` hid the
-            # "uv: command not found" failure). Fixed by installing uv here directly
-            # via `pip install uv` if it isn't already on PATH, rather than touching
-            # the shared "Install uv" step's conditions (which also serve the
-            # unrelated make-ci/Path-1 case) - verified this produces a working `uv`
-            # binary with no active venv, same as the runner's actual environment.
+            # Round-1 Codex review caught a grep-based `[dependency-groups]`/`dev`
+            # check both missing valid TOML (compact `dev=[...]`, quoted `"dev"`,
+            # indented, spaced `[ dependency-groups ]`) and false-positiving on an
+            # unrelated table also containing a `dev` key elsewhere in the file -
+            # fixed by parsing with `tomllib` (stdlib since Python 3.11, and this
+            # step runs after "Set up Python" pins 3.12) instead, verified against 9
+            # real-world TOML variants including both failure modes.
+            #
+            # Round-1's first attempt used `uv pip install --group dev`, which
+            # round-2 Codex review caught as broken in the ACTUAL runner
+            # environment: `actions/setup-python` puts Python on PATH but creates no
+            # virtualenv, and `uv pip install` requires one (or `--system`) - every
+            # earlier local verification of this fix had (accidentally) run inside
+            # an activated venv, masking the failure; reproduced directly outside
+            # one: "error: No virtual environment found". Simplified instead: `pip`
+            # itself has supported `--group` natively since 25.1 (PEP 735), and this
+            # step's very first line already upgrades pip - so `uv` isn't needed
+            # here at all. Verified: plain `pip install --group dev -e .` (no venv,
+            # no uv) installs cleanly against citevyn's real pyproject.toml and both
+            # pytest_asyncio/fakeredis import afterward.
+            #
+            # KNOWN, ACCEPTED RESIDUAL (round-2 Codex findings, not fixed here -
+            # narrowed deliberately rather than chasing full PEP 735 generality for
+            # a hypothetical repo shape no current consumer has): a group name that
+            # needs PEP 503 normalization to match `dev` (e.g. `Dev`) is not
+            # detected; a malformed pyproject.toml is silently treated as "no dev
+            # group" (falls back to the pre-existing `pip install -e .` behavior,
+            # same swallow-tolerant convention as the rest of this step, not a new
+            # regression); a PEP 735 project with dependency groups but no
+            # installable package (`-e .` itself would fail) isn't handled
+            # specially. None of these apply to citevyn, the one real consumer this
+            # fix targets today - revisit if a future consumer's shape needs them.
             HAS_DEV_GROUP=$(python3 -c "import tomllib; d = tomllib.load(open('pyproject.toml', 'rb')); print('true' if 'dev' in d.get('dependency-groups', {}) else 'false')" 2>/dev/null || echo false)
             if [ "$HAS_DEV_GROUP" = "true" ]; then
-              command -v uv >/dev/null 2>&1 || pip install --quiet uv
-              uv pip install --group dev -e . || true
+              pip install --group dev -e . || true
             else
               pip install -e . || true
             fi
@@ -874,13 +889,27 @@ jobs:
       # and the "Found N known vulnerabilities" line present; a clean environment
       # exits 0; the editable package present and nothing else wrong exits 0 without
       # ever being resolved against PyPI.
+      #
+      # KNOWN, ACCEPTED RESIDUAL (round-2 Codex finding, not fixed here):
+      # `--exclude-editable` excludes every editable install in the environment, not
+      # only this repo's own package - a consumer with an ADDITIONAL editable
+      # third-party/VCS dependency would have that one skipped too, not just
+      # audited-and-clean. Narrowing to exclude only the current project specifically
+      # would need reading back the distribution name pip assigned it, adding real
+      # complexity for a shape no current consumer (citevyn included) has - revisit
+      # if one does.
       - name: pip-audit — advisory
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_pip_audit_ignore == 'false'
         working-directory: ${{ inputs.python-directory }}
         run: |
-          set +e
+          # Round-2 Codex review: the snapshot itself must be generated OUTSIDE
+          # `set +e` - otherwise a `pip freeze` failure (or an empty/partial file)
+          # silently produces a clean-looking audit of nothing, not a crash. Only
+          # `pip-audit` itself (whose real finding/crash distinction is handled
+          # below) runs with `set +e`.
           PIP_AUDIT_SNAPSHOT="$(mktemp)"
           pip freeze --all --exclude-editable > "$PIP_AUDIT_SNAPSHOT"
+          set +e
           OUTPUT=$(pip-audit --strict -r "$PIP_AUDIT_SNAPSHOT" 2>&1)
           PIP_AUDIT_EXIT=$?
           rm -f "$PIP_AUDIT_SNAPSHOT"
@@ -918,9 +947,11 @@ jobs:
             [ -z "$line" ] && continue
             IGNORE_ARGS+=(--ignore-vuln "$line")
           done < .pip-audit-ignore
-          set +e
+          # Round-2 Codex review: snapshot generation stays outside `set +e` - see
+          # the advisory step's comment above for why.
           PIP_AUDIT_SNAPSHOT="$(mktemp)"
           pip freeze --all --exclude-editable > "$PIP_AUDIT_SNAPSHOT"
+          set +e
           OUTPUT=$(pip-audit --strict -r "$PIP_AUDIT_SNAPSHOT" "${IGNORE_ARGS[@]}" 2>&1)
           PIP_AUDIT_EXIT=$?
           rm -f "$PIP_AUDIT_SNAPSHOT"
