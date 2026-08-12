@@ -17,7 +17,10 @@ name: Self-lint (first-party quality)
 # - added beyond the stated minimum so a bug in the self-test/self-lint
 # machinery itself doesn't go unchecked forever.
 #
-# -ignore 'SC2015' -ignore 'SC2129': two pre-existing shellcheck notes in
+# -ignore 'SC2015' -ignore 'SC2129': two distinct pre-existing shellcheck
+# CODES (SC2015 appearing once, SC2129 appearing twice - three diagnostic
+# lines total, round-2 review fix for an earlier "ONLY two findings"
+# phrasing that was ambiguous about occurrences vs. codes) in
 # reusable-pr-quality.yml's "Detect project layout" step, present before
 # WP1 and already reviewed twice (first flagged when the step was written,
 # reconfirmed unchanged - only line numbers shifted - during WP6's own
@@ -26,7 +29,7 @@ name: Self-lint (first-party quality)
 # and already recorded, not something WP1 is hiding - see the WP1 commit
 # message for the exact `actionlint` output this suppression was checked
 # against (with vs. without -ignore, confirming these are the ONLY two
-# findings and nothing else got swept up in the suppression net as of this
+# CODES and nothing else got swept up in the suppression net as of this
 # commit).
 #
 # FIXED, not just documented (round-1 review fix, real Codex finding):
@@ -80,13 +83,16 @@ on:
 # touch those paths - GitHub then shows it as permanently "Expected" and
 # the merge button never unblocks. Matches the governing plan's section 5
 # ("self-test + first-party lint (new, WP1) ... Blocking condition:
-# Always"). Runs on every PR/push to main instead; this job is a single
-# docker run + one npx call - two commands, not a build - though actual
-# per-run cost hasn't been measured against this org's real PR volume
-# (round-2 review nitpick: don't assert a number that was never checked).
-# Either way the alternative (a required check that can hang forever for
-# a PR that never touches the paths it used to filter on) isn't
-# acceptable regardless of what that cost turns out to be.
+# Always"). Runs on every PR/push to main instead; this job is two docker
+# run invocations (the actionlint split, see below) plus one npx call -
+# three commands, not a build (round-2 review fix: an earlier version of
+# this comment said "a single docker run", stale since round-1 split
+# actionlint into two invocations) - though actual per-run cost hasn't
+# been measured against this org's real PR volume (round-2 review
+# nitpick: don't assert a number that was never checked). Either way the
+# alternative (a required check that can hang forever for a PR that never
+# touches the paths it used to filter on) isn't acceptable regardless of
+# what that cost turns out to be.
 
 permissions:
   contents: read

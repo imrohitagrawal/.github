@@ -11,8 +11,10 @@ quality gate (`.github/workflows/reusable-pr-quality.yml`) and templates
 (dogfooding, F1/F25) made this repo consume its own product instead of only
 shipping it: it has no `package.json`/`pyproject.toml` of its own — its
 content IS GitHub Actions YAML and Markdown docs, not an npm/pip project — so
-its **hard gate** is two first-party workflows, not the npm/Python native
-paths this repo's reusable workflow runs for *consumer* repos:
+its quality gate is two first-party workflows, not the npm/Python native
+paths this repo's reusable workflow runs for *consumer* repos (see "Review
+principles" below for exactly what "gate" means today - it's not yet wired
+into required branch protection):
 
 - `.github/workflows/self-test.yml` — calls `reusable-pr-quality.yml` via
   `workflow_call` against real, checked-in fixture scenarios
@@ -23,16 +25,27 @@ paths this repo's reusable workflow runs for *consumer* repos:
   `shellcheck` on every embedded `run:` block) on
   `reusable-pr-quality.yml`/`templates/caller-pr-quality.yml` and this
   repo's own two self-test/self-lint workflows, plus `markdownlint` on
-  `docs/*.md`, `README.md`, and `templates/AGENTS.md`.
+  `docs/*.md`, `README.md`, `templates/AGENTS.md`, and this file
+  (`AGENTS.md` at the repo root - round-2 review fix, real Codex finding:
+  an earlier version of this list omitted this file even though
+  self-lint.yml's own command already covers it).
 
 A change to this repo is really a change to what every consumer repo trusts —
 review it with that in mind, not as an isolated docs/CI tweak.
 
 ## Review principles
 
-- **`self-test` and `self-lint` (GitHub Actions) are the hard quality gate**
-  for this repo. They run deterministic checks: reusable-workflow fixture
-  exercises, Actions-YAML lint, embedded-shell lint, and doc lint.
+- **`self-test` and `self-lint` (GitHub Actions) are this repo's
+  deterministic quality gate** - reusable-workflow fixture exercises,
+  Actions-YAML lint, embedded-shell lint, and doc lint. Round-2 review
+  fix (real Codex finding): calling this "the hard gate" without
+  qualification overclaimed enforcement - as of this commit, neither
+  workflow is yet a required branch-protection status check (see
+  README.md's Dogfooding section), so a red run does not yet mechanically
+  block a merge. Treat a red `self-test`/`self-lint` run on a PR as a
+  blocking finding anyway, the same as if it were already required -
+  wiring that up is tracked as a follow-up, not a reason to relax the bar
+  in the meantime.
 - **Codex is the intelligent reviewer.** It reasons about correctness,
   design, security implications, and missing tests — especially whether a
   change to `reusable-pr-quality.yml` or `templates/caller-pr-quality.yml`

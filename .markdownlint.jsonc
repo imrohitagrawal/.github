@@ -1,7 +1,10 @@
 {
   // WP1 (first-party quality gate, F1/F25): config for the markdownlint step
-  // in .github/workflows/self-lint.yml, scoped to docs/*.md, README.md, and
-  // templates/AGENTS.md — the same set of files that step lints.
+  // in .github/workflows/self-lint.yml, scoped to docs/*.md, README.md,
+  // templates/AGENTS.md, and this repo's own root AGENTS.md — the same set
+  // of files that step actually lints (round-2 review fix, real Codex
+  // finding: an earlier version of this comment omitted the root AGENTS.md,
+  // even though self-lint.yml's own command already covered it).
   //
   // MD013 (line-length) disabled: this repo's docs (and the audit plan they
   // implement) deliberately use long, information-dense paragraphs and
