@@ -16,9 +16,14 @@ name: Self-test (reusable-pr-quality.yml)
 # wouldn't exist yet for an in-flight PR and wouldn't validate what's
 # actually changing.
 #
-# Ten jobs (the seven workflow_call scenario jobs below, two assert jobs
-# that invert the two deliberately-failing scenarios' results, and the
-# final aggregate job):
+# 23 jobs: the original ten (seven workflow_call scenario jobs, two assert
+# jobs inverting the two deliberately-failing scenarios' results, and the
+# final aggregate job) plus, since the review that added C1/H4 below, six
+# more deliberately-failing scenario+assert pairs (bandit-baseline,
+# audit-ci, pip-audit-ignore, npm typecheck, mypy, and a nonexistent
+# directory input) and a functional-test job for
+# scripts/retrofit-quality-gate.sh. See each job's own comment for what it
+# proves and why:
 #   - node-only, python-only, monorepo (WP6 python-directory/node-directory
 #     inputs), no-manifest (this repo's own root - genuinely has no
 #     Makefile/package.json/pyproject.toml/requirements.txt/setup.py today,
@@ -54,11 +59,29 @@ name: Self-test (reusable-pr-quality.yml)
 #     severity-swallow bugs stays fixed. This covers a second, different
 #     one (pytest's swallow) on a second, different stack (Python) -
 #     proving the negative-fixture pattern generalizes, not that it was
-#     only ever exercised once. KNOWN, ACCEPTED RESIDUAL: typecheck/build
-#     (npm) and bandit/pip-audit/npm-audit swallow-regressions still have
-#     no covering negative fixture - not built out further here, given
-#     diminishing returns against this package's time budget; see the WP1
-#     final report.
+#     only ever exercised once.
+#   - python-bandit-blocking, npm-audit-blocking, python-pip-audit-blocking -
+#     C1 (review finding): WP5's three blocking-promotion paths had never
+#     executed in this repo's own CI at all (self-test's root has no
+#     Makefile, and no fixture had a promotion-trigger file), proven by
+#     mutation. Each pins a real, permanently-published vulnerability
+#     (bandit: a deliberate subprocess/shell=True finding not in an empty
+#     baseline; npm: lodash@4.17.4's real GHSA advisories via audit-ci;
+#     Python: PyYAML==5.3's real PYSEC advisories via an ignore-list that
+#     doesn't cover them) - verified locally against the real tools/
+#     registries before being checked in, same discipline as every other
+#     fixture here.
+#   - node-typecheck-violation, python-mypy-violation - C1: closes the
+#     residual noted below (npm typecheck and mypy previously had no
+#     negative-fixture proof, only pytest and npm-lint did).
+#   - bad-directory-input - C1: proves WP6's fail-closed directory
+#     validation (added after an earlier version silently disabled a stack
+#     while staying green) still rejects a nonexistent path.
+#   KNOWN, ACCEPTED RESIDUAL (narrowed by the above, not fully closed): npm
+#   build's swallow-regression class still has no covering negative
+#   fixture - `--if-present` makes constructing a "build fails but nothing
+#   else does" fixture cheaply is harder than the others above; not built
+#   out here given diminishing returns, see the C1 fix package's own notes.
 #   `continue-on-error` cannot be set on a job that calls a reusable
 #   workflow via `uses:` (verified with actionlint: "when a reusable
 #   workflow is called with 'uses', 'continue-on-error' is not available")
@@ -191,6 +214,55 @@ jobs:
     with:
       python-directory: .github/self-test-fixtures/python-test-failure
 
+  # C1 (review finding): self-test's own repo root has no Makefile, and
+  # (before this package) no fixture had an audit-ci.json/
+  # .bandit-baseline.json/.pip-audit-ignore - so WP5's three blocking-
+  # promotion paths and mypy/npm-typecheck's swallow-regression classes had
+  # never once executed in this repo's own CI, proven by mutation (an
+  # earlier session reintroduced a `make lint || true`-class swallow and
+  # got a bit-for-bit identical self-test result). The six jobs below close
+  # that for the promotion paths and the typecheck/mypy residual - each
+  # fixture's real, blocking failure verified locally first (bandit 1.9.4,
+  # audit-ci 7.1.0 + real npm registry data, pip-audit 2.10.1 + real PyPI
+  # advisory data, mypy 2.3.0, node's own exit code), same discipline as
+  # every other fixture in this file. Expected to FAIL, same as
+  # node-lint-violation/python-test-failure above - each gets its own
+  # assert job.
+  python-bandit-blocking:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/python-bandit-blocking
+
+  npm-audit-blocking:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      node-directory: .github/self-test-fixtures/npm-audit-blocking
+
+  python-pip-audit-blocking:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/python-pip-audit-blocking
+
+  node-typecheck-violation:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      node-directory: .github/self-test-fixtures/node-typecheck-violation
+
+  python-mypy-violation:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/python-mypy-violation
+
+  # WP6's fail-closed directory validation (reusable-pr-quality.yml's
+  # "Validate directory inputs" step) rejects an explicitly nonexistent
+  # python-directory/node-directory - added after an earlier version
+  # silently disabled a stack while staying green. No fixture directory
+  # needed: the point is the path does NOT exist. Expected to FAIL.
+  bad-directory-input:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/does-not-exist
+
   # KNOWN LIMITATION, argued down not fully closed (real Codex finding,
   # round-1 review): this job (and assert-python-negative-fixture-blocks
   # below) can only observe node-lint-violation's overall JOB result via
@@ -286,6 +358,123 @@ jobs:
           fi
           echo "Confirmed: the reusable workflow correctly failed the job on a real test failure."
 
+  # Same known limitation as assert-negative-fixture-blocks above (job-level
+  # result only, not step-level) - accepted for the same reason, not
+  # re-argued six more times.
+  assert-bandit-blocking-fixture-blocks:
+    name: assert python-bandit-blocking actually blocked
+    needs: [python-bandit-blocking]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the deliberately-unbaselined bandit finding failed the gate
+        env:
+          FIXTURE_RESULT: ${{ needs.python-bandit-blocking.result }}
+        run: |
+          echo "python-bandit-blocking job result: $FIXTURE_RESULT"
+          if [ "$FIXTURE_RESULT" != "failure" ]; then
+            echo "::error::Expected the python-bandit-blocking fixture to FAIL the reusable workflow (a real bandit finding not present in its empty .bandit-baseline.json) but the job result was '$FIXTURE_RESULT'. WP5's bandit-baseline blocking promotion is not actually blocking."
+            exit 1
+          fi
+          echo "Confirmed: the reusable workflow correctly failed the job on a real, unbaselined bandit finding."
+
+  assert-npm-audit-blocking-fixture-blocks:
+    name: assert npm-audit-blocking actually blocked
+    needs: [npm-audit-blocking]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the unallowlisted lodash CVE failed the gate
+        env:
+          FIXTURE_RESULT: ${{ needs.npm-audit-blocking.result }}
+        run: |
+          echo "npm-audit-blocking job result: $FIXTURE_RESULT"
+          if [ "$FIXTURE_RESULT" != "failure" ]; then
+            echo "::error::Expected the npm-audit-blocking fixture to FAIL the reusable workflow (lodash@4.17.4's real, unallowlisted advisories, audit-ci --high) but the job result was '$FIXTURE_RESULT'. WP5's audit-ci blocking promotion is not actually blocking."
+            exit 1
+          fi
+          echo "Confirmed: the reusable workflow correctly failed the job on a real, unallowlisted npm advisory."
+
+  assert-pip-audit-blocking-fixture-blocks:
+    name: assert python-pip-audit-blocking actually blocked
+    needs: [python-pip-audit-blocking]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the unignored PyYAML CVEs failed the gate
+        env:
+          FIXTURE_RESULT: ${{ needs.python-pip-audit-blocking.result }}
+        run: |
+          echo "python-pip-audit-blocking job result: $FIXTURE_RESULT"
+          if [ "$FIXTURE_RESULT" != "failure" ]; then
+            echo "::error::Expected the python-pip-audit-blocking fixture to FAIL the reusable workflow (PyYAML==5.3's real, unignored PYSEC advisories) but the job result was '$FIXTURE_RESULT'. WP5's pip-audit ignore-list blocking promotion is not actually blocking."
+            exit 1
+          fi
+          echo "Confirmed: the reusable workflow correctly failed the job on real, unignored pip-audit findings."
+
+  assert-node-typecheck-violation-fixture-blocks:
+    name: assert node-typecheck-violation actually blocked
+    needs: [node-typecheck-violation]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the deliberately-broken fixture failed the gate
+        env:
+          FIXTURE_RESULT: ${{ needs.node-typecheck-violation.result }}
+        run: |
+          echo "node-typecheck-violation job result: $FIXTURE_RESULT"
+          if [ "$FIXTURE_RESULT" != "failure" ]; then
+            echo "::error::Expected the node-typecheck-violation fixture to FAIL the reusable workflow (its typecheck script deliberately exits 1) but the job result was '$FIXTURE_RESULT'. npm typecheck is not actually blocking."
+            exit 1
+          fi
+          echo "Confirmed: the reusable workflow correctly failed the job on a real typecheck violation."
+
+  assert-python-mypy-violation-fixture-blocks:
+    name: assert python-mypy-violation actually blocked
+    needs: [python-mypy-violation]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the deliberate type error failed the gate
+        env:
+          FIXTURE_RESULT: ${{ needs.python-mypy-violation.result }}
+        run: |
+          echo "python-mypy-violation job result: $FIXTURE_RESULT"
+          if [ "$FIXTURE_RESULT" != "failure" ]; then
+            echo "::error::Expected the python-mypy-violation fixture to FAIL the reusable workflow (a genuine mypy type error) but the job result was '$FIXTURE_RESULT'. mypy is not actually blocking."
+            exit 1
+          fi
+          echo "Confirmed: the reusable workflow correctly failed the job on a real type error."
+
+  assert-bad-directory-input-blocks:
+    name: assert bad-directory-input actually blocked
+    needs: [bad-directory-input]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the nonexistent directory input failed closed
+        env:
+          FIXTURE_RESULT: ${{ needs.bad-directory-input.result }}
+        run: |
+          echo "bad-directory-input job result: $FIXTURE_RESULT"
+          if [ "$FIXTURE_RESULT" != "failure" ]; then
+            echo "::error::Expected bad-directory-input to FAIL the reusable workflow (python-directory points at a path that doesn't exist) but the job result was '$FIXTURE_RESULT'. WP6's fail-closed directory validation is not actually failing closed - see the silent-stack-disable bug its own comment describes."
+            exit 1
+          fi
+          echo "Confirmed: the reusable workflow correctly rejected a nonexistent directory input."
+
   # H4 (review finding): scripts/retrofit-quality-gate.sh had zero test
   # coverage of any kind - not even run once in CI, despite being a
   # ~465-line script with real git side effects (branch creation, commits,
@@ -321,6 +510,12 @@ jobs:
       - python-dev-group
       - assert-negative-fixture-blocks
       - assert-python-negative-fixture-blocks
+      - assert-bandit-blocking-fixture-blocks
+      - assert-npm-audit-blocking-fixture-blocks
+      - assert-pip-audit-blocking-fixture-blocks
+      - assert-node-typecheck-violation-fixture-blocks
+      - assert-python-mypy-violation-fixture-blocks
+      - assert-bad-directory-input-blocks
       - retrofit-script-tests
     if: always()
     runs-on: ubuntu-latest
@@ -336,6 +531,12 @@ jobs:
           PYTHON_DEV_GROUP: ${{ needs.python-dev-group.result }}
           NEGATIVE_ASSERT: ${{ needs.assert-negative-fixture-blocks.result }}
           PYTHON_NEGATIVE_ASSERT: ${{ needs.assert-python-negative-fixture-blocks.result }}
+          BANDIT_BLOCKING_ASSERT: ${{ needs.assert-bandit-blocking-fixture-blocks.result }}
+          NPM_AUDIT_BLOCKING_ASSERT: ${{ needs.assert-npm-audit-blocking-fixture-blocks.result }}
+          PIP_AUDIT_BLOCKING_ASSERT: ${{ needs.assert-pip-audit-blocking-fixture-blocks.result }}
+          NODE_TYPECHECK_ASSERT: ${{ needs.assert-node-typecheck-violation-fixture-blocks.result }}
+          PYTHON_MYPY_ASSERT: ${{ needs.assert-python-mypy-violation-fixture-blocks.result }}
+          BAD_DIRECTORY_ASSERT: ${{ needs.assert-bad-directory-input-blocks.result }}
           RETROFIT_SCRIPT_TESTS: ${{ needs.retrofit-script-tests.result }}
         run: |
           echo "node-only: $NODE_ONLY"
@@ -345,9 +546,18 @@ jobs:
           echo "python-dev-group: $PYTHON_DEV_GROUP"
           echo "assert-negative-fixture-blocks: $NEGATIVE_ASSERT"
           echo "assert-python-negative-fixture-blocks: $PYTHON_NEGATIVE_ASSERT"
+          echo "assert-bandit-blocking-fixture-blocks: $BANDIT_BLOCKING_ASSERT"
+          echo "assert-npm-audit-blocking-fixture-blocks: $NPM_AUDIT_BLOCKING_ASSERT"
+          echo "assert-pip-audit-blocking-fixture-blocks: $PIP_AUDIT_BLOCKING_ASSERT"
+          echo "assert-node-typecheck-violation-fixture-blocks: $NODE_TYPECHECK_ASSERT"
+          echo "assert-python-mypy-violation-fixture-blocks: $PYTHON_MYPY_ASSERT"
+          echo "assert-bad-directory-input-blocks: $BAD_DIRECTORY_ASSERT"
           echo "retrofit-script-tests: $RETROFIT_SCRIPT_TESTS"
           FAILED=0
-          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$PYTHON_DEV_GROUP" "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
+          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$PYTHON_DEV_GROUP" \
+            "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$BANDIT_BLOCKING_ASSERT" \
+            "$NPM_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_BLOCKING_ASSERT" "$NODE_TYPECHECK_ASSERT" \
+            "$PYTHON_MYPY_ASSERT" "$BAD_DIRECTORY_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
             if [ "$r" != "success" ]; then
               FAILED=1
             fi

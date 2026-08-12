@@ -1,0 +1,9 @@
+{
+  "name": "self-test-npm-audit-blocking",
+  "private": true,
+  "version": "1.0.0",
+  "description": "C1 self-test fixture (review finding): pins lodash@4.17.4, which carries several real, permanently-published GitHub Security Advisories (including a critical prototype-pollution one, GHSA-jf85-cpcp-j695, CVSS 9.1) — verified locally against the real npm registry and the pinned audit-ci@7.1.0 tool. audit-ci.json alongside this file has no allowlist for any of them, so the 'npm audit (high+, audit-ci) — blocking' step must fail. Proves WP5's blocking-promotion path actually blocks on a real vulnerability, not just that has_audit_ci_config routes to the right step.",
+  "dependencies": {
+    "lodash": "4.17.4"
+  }
+}

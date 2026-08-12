@@ -1,0 +1,9 @@
+{
+  "name": "self-test-node-typecheck-violation",
+  "private": true,
+  "version": "1.0.0",
+  "description": "C1 self-test fixture (review finding): deliberately failing typecheck script, no other scripts (same one-plausible-failure-point discipline as node-lint-violation) and zero dependencies (npm ci / npm audit both verified locally to succeed cleanly against it). Wired with an inverted assertion in self-test.yml, proving the reusable workflow's npm-typecheck step is a real blocking gate, not a swallow -- previously only pytest and npm-lint had this proof.",
+  "scripts": {
+    "typecheck": "node -e \"console.error('fixture: deliberate typecheck failure'); process.exit(1)\""
+  }
+}
