@@ -16,7 +16,7 @@ name: Self-test (reusable-pr-quality.yml)
 # wouldn't exist yet for an in-flight PR and wouldn't validate what's
 # actually changing.
 #
-# Nine jobs (the six workflow_call scenario jobs below, two assert jobs
+# Ten jobs (the seven workflow_call scenario jobs below, two assert jobs
 # that invert the two deliberately-failing scenarios' results, and the
 # final aggregate job):
 #   - node-only, python-only, monorepo (WP6 python-directory/node-directory
@@ -24,13 +24,21 @@ name: Self-test (reusable-pr-quality.yml)
 #     Makefile/package.json/pyproject.toml/requirements.txt/setup.py today,
 #     verified via `ls` before writing this file - so calling with no
 #     inputs against '.' is a real exercise of the fallback path, not a
-#     fabricated one) - all expected to PASS. Each fixture has real,
-#     executable content (not empty placeholder files) - see each
-#     directory under .github/self-test-fixtures/ and its own comments -
-#     validated locally before being checked in by extracting and running
-#     the exact commands reusable-pr-quality.yml runs (npm ci / npm run
-#     lint,typecheck,test,build / pip install / ruff / pytest / mypy /
-#     bandit / pip-audit) against each fixture directory in a clean venv.
+#     fabricated one), python-dev-group (WP-Consumer fix, added after a
+#     real Codex finding on PR #16: a PEP 735 [dependency-groups] dev
+#     dependency, freezegun, that's declared nowhere else and confirmed
+#     absent from every pinned tool's own transitive deps - proves
+#     `pip install --group dev -e .` actually installs it, not just that
+#     the tomllib-based detection's YAML parses; verified to genuinely fail
+#     with ModuleNotFoundError against a venv where the dev group was
+#     deliberately NOT installed, before being checked in) - all expected
+#     to PASS. Each fixture has real, executable content (not empty
+#     placeholder files) - see each directory under
+#     .github/self-test-fixtures/ and its own comments - validated locally
+#     before being checked in by extracting and running the exact commands
+#     reusable-pr-quality.yml runs (npm ci / npm run lint,typecheck,test,
+#     build / pip install / ruff / pytest / mypy / bandit / pip-audit)
+#     against each fixture directory in a clean venv.
 #   - node-lint-violation - a fixture whose package.json "lint" script
 #     deliberately `process.exit(1)`s - expected to FAIL. This is one of
 #     two scenarios that give the self-test real teeth: without it, this
@@ -149,6 +157,19 @@ jobs:
     with:
       python-directory: .github/self-test-fixtures/monorepo/backend
       node-directory: .github/self-test-fixtures/monorepo/frontend
+
+  python-dev-group:
+    # WP-Consumer fix (real Codex finding on PR #16): proves the reusable
+    # workflow's `pip install --group dev -e .` path (a PEP 735
+    # [dependency-groups] dev group, the exact shape citevyn's real
+    # backend/pyproject.toml has) actually installs a dev-only dependency,
+    # not just that the detection logic's YAML parses. See the fixture's
+    # own pyproject.toml/test file comments for why `freezegun` was chosen
+    # and how this was verified to genuinely fail (ModuleNotFoundError) if
+    # the dev-group install path regresses.
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/python-dev-group
 
   no-manifest:
     # No inputs: both directories default to '.', this repo's own root - see
@@ -272,6 +293,7 @@ jobs:
       - python-only
       - monorepo
       - no-manifest
+      - python-dev-group
       - assert-negative-fixture-blocks
       - assert-python-negative-fixture-blocks
     if: always()
@@ -285,6 +307,7 @@ jobs:
           PYTHON_ONLY: ${{ needs.python-only.result }}
           MONOREPO: ${{ needs.monorepo.result }}
           NO_MANIFEST: ${{ needs.no-manifest.result }}
+          PYTHON_DEV_GROUP: ${{ needs.python-dev-group.result }}
           NEGATIVE_ASSERT: ${{ needs.assert-negative-fixture-blocks.result }}
           PYTHON_NEGATIVE_ASSERT: ${{ needs.assert-python-negative-fixture-blocks.result }}
         run: |
@@ -292,10 +315,11 @@ jobs:
           echo "python-only: $PYTHON_ONLY"
           echo "monorepo: $MONOREPO"
           echo "no-manifest: $NO_MANIFEST"
+          echo "python-dev-group: $PYTHON_DEV_GROUP"
           echo "assert-negative-fixture-blocks: $NEGATIVE_ASSERT"
           echo "assert-python-negative-fixture-blocks: $PYTHON_NEGATIVE_ASSERT"
           FAILED=0
-          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT"; do
+          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$PYTHON_DEV_GROUP" "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT"; do
             if [ "$r" != "success" ]; then
               FAILED=1
             fi
