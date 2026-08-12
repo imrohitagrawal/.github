@@ -1,0 +1,67 @@
+imrohitagrawal/.github Source Code License (MIT + Attribution)
+Copyright (c) 2026 Rohit Agrawal
+
+SPDX-License-Identifier: LicenseRef-stackclimb-source-v1
+
+This license governs the **reusable CI workflows, templates and bootstrap
+configuration** in this repository - the material other repositories inherit.
+
+It is the same license used across the author's other repositories, so a single
+attribution form works for all of them.
+
+------------------------------------------------------------------------
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+1. The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software.
+
+2. **Attribution clause.** Any redistribution of the Software, or any
+   derivative work based on the Software (in source or binary form), must
+   include an attribution notice in a NOTICE, About, credits, or equivalent
+   location that is visible to end users. The attribution notice must state
+   the following (or substantively equivalent text):
+
+       imrohitagrawal/.github
+       (c) 2026 Rohit Agrawal
+       Stackclimb: https://stackclimb.com
+       GitHub:     https://github.com/imrohitagrawal
+       LinkedIn:   https://www.linkedin.com/in/rohitagrawal14/
+
+   The attribution notice must not be removed, obscured, or rendered less
+   prominent than other third-party notices in the same work. It is not
+   sufficient to keep the attribution only in the source tree; it must be
+   carried through to the user-facing distribution.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------
+
+Why this license, briefly:
+
+- Standard MIT grants the permissions above (use, copy, modify, merge,
+  publish, distribute, sublicense, sell) with the copyright and permission
+  notices preserved.
+- The attribution clause (clause 2) is a standard, common addition to MIT for
+  solo portfolio projects. It requires downstream users to keep the author's
+  name and contact URLs visible in their distribution. This is not a
+  restriction on commercial use; it is a requirement that the authorship be
+  acknowledged. The LinkedIn URL is included deliberately: it is the identity
+  link that proves who the author is.
+- Stackclimb is named in the attribution because every project sits under that
+  umbrella.
+
+- This repository exists to be copied. It is licensed permissively on purpose,
+  with the attribution clause as the only condition, so a downstream repo can
+  adopt the workflows without a licensing question.
