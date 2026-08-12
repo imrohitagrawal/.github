@@ -1,0 +1,119 @@
+name: Self-lint (first-party quality)
+
+# WP1 (F1/F25 - "the bootstrap repo does not consume its own product"): the
+# literal answer to "this project should also apply those gates to itself,
+# not just build them for others". This repo has no package.json/pyproject
+# .toml of its own (see AGENTS.md) - it IS GitHub Actions YAML and docs, so
+# its first-party quality gate is Actions-YAML- and docs-shaped, not
+# npm/pip-shaped: actionlint (which bundles shellcheck for every embedded
+# `run:` block automatically - no separate shellcheck step needed, verified
+# locally: `actionlint reusable-pr-quality.yml` surfaces real shellcheck
+# findings with zero extra flags) on this repo's own workflow files, plus
+# markdownlint on its docs.
+#
+# actionlint scope: reusable-pr-quality.yml and templates/caller-pr-quality
+# .yml (the two files consumers actually depend on, per the WP1 task), and
+# this repo's own two new self-*.yml workflows (this file and self-test.yml)
+# - added beyond the stated minimum so a bug in the self-test/self-lint
+# machinery itself doesn't go unchecked forever.
+#
+# -ignore 'SC2015' -ignore 'SC2129': two pre-existing shellcheck notes in
+# reusable-pr-quality.yml's "Detect project layout" step, present before
+# WP1 and already reviewed twice (first flagged when the step was written,
+# reconfirmed unchanged - only line numbers shifted - during WP6's own
+# actionlint diff against the pre-change file). Suppressed here so this
+# gate isn't red on day one for a residual that's genuinely pre-existing
+# and already recorded, not something WP1 is hiding - see the WP1 commit
+# message for the exact `actionlint` output this suppression was checked
+# against (with vs. without -ignore, confirming these are the ONLY two
+# findings and nothing else got swept up in the suppression net).
+#
+# rhysd/actionlint's official Docker image bundles shellcheck already
+# (verified locally: `docker run --rm --entrypoint sh rhysd/actionlint ...
+# which shellcheck` -> /usr/local/bin/shellcheck), pinned by digest - same
+# no-floating-tag convention WP2 applied to every action and the semgrep
+# step in reusable-pr-quality.yml.
+#
+# markdownlint scope: docs/*.md, README.md, templates/AGENTS.md (per the
+# WP1 task), plus this repo's own new root AGENTS.md (added by this same
+# package - see below) via `npx --yes markdownlint-cli@<pinned>`, the same
+# pinned-CLI-invocation pattern WP5 already established for `npx --yes
+# audit-ci@7.1.0` in reusable-pr-quality.yml. Config lives in
+# .markdownlint.jsonc at the repo root (MD013/MD031 disabled, with the
+# reasoning recorded there) - every other rule is enforced at
+# markdownlint-cli's default and was genuinely clean for all six files as of
+# this commit (fixed a small number of real, mechanical pre-existing
+# findings in the five pre-existing files - missing fence languages, a
+# missing blank line around a list, two tables' pipe spacing, two files'
+# missing trailing newline - while adding this gate, rather than shipping it
+# red on day one for pre-existing content unrelated to WP1's own changes;
+# the new root AGENTS.md was clean on first write).
+#
+# AGENTS.md (root): new in this package (WP1, section 2 point 6's third
+# requirement) - Codex's own review-calibration file for this repo,
+# adapted from templates/AGENTS.md for "the repo that IS .github" rather
+# than left as consumer-facing template text (see its own header).
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/reusable-pr-quality.yml'
+      - '.github/workflows/self-test.yml'
+      - '.github/workflows/self-lint.yml'
+      - 'templates/caller-pr-quality.yml'
+      - 'docs/**.md'
+      - 'README.md'
+      - 'templates/AGENTS.md'
+      - 'AGENTS.md'
+      - '.markdownlint.jsonc'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/reusable-pr-quality.yml'
+      - '.github/workflows/self-test.yml'
+      - '.github/workflows/self-lint.yml'
+      - 'templates/caller-pr-quality.yml'
+      - 'docs/**.md'
+      - 'README.md'
+      - 'templates/AGENTS.md'
+      - 'AGENTS.md'
+      - '.markdownlint.jsonc'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  self-lint:
+    name: self-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # actionlint + shellcheck (bundled in the image) on this repo's own
+      # workflow files. Digest-pinned, matching WP2's convention.
+      - name: "actionlint (+ shellcheck on embedded run: blocks)"
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color \
+            -ignore 'SC2015' \
+            -ignore 'SC2129' \
+            .github/workflows/reusable-pr-quality.yml \
+            templates/caller-pr-quality.yml \
+            .github/workflows/self-test.yml \
+            .github/workflows/self-lint.yml
+
+      # Pinned CLI version, same pattern as audit-ci in reusable-pr-quality.yml.
+      - name: markdownlint
+        run: |
+          npx --yes markdownlint-cli@0.49.1 \
+            --config .markdownlint.jsonc \
+            docs/*.md README.md templates/AGENTS.md AGENTS.md

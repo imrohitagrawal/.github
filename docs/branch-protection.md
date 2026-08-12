@@ -22,6 +22,7 @@ Branch protection and rulesets work fully on public repos under GitHub Free. Set
 7. Click **Create** / **Save changes**.
 
 After this:
+
 - The merge button on a PR with a red `quality-gate` will be disabled.
 - The merge button is enabled only when `quality-gate` is green **and** any required reviews are in place.
 
@@ -52,7 +53,7 @@ To prove the gate works after setup:
 ## Limitations on GitHub Free
 
 | Feature | Public repo | Private repo |
-|---|---|---|
+| --- | --- | --- |
 | GitHub Actions | ✅ Free (with monthly minute limits) | ✅ Free (with monthly minute limits) |
 | Branch protection (classic) | ✅ Full | ⚠️ Limited |
 | Rulesets (newer) | ✅ Full | ⚠️ May require Pro for some rule types |
