@@ -1,19 +1,101 @@
+.PHONY: install lint typecheck test bandit pip-audit security ci
+
+# Makefile template for Python repos consuming imrohitagrawal/.github's
+# reusable-pr-quality.yml. Severity policy mirrors the reusable workflow's
+# native Python path exactly (see .github/workflows/reusable-pr-quality.yml,
+# the WP5/WP7 comment blocks above `jobs:`) so a repo gets the same
+# behavior whether the reusable workflow's native steps run or these
+# discrete targets do.
+#
+# mypy is BLOCKING (no swallow) - matches the native `mypy .` step, which is
+# blocking once a mypy config is detected.
+#
+# bandit / pip-audit are ADVISORY by default, promotable to BLOCKING using
+# the exact same file conventions WP5 wired into the reusable workflow, so a
+# repo's Makefile-driven scan is promotable the same way the native path is:
+#   - bandit: ships a generated baseline at .bandit-baseline.json
+#     (generate with `bandit -r . -f json -o .bandit-baseline.json`),
+#     consumed via -b/--baseline. Deliberately NOT keyed off `.bandit`/
+#     `bandit.yaml` - those are bandit CLI config (excludes, thresholds),
+#     not a baseline report, and passing one to `-b` fails outright.
+#   - pip-audit: ships a `.pip-audit-ignore` file (one vulnerability ID per
+#     line, e.g. `PYSEC-2023-74` or `GHSA-...`; blank lines and
+#     `#`-comments ignored), each surviving line passed as its own
+#     `--ignore-vuln <ID>`. pip-audit has no config-file allowlist
+#     mechanism of its own - this is the reusable workflow's own
+#     convention, mirrored here.
+# Both scanners separate "found something real" (advisory warning, exit 0)
+# from "the scanner itself failed to run" (hard failure) - same crash-vs-
+# finding split as the native steps, so a crashed/offline tool can't be
+# mistaken for a clean advisory pass.
+
 install:
 	python -m pip install --upgrade pip
-	pip install -r requirements.txt || true
+	if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 	pip install ruff pytest mypy bandit pip-audit
 
 lint:
 	ruff check .
 
 typecheck:
-	mypy . || true
+	mypy .
 
+# BLOCKING. Exit 5 is pytest's "no tests were collected" - a repo with no
+# tests yet must not fail its first PR for having nothing to run, but a
+# genuinely FAILING suite must still fail this target. Matches the reusable
+# workflow's own pytest step's exact tolerance (only exit 5, nothing else).
 test:
-	pytest -q
+	pytest -q || { c=$$?; [ $$c -eq 5 ] && echo "pytest collected no tests (tolerated, exit 5)" || exit $$c; }
 
-security:
-	bandit -r . -x tests
-	pip-audit || true
+# ADVISORY by default. BLOCKING WHEN .bandit-baseline.json exists (see
+# header comment above for how to generate one) - machine-checked below,
+# not just documented here.
+bandit:
+	@if [ -f .bandit-baseline.json ]; then \
+		echo "bandit: .bandit-baseline.json found - running BLOCKING (baseline) mode"; \
+		bandit -r . -x tests,test,node_modules,.venv,venv -b .bandit-baseline.json; \
+	else \
+		set +e; \
+		bandit -r . -x tests,test,node_modules,.venv,venv; \
+		code=$$?; \
+		set -e; \
+		case "$$code" in \
+			0) echo "bandit: no issues identified." ;; \
+			1) echo "WARNING: bandit reported findings (advisory - not blocking; add .bandit-baseline.json to promote)" ;; \
+			*) echo "ERROR: bandit failed to run (exit $$code) - not a clean/findings result"; exit $$code ;; \
+		esac; \
+	fi
+
+# ADVISORY by default. BLOCKING WHEN .pip-audit-ignore exists (see header
+# comment above for the file format) - machine-checked below, not just
+# documented here.
+pip-audit:
+	@if [ -f .pip-audit-ignore ]; then \
+		echo "pip-audit: .pip-audit-ignore found - running BLOCKING (ignore-list) mode"; \
+		ignore_args=""; \
+		while IFS= read -r line || [ -n "$$line" ]; do \
+			line="$${line%%#*}"; \
+			line="$$(printf '%s' "$$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$$//')"; \
+			[ -z "$$line" ] && continue; \
+			ignore_args="$$ignore_args --ignore-vuln $$line"; \
+		done < .pip-audit-ignore; \
+		pip-audit --strict $$ignore_args; \
+	else \
+		set +e; \
+		output=$$(pip-audit --strict 2>&1); \
+		code=$$?; \
+		set -e; \
+		echo "$$output"; \
+		if [ "$$code" -eq 0 ]; then \
+			exit 0; \
+		elif echo "$$output" | grep -qE '^Found [0-9]+ known vulnerabilit'; then \
+			echo "WARNING: pip-audit reported findings (advisory - not blocking; add .pip-audit-ignore to promote)"; \
+		else \
+			echo "ERROR: pip-audit failed to run (exit $$code) - not a genuine vulnerability report"; \
+			exit "$$code"; \
+		fi; \
+	fi
+
+security: bandit pip-audit
 
 ci: install lint typecheck test security

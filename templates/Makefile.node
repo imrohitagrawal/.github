@@ -1,3 +1,29 @@
+.PHONY: install lint typecheck test build audit ci
+
+# Makefile template for Node repos consuming imrohitagrawal/.github's
+# reusable-pr-quality.yml. Severity policy mirrors the reusable workflow's
+# native Node path exactly (see .github/workflows/reusable-pr-quality.yml,
+# the WP5 comment block above `jobs:`) so a repo gets the same behavior
+# whether the reusable workflow's native steps run or these discrete
+# targets do.
+#
+# npm audit is ADVISORY by default, promotable to BLOCKING using the exact
+# same convention WP5 wired into the reusable workflow: ship an audit-ci
+# config, checked in this order - audit-ci.jsonc, then audit-ci.json, then
+# .audit-ci.json - and this target invokes the real `audit-ci` tool (via
+# npx) against it instead of bare `npm audit`, since bare `npm audit`
+# cannot consume an allowlist at all. `--high` is always passed explicitly
+# on the CLI, not left to the repo's config file: an audit-ci config that
+# sets no severity field of its own silently exits 0 even against a real
+# critical CVE (verified against audit-ci 7.1.0's own source) - `--high`
+# forces a floor of "high or higher" regardless of what the config omits,
+# without loosening a stricter repo choice (audit-ci takes the strictest
+# severity set to true from either source).
+# Advisory mode separates "found something real" (warning, exit 0) from
+# "the scanner itself failed to run" (hard failure), same as the native
+# npm-audit step, by checking captured JSON output for the "vulnerabilities"
+# key that only a genuine report includes.
+
 install:
 	npm ci
 
@@ -13,7 +39,32 @@ test:
 build:
 	npm run build --if-present
 
+# ADVISORY by default. BLOCKING WHEN an audit-ci config is present (see
+# header comment above) - machine-checked below, not just documented here.
 audit:
-	npm audit --audit-level=high
+	@config=""; \
+	if [ -f audit-ci.jsonc ]; then config=audit-ci.jsonc; \
+	elif [ -f audit-ci.json ]; then config=audit-ci.json; \
+	elif [ -f .audit-ci.json ]; then config=.audit-ci.json; \
+	fi; \
+	if [ -n "$$config" ]; then \
+		echo "npm audit: $$config found - running BLOCKING (audit-ci) mode"; \
+		npx --yes audit-ci@7.1.0 --config "$$config" --high; \
+	else \
+		set +e; \
+		output=$$(npm audit --audit-level=high --json); \
+		code=$$?; \
+		set -e; \
+		if [ "$$code" -eq 0 ]; then \
+			echo "npm audit: no high+ severity advisories."; \
+		elif echo "$$output" | grep -q '"vulnerabilities"'; then \
+			echo "$$output"; \
+			echo "WARNING: npm audit found high+ advisories (advisory - not blocking; add an audit-ci config to promote)"; \
+		else \
+			echo "$$output"; \
+			echo "ERROR: npm audit failed to run (exit $$code) - not a genuine vulnerability report"; \
+			exit "$$code"; \
+		fi; \
+	fi
 
 ci: install lint typecheck test build audit
