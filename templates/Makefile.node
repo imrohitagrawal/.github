@@ -16,6 +16,17 @@
 # itself) rather than assuming the workflow already ran `npm ci`. `.PHONY`
 # targets only execute once per `make` invocation even when several
 # downstream targets share `install` as a prerequisite.
+# KNOWN, ACCEPTED RESIDUAL (Codex review, Phase 4 Round 2): the dedup above
+# only holds WITHIN one `make` invocation. The reusable workflow's "Run
+# make lint"/"Run make typecheck"/"Run make test" steps are three SEPARATE
+# `run: make <target>` steps, each its own `make` process - so `install`
+# actually reruns once per step in that path (3x), not once total. Every
+# rerun is idempotent (`npm ci` skips already-satisfied installs) - a real
+# wall-clock cost, not a correctness issue. Not fixed here: doing so would
+# mean either the workflow chaining these into one step (a workflow-file
+# change, out of WP8's scope) or this Makefile caching install state
+# across invocations (meaningful complexity for a template file, not
+# worth it for a cost that's slower-but-correct).
 #
 # npm audit is ADVISORY by default, promotable to BLOCKING using the exact
 # same convention WP5 wired into the reusable workflow: ship an audit-ci
