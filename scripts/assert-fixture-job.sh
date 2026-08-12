@@ -82,27 +82,40 @@ RAW_LOG="$(mktemp)"
 LOG_FILE="$(mktemp)"
 trap 'rm -f "$RAW_LOG" "$LOG_FILE"' EXIT
 
-# Log availability lags job completion - MEASURED, not guessed: on this
-# workflow's first real run, a fixture job that completed at 20:39:51 still
-# had no retrievable log at 20:40:47, and was fine shortly after. A 50s budget
-# (5 x 10s) was therefore too short and produced one spurious red. The budget
-# below is ~3.5 minutes with an escalating backoff. Deliberately still
-# bounded: a log that genuinely never materializes is a failure to report, not
-# something to wait out indefinitely.
-DOWNLOAD_ATTEMPTS=12
-DOWNLOAD_ERR="$(mktemp)"
-trap 'rm -f "$RAW_LOG" "$LOG_FILE" "$DOWNLOAD_ERR"' EXIT
+# curl, not `gh api`, for THIS request specifically - and not a style choice.
+# Job logs are plain text containing the runner's own ANSI colour codes, and
+# newer `gh` refuses to emit any response carrying terminal escape sequences
+# ("the response contains terminal escape sequences; pass
+# --allow-escape-sequences to output it anyway"). That flag does not exist in
+# older gh (2.96.0 does not have it), so keying on it would make this script
+# work on exactly one gh version and fail on both sides of it. Observed for
+# real: the runner's gh refused every fixture log this way, which first looked
+# like a log-availability lag until the error text was actually printed.
+#
+# The endpoint 302s to a pre-signed blob URL. `curl -L` drops the
+# Authorization header when the redirect crosses to a different host, which is
+# both correct and required here - the blob URL carries its own signature and
+# rejects an extra Authorization header.
+#
+# The retry loop stays, for the genuinely-transient case (a log that is still
+# being finalised right after the job ends), but is no longer the explanation
+# for anything observed so far.
+DOWNLOAD_ATTEMPTS=6
 DOWNLOADED=false
 for attempt in $(seq 1 "$DOWNLOAD_ATTEMPTS"); do
-	if gh api "repos/${GITHUB_REPO}/actions/jobs/${JOB_ID}/logs" >"$RAW_LOG" 2>"$DOWNLOAD_ERR" && [ -s "$RAW_LOG" ]; then
+	HTTP_CODE="$(curl -sS -L \
+		-H "Authorization: Bearer ${GH_TOKEN}" \
+		-H "Accept: application/vnd.github+json" \
+		-H "X-GitHub-Api-Version: 2022-11-28" \
+		-o "$RAW_LOG" -w '%{http_code}' \
+		"https://api.github.com/repos/${GITHUB_REPO}/actions/jobs/${JOB_ID}/logs" || echo 000)"
+	if [ "$HTTP_CODE" = 200 ] && [ -s "$RAW_LOG" ]; then
 		DOWNLOADED=true
 		break
 	fi
 	if [ "$attempt" -lt "$DOWNLOAD_ATTEMPTS" ]; then
-		backoff=$((attempt * 5))
-		[ "$backoff" -gt 30 ] && backoff=30
-		echo "Log for job ${JOB_ID} not available yet (attempt ${attempt}/${DOWNLOAD_ATTEMPTS}); retrying in ${backoff}s."
-		sleep "$backoff"
+		echo "Log for job ${JOB_ID} not ready (HTTP ${HTTP_CODE}, attempt ${attempt}/${DOWNLOAD_ATTEMPTS}); retrying in 10s."
+		sleep 10
 	fi
 done
 
@@ -110,10 +123,10 @@ if [ "$DOWNLOADED" != true ]; then
 	# Deliberately NOT routed through fail(): this is an infrastructure
 	# problem, and printing FAILURE_HINT here would assert something about
 	# the fixture's behaviour that was never actually observed.
-	echo "----- last gh api error -----"
-	cat "$DOWNLOAD_ERR"
-	echo "-----------------------------"
-	echo "::error::assert-fixture-job.sh: could not download the log for job '$TARGET_JOB' (id ${JOB_ID}) after ${DOWNLOAD_ATTEMPTS} attempts. This says nothing about whether the fixture behaved correctly - re-run this job."
+	echo "----- last response body (first 20 lines) -----"
+	head -n 20 "$RAW_LOG" || true
+	echo "-----------------------------------------------"
+	echo "::error::assert-fixture-job.sh: could not download the log for job '$TARGET_JOB' (id ${JOB_ID}) after ${DOWNLOAD_ATTEMPTS} attempts (last HTTP ${HTTP_CODE}). This says nothing about whether the fixture behaved correctly."
 	exit 1
 fi
 
