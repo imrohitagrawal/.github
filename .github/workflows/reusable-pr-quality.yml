@@ -420,6 +420,18 @@ jobs:
           # with the same logic - defined here, used immediately below, both scoped to
           # this one step's single shell invocation (functions don't persist across
           # steps).
+          # BEGIN makefile-trust-helpers
+          # Everything between this marker and END makefile-trust-helpers is
+          # extracted verbatim and executed by scripts/test-makefile-trust.sh
+          # (run by self-lint.yml), which table-tests it against ~20 recipe/
+          # directory combinations - including the two cases below that CI
+          # fixtures structurally cannot reach (directory == '.', which needs
+          # a real manifest at this repo's own root). Keep this block
+          # self-contained: it may depend only on $HAS_MAKEFILE_LINT/
+          # $HAS_MAKEFILE_TYPECHECK/$HAS_MAKEFILE_TEST and a Makefile in the
+          # current directory. Moving/renaming these markers without updating
+          # that script makes it fail loudly (it asserts the extracted block
+          # is non-empty and defines all four functions), not silently pass.
           extract_makefile_recipe() {
             # $1 = target name. Prints every tab-indented line following that
             # target's own line, stopping at the first non-indented line - a
@@ -428,8 +440,28 @@ jobs:
           }
           is_trivial_makefile_recipe() {
             # stdin = recipe body. Trivial = every surviving line is empty, a
-            # comment, or a bare no-op invocation (@?echo/@?true/@?:/@?exit 0).
-            ! grep -vqE '^[[:space:]]*(@?[[:space:]]*(#.*)?$|@?[[:space:]]*(echo|true|:|exit[[:space:]]+0)([[:space:]].*)?$)'
+            # comment, or a bare no-op invocation (echo/true/:/exit 0),
+            # ignoring any Make recipe-line prefix characters in front of it.
+            #
+            # ROUND-4 FIX (HIGH, confirmed): this used to allow only `@`
+            # (silent) as a prefix. Make has three, all equally standard -
+            # `@`, `-` (ignore errors) and `+` (run even under `make -n`) -
+            # and they may be combined in any order. A `test:` recipe of
+            # `-true` was therefore classified NON-trivial and earned full
+            # trust, so the native pytest/npm-test step got SKIPPED for a
+            # recipe that runs nothing: the exact H2 false-green class this
+            # whole trust mechanism was built to close, reached via `-`
+            # instead of the already-handled `@`. `-true # backend` did the
+            # same for a non-root stack, since the directory-mention check is
+            # satisfied by the comment text. Reproduced before the fix and
+            # re-checked after, both root and non-root, in
+            # scripts/test-makefile-trust.sh.
+            #
+            # Note the prefix class only lets a no-op keep being a no-op - it
+            # never makes a REAL command trivial: `-pytest` still has to
+            # match echo/true/:/exit 0 after the prefix, and doesn't, so it
+            # stays non-trivial and trusted (covered by that script too).
+            ! grep -vqE '^[[:space:]]*([-@+][[:space:]]*)*((#.*)?$|(echo|true|:|exit[[:space:]]+0)([[:space:]].*)?$)'
           }
           # H2/H7 review fix (HIGH, confirmed): splicing a directory input
           # straight into an ERE without escaping let a `.` in the directory
@@ -480,6 +512,7 @@ jobs:
               echo false
             fi
           }
+          # END makefile-trust-helpers
           # Single braced block, not six individual redirects (shellcheck SC2129) -
           # the only spot in this step where that pattern was worth avoiding rather
           # than adding to the pre-existing, already-documented SC2129 count in

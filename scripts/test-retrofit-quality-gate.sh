@@ -378,6 +378,62 @@ assert_contains "explains why" "$SCRIPT_OUTPUT" "refusing to push -- monorepo de
 assert_not_contains "never attempted a real git push" "$SCRIPT_OUTPUT" "No configured push destination"
 
 # ============================================================================
+# T13: the Makefile this script actually copies dispatches on the repo's real
+# package manager (round-4, MEDIUM).
+#
+# WHY: H1 taught the reusable workflow to dispatch on pnpm/yarn/npm at all six
+# of its native `run:` sites, but templates/Makefile.node - the file THIS
+# script copies verbatim into any repo with a package.json - kept hardcoding
+# `npm ci`. So a pnpm-only or yarn-only repo that onboarded through this
+# script and adopted the recommended root Makefile reproduced the original H1
+# hard failure (`npm ci` against a repo with no package-lock.json) through the
+# Makefile route instead of the native one. These cases run the REAL copied
+# Makefile through `make -n` (dry run - nothing is installed, no network) and
+# read back which manager it resolved to.
+#
+# WHICH CHANGE TURNS THESE RED: revert templates/Makefile.node's PKG_MANAGER
+# detection to a bare `npm ci` install target and T13a/T13b/T13d fail.
+
+makefile_pm_case() {
+	# makefile_pm_case NAME EXPECTED_MANAGER PACKAGE_JSON [LOCKFILE]
+	local name="$1" expected="$2" pkgjson="$3" lockfile="${4:-}"
+	CURRENT_TEST="$name"
+	echo "$CURRENT_TEST"
+	local repo
+	repo="$(new_scratch_repo)"
+	track "$repo"
+	printf '%s' "$pkgjson" >"$repo/package.json"
+	if [ -n "$lockfile" ]; then
+		: >"$repo/$lockfile"
+	fi
+	git -C "$repo" add -A && git -C "$repo" commit -q -m "node manifest"
+	run_script "$repo"
+	assert_exit_code "$name: retrofit succeeded" 0 "$SCRIPT_EXIT"
+	assert_file_exists "$repo/Makefile" "$name: Makefile copied"
+
+	local dry
+	set +e
+	dry="$(cd "$repo" && make -n install 2>&1)"
+	set -e
+	assert_contains "$name: install dispatches to $expected" "$dry" "case \"$expected\" in"
+}
+
+makefile_pm_case "T13a pnpm lockfile" pnpm \
+	'{"name":"x","version":"1.0.0"}' pnpm-lock.yaml
+makefile_pm_case "T13b yarn lockfile" yarn \
+	'{"name":"x","version":"1.0.0"}' yarn.lock
+makefile_pm_case "T13c npm lockfile" npm \
+	'{"name":"x","version":"1.0.0"}' package-lock.json
+# packageManager wins over a contradicting lockfile, matching the reusable
+# workflow's own precedence (Corepack's field first, lockfile inference second).
+makefile_pm_case "T13d packageManager beats lockfile" pnpm \
+	'{"name":"x","version":"1.0.0","packageManager":"pnpm@9.1.0"}' package-lock.json
+# An unrecognised packageManager must fall back to npm, never be passed
+# through - the value reaches a `case` statement and comes from repo content.
+makefile_pm_case "T13e unknown packageManager falls back to npm" npm \
+	'{"name":"x","version":"1.0.0","packageManager":"bun@1.0.0"}' ""
+
+# ============================================================================
 
 echo ""
 echo "============================================================"

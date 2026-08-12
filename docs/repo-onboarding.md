@@ -95,7 +95,11 @@ The reusable workflow has a fallback: if no `Makefile` ci target, `package.json`
 
 Supported. The workflow detects the package manager via `package.json`'s `packageManager` field first (wins if present — this is Corepack's own field, so setting it also gets you a fully reproducible install, pinned to the exact version you declared), falling back to lockfile presence (`pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn) if that field isn't set, and to plain `npm` if neither signal exists. Existing npm-only repos are unaffected either way.
 
-One gap: the advisory `npm audit` step (the one that runs when the repo has *not* added an `audit-ci` config) is npm-only — a pnpm/yarn repo without an `audit-ci` config gets a notice instead, not silent advisory coverage. The **blocking** path (add an `audit-ci` config, see the main table above) works identically for all three package managers — `audit-ci` detects the manager from the lockfile itself.
+This applies to **both** onboarding routes as of the round-4 fix. The reusable workflow's own native steps dispatch on the detected manager, and so does `templates/Makefile.node` (step 5 above) — which had hardcoded `npm ci` until then, so a pnpm/yarn repo that onboarded via the script and adopted the recommended root Makefile still hit `npm ci`'s hard failure through that route. Both now resolve the manager the same way, in the same precedence order.
+
+Running the Makefile's targets by hand on a pnpm/yarn repo needs that manager on `PATH`. In CI it always is: the reusable workflow runs `corepack enable` before any `make` target.
+
+One gap: the advisory `npm audit` step (the one that runs when the repo has *not* added an `audit-ci` config) is npm-only — a pnpm/yarn repo without an `audit-ci` config gets a notice instead, not silent advisory coverage. That is true of the Makefile route too, and for the same reason: the crash-vs-finding JSON parsing was verified against npm's own `audit --json` output shape, and pnpm's/yarn's were not. The **blocking** path (add an `audit-ci` config, see the main table above) works identically for all three package managers — `audit-ci` detects the manager from the lockfile itself.
 
 ## Why there's no "new workflow" picker entry for these templates
 

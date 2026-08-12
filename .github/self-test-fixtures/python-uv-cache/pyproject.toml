@@ -1,0 +1,35 @@
+# ROUND-4 fixture (LOW, "unproven, not known-broken"): the reusable
+# workflow's uv detection and setup-uv caching had ZERO self-test coverage --
+# `grep -in uv .github/workflows/self-test.yml` returned nothing and no
+# fixture anywhere had a uv.lock. So `uses_uv`, `has_uv_cache_target`, and
+# the zero-match-glob hard-fail guard added earlier in this effort (a real
+# HIGH: setup-uv THROWS when cache-dependency-glob is non-empty but matches
+# no files) had never executed in real CI even once.
+#
+# This fixture triggers the detection through the pyproject.toml + uv.lock
+# branch specifically, NOT through the Makefile-grep branch: `uses_uv` is
+# true when the ROOT Makefile mentions `uv` OR when python-directory has both
+# of these files. Mentioning uv in the root Makefile would have turned uv
+# detection on for EVERY self-test job at once (has_makefile_* is
+# root-scoped), which is both slower and a much blunter test. Two files here,
+# scoped to one job.
+#
+# Both files also satisfy the cache-dependency-glob
+# (`<python-directory>/uv.lock` and `<python-directory>/pyproject.toml`), so
+# has_uv_cache_target is true and enable-cache is genuinely on -- the glob
+# has real content to match, which is the condition the guard exists to
+# ensure.
+#
+# Nothing here runs uv itself: the reusable workflow only INSTALLS uv (and
+# primes its cache) at this point -- the Python steps that follow use the
+# system interpreter from setup-python. A fixture that also ran `uv sync`
+# would be testing uv, not this workflow.
+[project]
+name = "python-uv-cache-fixture"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

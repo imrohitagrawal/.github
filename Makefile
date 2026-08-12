@@ -24,8 +24,18 @@
 
 ci: lint typecheck test
 
+# ROUND-4 (HIGH): the recipe is `-true`, not `@true`, and its comment names
+# .github/self-test-fixtures/makefile-trust-dash-negative - deliberately, so
+# that ONE fixture satisfies compute_makefile_trust's directory-mention check
+# and the ONLY thing keeping its trust at false is is_trivial_makefile_recipe
+# recognising Make's `-` (ignore-error) prefix as a prefix. It didn't, before
+# this round: `-true` was read as a real command, earned trust, and skipped
+# the native ruff step. See that fixture's requirements.txt for the full
+# story and scripts/test-makefile-trust.sh for the direct unit coverage.
+# Still a genuine no-op at runtime: make ignores the (nonexistent) error and
+# `true` succeeds, exactly as `@true` did.
 lint:
-	@true
+	-true # .github/self-test-fixtures/makefile-trust-dash-negative
 
 typecheck:
 	@true
