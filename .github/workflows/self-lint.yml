@@ -159,15 +159,18 @@ jobs:
       # self-test assert job and scripts/test-makefile-trust.sh runs below,
       # so an unlinted bug in either would surface as a confusing self-test
       # failure rather than a lint one.
+      # Round-4 review fix: a glob, not a hand-maintained list. The step was
+      # renamed to "scripts/*.sh" while the command still enumerated five
+      # files, so the SIXTH script anyone adds would go unlinted behind a
+      # green step whose name says otherwise - the same class of quiet
+      # over-claim this round is cleaning up elsewhere. The shell expands the
+      # glob at the repo root before docker sees it, and the resulting
+      # relative paths are correct inside the mount.
       - name: "shellcheck: scripts/*.sh"
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
             koalaman/shellcheck@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d \
-            scripts/retrofit-quality-gate.sh \
-            scripts/check-pin-consistency.sh \
-            scripts/test-retrofit-quality-gate.sh \
-            scripts/assert-fixture-job.sh \
-            scripts/test-makefile-trust.sh
+            scripts/*.sh
 
       # ROUND-4 (HIGH): unit tests for reusable-pr-quality.yml's
       # Makefile-trust helpers, extracted from that workflow file itself so

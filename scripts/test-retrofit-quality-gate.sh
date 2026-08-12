@@ -392,7 +392,11 @@ assert_not_contains "never attempted a real git push" "$SCRIPT_OUTPUT" "No confi
 # read back which manager it resolved to.
 #
 # WHICH CHANGE TURNS THESE RED: revert templates/Makefile.node's PKG_MANAGER
-# detection to a bare `npm ci` install target and T13a/T13b/T13d fail.
+# detection to a bare `npm ci` install target and ALL FIVE fail - run, not
+# assumed (an earlier version of this comment said three, on the reasoning
+# that npm-shaped repos would still pass; wrong, because every case asserts
+# the literal `case "<manager>" in` line, which a bare `npm ci` recipe never
+# prints for any manager).
 
 makefile_pm_case() {
 	# makefile_pm_case NAME EXPECTED_MANAGER PACKAGE_JSON [LOCKFILE]

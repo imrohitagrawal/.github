@@ -26,10 +26,16 @@
 # observable from a self-test job (see self-test.yml's comment on the
 # root-makefile-and-semgrep job for why adding one is not free).
 #
-# WHICH CHANGE TURNS THIS RED: revert the `([-@+][[:space:]]*)*` prefix class
-# in is_trivial_makefile_recipe back to `@?` and cases 4-9 fail; revert
-# escape_for_ere to a bare `printf` and case 17 fails; narrow the boundary
-# class back to `[^A-Za-z0-9_.]` and case 18 fails.
+# WHICH CHANGE TURNS THIS RED - each one run, not reasoned about (an earlier
+# version of this comment named cases 17 and 18 from memory and was wrong on
+# both; a review caught it, which is the whole argument for running the
+# mutation instead of writing down what you expect):
+#   - revert the `([-@+][[:space:]]*)*` prefix class in
+#     is_trivial_makefile_recipe to `@?`          -> T04-T09 fail (6 cases)
+#   - revert escape_for_ere to a bare `printf`    -> T18 fails
+#   - narrow the boundary class to `[^A-Za-z0-9_.]` -> T20 fails
+#   - delete the root Makefile's `-` prefix, or the directory name in its
+#     `lint:` recipe comment                      -> T24/T25 fail
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,6 +52,16 @@ sed -n '/# BEGIN makefile-trust-helpers/,/# END makefile-trust-helpers/p' "$WORK
 # the thing counted exists).
 if [ ! -s "$HELPERS" ]; then
 	echo "FATAL: extracted zero lines from $WORKFLOW - the BEGIN/END makefile-trust-helpers markers are missing or renamed." >&2
+	exit 1
+fi
+# The END marker needs its own check (review finding). `sed` with an
+# unmatched closing address runs to end of file, so deleting or renaming only
+# the END marker yields an extraction that is non-empty AND defines all four
+# functions - both guards below pass - while actually sourcing ~900 lines of
+# workflow YAML as shell. On bash 5 that aborts loudly; on bash 3.2 the EXIT
+# trap's own `rm` resets `$?` and this script exits 0 having run zero cases.
+if ! grep -q '# END makefile-trust-helpers' "$HELPERS"; then
+	echo "FATAL: extraction from $WORKFLOW ran past the end of the helper block - the '# END makefile-trust-helpers' marker is missing or renamed." >&2
 	exit 1
 fi
 for fn in extract_makefile_recipe is_trivial_makefile_recipe escape_for_ere compute_makefile_trust; do
@@ -159,6 +175,51 @@ assert_trust "T20 dash is part of the word"       test backend false 'cd backend
 assert_trust "T21 nested path matches"            test src/backend true 'cd src/backend && pytest'
 assert_trust "T22 unrelated recipe, non-root"     test backend false 'pytest -q'
 assert_absent_target "T23 target absent entirely"
+
+echo
+echo "--- the CI fixture's coupling to the REAL root Makefile still holds ---"
+# Review finding: the makefile-trust-dash-negative self-test fixture only
+# DISCRIMINATES between the old and new regex while this repo's own root
+# Makefile keeps BOTH halves of its `lint:` recipe - the `-` prefix and the
+# comment naming that fixture's directory. Drop the comment (it reads as
+# stray) and trust goes false under the OLD regex too, for the unrelated
+# reason that the directory is no longer mentioned: ruff still runs, the
+# fixture's F401 still fires, its assert job still passes, and the `-`-prefix
+# proof silently evaporates with nothing going red. Nothing pinned that, so
+# these two cases do - against the real file, not a fixture.
+#
+# T24 + T25 together mean exactly "old regex -> trusted, new regex ->
+# untrusted", which is what makes that fixture worth running at all.
+FIXTURE_DIR=".github/self-test-fixtures/makefile-trust-dash-negative"
+
+# The pre-round-4 implementation, kept ONLY as a discriminator. Never used to
+# classify anything for real - if this ever needs to change to match the live
+# one, that is the signal these two cases have stopped meaning anything.
+is_trivial_at_prefix_only() {
+	! grep -vqE '^[[:space:]]*(@?[[:space:]]*(#.*)?$|@?[[:space:]]*(echo|true|:|exit[[:space:]]+0)([[:space:]].*)?$)'
+}
+
+CASES=$((CASES + 1))
+root_lint_recipe="$(cd "$REPO_ROOT" && extract_makefile_recipe lint)"
+if [ -n "$root_lint_recipe" ] &&
+	! printf '%s\n' "$root_lint_recipe" | is_trivial_at_prefix_only &&
+	printf '%s\n' "$root_lint_recipe" | grep -qF "$FIXTURE_DIR"; then
+	printf 'ok   %-52s %s\n' "T24 root lint: recipe would be TRUSTED pre-fix" "(so the fixture discriminates)"
+else
+	printf 'FAIL %-52s %s\n' "T24 root lint: recipe would be TRUSTED pre-fix" \
+		"-- the root Makefile's lint: recipe must keep BOTH a Make prefix char that only the new regex strips AND the literal text '$FIXTURE_DIR', or makefile-trust-dash-negative stops proving anything. Recipe is now: $(printf '%s' "$root_lint_recipe" | tr '\n' ';')"
+	FAILURES=$((FAILURES + 1))
+fi
+
+CASES=$((CASES + 1))
+root_lint_trust="$(cd "$REPO_ROOT" && HAS_MAKEFILE_LINT=true HAS_MAKEFILE_TYPECHECK=false HAS_MAKEFILE_TEST=false \
+	compute_makefile_trust lint "$FIXTURE_DIR")"
+if [ "$root_lint_trust" = false ]; then
+	printf 'ok   %-52s trust=%s\n' "T25 root lint: UNTRUSTED for the fixture today" "$root_lint_trust"
+else
+	printf 'FAIL %-52s expected trust=false, got trust=%s\n' "T25 root lint: UNTRUSTED for the fixture today" "$root_lint_trust"
+	FAILURES=$((FAILURES + 1))
+fi
 
 echo
 if [ "$FAILURES" -ne 0 ]; then

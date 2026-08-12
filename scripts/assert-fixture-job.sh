@@ -103,12 +103,24 @@ trap 'rm -f "$RAW_LOG" "$LOG_FILE"' EXIT
 DOWNLOAD_ATTEMPTS=6
 DOWNLOADED=false
 for attempt in $(seq 1 "$DOWNLOAD_ATTEMPTS"); do
+	# `|| true`, not `|| echo 000` (review finding): curl already writes its
+	# own "000" via -w when the transfer never completes, so the extra echo
+	# concatenated into "000000" - garbling the one field a responder needs
+	# to tell 404 from 403 from a network failure. The `||` itself is still
+	# required, since `set -e` aborts on a failing command substitution.
+	#
+	# --connect-timeout/--max-time (review finding): without them a stalled
+	# transfer never returns, so the retry loop below never re-fires and the
+	# required `self-test` check hangs to the job timeout on a PR with no
+	# defect at all.
 	HTTP_CODE="$(curl -sS -L \
+		--connect-timeout 10 --max-time 120 \
 		-H "Authorization: Bearer ${GH_TOKEN}" \
 		-H "Accept: application/vnd.github+json" \
 		-H "X-GitHub-Api-Version: 2022-11-28" \
 		-o "$RAW_LOG" -w '%{http_code}' \
-		"https://api.github.com/repos/${GITHUB_REPO}/actions/jobs/${JOB_ID}/logs" || echo 000)"
+		"https://api.github.com/repos/${GITHUB_REPO}/actions/jobs/${JOB_ID}/logs" || true)"
+	[ -n "$HTTP_CODE" ] || HTTP_CODE=000
 	if [ "$HTTP_CODE" = 200 ] && [ -s "$RAW_LOG" ]; then
 		DOWNLOADED=true
 		break
