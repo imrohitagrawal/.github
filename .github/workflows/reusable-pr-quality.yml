@@ -663,14 +663,27 @@ jobs:
             # citevyn's own pytest-asyncio/fakeredis/etc. live) is NOT installed by
             # plain `pip install -e .` - reproduced directly: a fresh venv seeded
             # this way raised ModuleNotFoundError for both packages, then failed 6
-            # real tests with them missing. `uv` (already installed earlier in this
-            # job for Python-version setup) understands PEP 735 via `uv pip install
-            # --group <name>`, confirmed empirically against citevyn's real
-            # pyproject.toml: installs cleanly, both modules importable afterward.
-            # Same swallow-on-failure as the plain path below (tracked residual,
-            # gate-severity-table's "native Python install" note - not fixed here,
-            # kept consistent rather than half-fixed on just this one line).
-            if grep -q '^\[dependency-groups\]' pyproject.toml && grep -q '^dev = \[' pyproject.toml; then
+            # real tests with them missing.
+            #
+            # Round-1 Codex review caught two real bugs in the first version of this
+            # fix: (1) a grep-based `[dependency-groups]`/`dev` check both misses
+            # valid TOML (compact `dev=[...]`, quoted `"dev"`, indented, spaced
+            # `[ dependency-groups ]`) and false-positives on an unrelated table also
+            # containing a `dev` key elsewhere in the file - fixed by parsing with
+            # `tomllib` (stdlib since Python 3.11, and this step runs after "Set up
+            # Python" pins 3.12) instead, verified against 9 real-world TOML variants
+            # including both failure modes above; (2) `uv` is only installed earlier
+            # in this job when `uses_uv` is true (a Makefile mentions "uv", or
+            # pyproject.toml+uv.lock both exist) - a dependency-groups repo with
+            # neither would silently skip the dev-group install (`|| true` hid the
+            # "uv: command not found" failure). Fixed by installing uv here directly
+            # via `pip install uv` if it isn't already on PATH, rather than touching
+            # the shared "Install uv" step's conditions (which also serve the
+            # unrelated make-ci/Path-1 case) - verified this produces a working `uv`
+            # binary with no active venv, same as the runner's actual environment.
+            HAS_DEV_GROUP=$(python3 -c "import tomllib; d = tomllib.load(open('pyproject.toml', 'rb')); print('true' if 'dev' in d.get('dependency-groups', {}) else 'false')" 2>/dev/null || echo false)
+            if [ "$HAS_DEV_GROUP" = "true" ]; then
+              command -v uv >/dev/null 2>&1 || pip install --quiet uv
               uv pip install --group dev -e . || true
             else
               pip install -e . || true
@@ -841,25 +854,36 @@ jobs:
       # "Dependency not found on PyPI and could not be audited". `--skip-editable`
       # alone does not fix this - empirically, pip-audit 2.10.1 still hard-fails an
       # explicitly-skipped editable package when `--strict` is also set ("distribution
-      # marked as editable", still exit 1). Dropping `--strict` in favor of
-      # `--skip-editable` alone still correctly distinguishes a real finding from a
-      # crash: confirmed empirically in all three cases - clean (exit 0), a genuine
-      # vulnerability present (exit 1, "Found N known vulnerabilities" line present,
-      # matches the crash-vs-finding regex below), and the editable package alone
-      # present with nothing else wrong (exit 0, shown in a separate "Skip Reason"
-      # table, not counted as a finding or a crash). This narrows `--strict`'s
-      # original protection (a genuinely unresolvable THIRD-PARTY dependency now
-      # again reads as skipped rather than fatal) in exchange for not hard-failing on
-      # the one package that can never be resolved via PyPI by design - judged the
-      # right tradeoff since the alternative is this step blocking on every single
-      # PR for every repo using `pip install -e .` at all, not a rare edge case.
+      # marked as editable", still exit 1).
+      #
+      # Round-1 Codex review correctly rejected this fix's first version (dropping
+      # `--strict` outright, keeping only `--skip-editable`): that weakens the audit
+      # for EVERY Python consumer, not just ones with an editable-install problem -
+      # a genuinely unresolvable THIRD-PARTY dependency (private index, direct URL,
+      # yanked release) would then silently read as skipped instead of failing,
+      # reopening exactly the gap WP5's original `--strict` fix (Codex-driven then,
+      # too) closed. Fixed properly instead: snapshot the environment with
+      # `pip freeze --all --exclude-editable` (the local package is never listed, so
+      # pip-audit never tries to resolve it) and audit that snapshot with `-r`,
+      # keeping `--strict` fully intact for every other dependency. `--all` matters -
+      # bare `pip freeze` silently omits pip/setuptools/wheel by default, which would
+      # have re-introduced a different blind spot; verified `--all` includes pip
+      # while `--exclude-editable` still excludes the local package. Verified all
+      # three cases against citevyn's real pyproject.toml: a real vulnerability
+      # (forced via a known-vulnerable pinned pip) still fails with `--strict` intact
+      # and the "Found N known vulnerabilities" line present; a clean environment
+      # exits 0; the editable package present and nothing else wrong exits 0 without
+      # ever being resolved against PyPI.
       - name: pip-audit — advisory
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_pip_audit_ignore == 'false'
         working-directory: ${{ inputs.python-directory }}
         run: |
           set +e
-          OUTPUT=$(pip-audit --skip-editable 2>&1)
+          PIP_AUDIT_SNAPSHOT="$(mktemp)"
+          pip freeze --all --exclude-editable > "$PIP_AUDIT_SNAPSHOT"
+          OUTPUT=$(pip-audit --strict -r "$PIP_AUDIT_SNAPSHOT" 2>&1)
           PIP_AUDIT_EXIT=$?
+          rm -f "$PIP_AUDIT_SNAPSHOT"
           set -e
           echo "$OUTPUT"
           if [ "$PIP_AUDIT_EXIT" -eq 0 ]; then
@@ -877,10 +901,11 @@ jobs:
       # pip-audit needs this workflow to invent one). Every surviving ID becomes its
       # own `--ignore-vuln <ID>`; anything pip-audit still reports past that filter is
       # by definition unreviewed, so no swallow. Same crash-vs-finding signal as the
-      # advisory step - and the same `--skip-editable` (not `--strict`) fix, for the
-      # same reason: the local editable package can never be resolved via PyPI, so
-      # `--strict` hard-fails this step on every PR for any repo using
-      # `pip install -e .`, promoted (blocking) or not. See the advisory step's
+      # advisory step - and the same `pip freeze --all --exclude-editable` snapshot
+      # fix, for the same reason: the local editable package can never be resolved
+      # via PyPI, so auditing it directly hard-fails this step on every PR for any
+      # repo using `pip install -e .`, promoted (blocking) or not - while keeping
+      # `--strict` fully intact for every other dependency. See the advisory step's
       # comment above for the full empirical verification.
       - name: pip-audit (ignore-list) — blocking
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_pip_audit_ignore == 'true'
@@ -894,8 +919,11 @@ jobs:
             IGNORE_ARGS+=(--ignore-vuln "$line")
           done < .pip-audit-ignore
           set +e
-          OUTPUT=$(pip-audit --skip-editable "${IGNORE_ARGS[@]}" 2>&1)
+          PIP_AUDIT_SNAPSHOT="$(mktemp)"
+          pip freeze --all --exclude-editable > "$PIP_AUDIT_SNAPSHOT"
+          OUTPUT=$(pip-audit --strict -r "$PIP_AUDIT_SNAPSHOT" "${IGNORE_ARGS[@]}" 2>&1)
           PIP_AUDIT_EXIT=$?
+          rm -f "$PIP_AUDIT_SNAPSHOT"
           set -e
           echo "$OUTPUT"
           if [ "$PIP_AUDIT_EXIT" -eq 0 ]; then
