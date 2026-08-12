@@ -45,7 +45,12 @@ Making these required branch-protection status checks (alongside WP0's existing 
 
 ## Repo-onboarding
 
-Onboarding a target repo is roughly 10 hand-run steps spanning local Git/repository file changes, GitHub itself (branch protection lives in repo Settings), and the ChatGPT UI for Codex — not a 5-minute task. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps. A future minimal template repo and retrofit script (a planned follow-up, not yet built or tracked anywhere in this repo) are intended to shrink this considerably; until then, budget real time for the manual steps.
+Onboarding a target repo is roughly 10 steps spanning local Git/repository file changes, GitHub itself (branch protection lives in repo Settings), and the ChatGPT UI for Codex — not a 5-minute task even with the automation below. See [`docs/repo-onboarding.md`](docs/repo-onboarding.md) for the exact steps.
+
+Two things shrink the manual part considerably (WP10):
+
+- **A brand-new repo**: create it from [`imrohitagrawal/repo-template`](https://github.com/imrohitagrawal/repo-template) via GitHub's "Use this template" button — it already has the caller workflow, `AGENTS.md`, `CODEOWNERS`, `dependabot.yml`, and starter Makefiles.
+- **An existing repo**: run [`scripts/retrofit-quality-gate.sh`](scripts/retrofit-quality-gate.sh), which automates steps 1–6 of `docs/repo-onboarding.md` mechanically (copying in the same files, detecting your stack, opening a branch/commit) without clobbering anything that's already there. Steps 7–10 (branch protection, Codex enablement, opening a real test PR) still require human judgment and external UI access, and stay manual.
 
 ## Layout
 
@@ -71,8 +76,11 @@ Onboarding a target repo is roughly 10 hand-run steps spanning local Git/reposit
       frontend/
     node-lint-violation/         # deliberately fails — proves the gate actually blocks (npm lint)
     python-test-failure/         # deliberately fails — proves the gate actually blocks (pytest)
+    python-dev-group/            # WP-Consumer: proves the PEP 735 dependency-group install path works
   CODEOWNERS                     # WP1: this repo's own code owners (adapted from templates/CODEOWNERS)
   dependabot.yml                 # WP2: dependabot config for this repo's own github-actions ecosystem
+scripts/
+  retrofit-quality-gate.sh       # WP10: automates onboarding steps 1-6 for an EXISTING repo
 templates/
   AGENTS.md                      # Codex review guidance
   CODEOWNERS
