@@ -1,0 +1,7 @@
+# Round-3 fix (caught by real CI, not local testing): this fixture had no
+# pyproject.toml/requirements.txt/setup.py at all, so has_python evaluated
+# false and the entire Python toolchain -- including the bandit step this
+# fixture exists to test -- was skipped outright. The job trivially
+# "passed" because nothing that could fail ever ran. Comment-only
+# (no real dependency) so ruff/pip-audit stay clean and bandit remains the
+# fixture's one plausible failure point.

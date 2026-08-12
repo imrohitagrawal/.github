@@ -1,0 +1,5 @@
+# Deliberately does NOT list PYSEC-2020-96 or PYSEC-2021-142 (the real IDs
+# PyYAML==5.3 triggers) -- this file exists to prove the blocking step still
+# fails when the ignore-list doesn't cover the actual finding, not to
+# demonstrate the ignore-list mechanism itself.
+CVE-2099-99999

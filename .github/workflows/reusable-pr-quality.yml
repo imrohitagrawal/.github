@@ -125,24 +125,39 @@ name: PR Quality Gate (reusable)
 #     and this workflow has no way to inspect what a `ci:` recipe actually does to
 #     detect that case from the outside. Left undetected/unfixed rather than guessed
 #     at, same posture as the opaque-`make ci`-only residual above.
-#   - STACK-DIRECTORY-AWARE SKIP (review fix, not part of the original design):
-#     root-only Makefile detection (has_makefile_<check>) cannot tell WHICH stack a
-#     discrete target actually covers - citevyn's own `test:` target, for example, runs
-#     only `cd backend && uv run pytest`, never touching `frontend/`. Skipping the
-#     native step for BOTH stacks whenever a root Makefile target merely exists (the
-#     original WP7 design) would silently drop frontend test coverage entirely the
-#     moment citevyn repins with `node-directory: frontend` - exactly the "an
-#     explicitly-declared stack silently gets no lint/typecheck/test... while the gate
-#     still reports green" failure mode this file exists to prevent (see the WP6
-#     hardening comment below). Fixed by only trusting the root-Makefile skip when
-#     that stack's OWN directory input is '.' (the stack lives at repo root, the same
-#     place the Makefile does) - see each native step's `if:` below. For a genuine
-#     split-directory monorepo (any stack directory != '.'), the native step now runs
-#     IN ADDITION to the discrete Makefile target for that check - reintroducing
-#     F6/F7's double-run collision for that narrower case, deliberately: a redundant
-#     double-run is a far smaller defect than a silent coverage hole, and root-only
-#     repos (today's only real shape, until a consumer sets a non-'.' directory input)
-#     are unaffected either way.
+#   - STACK-DIRECTORY-AWARE, CONTENT-AWARE SKIP (H2/H7 review fix, supersedes an
+#     earlier directory-only version of this same fix): root-only Makefile detection
+#     (has_makefile_<check>) cannot tell WHICH stack a discrete target actually
+#     covers, or whether it does anything relevant to that check at all - just that a
+#     target with that name exists (`grep -q '^lint:' Makefile`). That produces two
+#     opposite failure modes:
+#       - directory == '.': the original WP7 design trusted ANY same-named target
+#         unconditionally, including a no-op placeholder - reproduced (H2): a
+#         Makefile with `lint: @echo unrelated` plus a genuinely failing native lint
+#         script skipped the one step that would have caught it, gate reported green.
+#       - directory != '.': the first review fix for this (still shipped in some
+#         history) never trusted a root target for a non-root stack AT ALL, regardless
+#         of content - citevyn's own real `test: cd backend && uv run pytest` target,
+#         with `python-directory: backend`, got zero credit even though it
+#         demonstrably already covers that exact directory, so the native pytest step
+#         re-ran the same suite on every single PR (measured, H7: ~70-80% of total job
+#         wall-clock was pure duplicate work).
+#     Both are one root cause (trust-by-name, not trust-by-content), fixed by one
+#     mechanism instead of two separate patches: `trust_makefile_<check>_for_<node|
+#     python>` (computed in "Detect project layout" below, replacing
+#     has_makefile_<check> in each native step's own skip condition ONLY - "Run make
+#     <check>" above still runs whenever has_makefile_<check> is true regardless of
+#     trust; running an untrusted target is harmless, it just means the native step
+#     also runs). A target is trusted for a given stack directory when its recipe body
+#     is non-trivial (not just comments/`echo`/`true`/`exit 0` - closes the
+#     directory=='.' false-green case) AND, for a non-root directory, the recipe's own
+#     text mentions that directory by name (closes the directory!='.' redundant-cost
+#     case). This is a documented, bounded heuristic, not full static analysis - a
+#     recipe reading `cd backend && echo "not really running anything"` would still
+#     pass it. KNOWN, ACCEPTED RESIDUAL, same posture as every other documented
+#     trade-off in this file: narrower than perfect verification, chosen because it's
+#     the signal already available (the recipe's own text) rather than executing it
+#     speculatively to find out.
 #   - Security/audit steps (bandit, npm audit, pip-audit) are unaffected by WHICH
 #     Makefile path (discrete targets vs. `make ci` fallback vs. neither) is in play -
 #     they keep running per-stack-directory as WP5 already wired them, based on
@@ -389,10 +404,151 @@ jobs:
           # circuit, so this does NOT reproduce the mixed OR/AND binding bug the
           # has_mypy_config comment below warns about (that one chains `||` before
           # `&& grep`; this one doesn't).
-          echo "has_makefile_lint=$([ -f Makefile ] && grep -q '^lint:' Makefile && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "has_makefile_typecheck=$([ -f Makefile ] && grep -q '^typecheck:' Makefile && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "has_makefile_test=$([ -f Makefile ] && grep -q '^test:' Makefile && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          HAS_MAKEFILE_LINT=$([ -f Makefile ] && grep -q '^lint:' Makefile && echo true || echo false)
+          HAS_MAKEFILE_TYPECHECK=$([ -f Makefile ] && grep -q '^typecheck:' Makefile && echo true || echo false)
+          HAS_MAKEFILE_TEST=$([ -f Makefile ] && grep -q '^test:' Makefile && echo true || echo false)
+          echo "has_makefile_lint=$HAS_MAKEFILE_LINT" >> "$GITHUB_OUTPUT"
+          echo "has_makefile_typecheck=$HAS_MAKEFILE_TYPECHECK" >> "$GITHUB_OUTPUT"
+          echo "has_makefile_test=$HAS_MAKEFILE_TEST" >> "$GITHUB_OUTPUT"
+
+          # H2/H7 review fix: has_makefile_<check> above is presence-only ("a target
+          # with this name exists"). trust_makefile_<check>_for_<node|python> below is
+          # the content-aware signal each native step's own skip condition actually
+          # uses - see the WP7 header comment's "STACK-DIRECTORY-AWARE, CONTENT-AWARE
+          # SKIP" bullet for the full mechanism and why. Captured as shell functions
+          # (not inlined) since this needs to run up to 6 times (3 checks x 2 stacks)
+          # with the same logic - defined here, used immediately below, both scoped to
+          # this one step's single shell invocation (functions don't persist across
+          # steps).
+          extract_makefile_recipe() {
+            # $1 = target name. Prints every tab-indented line following that
+            # target's own line, stopping at the first non-indented line - a
+            # standard Makefile recipe block.
+            awk -v t="^$1:" '$0 ~ t {f=1; next} /^[^\t]/ {f=0} f' Makefile
+          }
+          is_trivial_makefile_recipe() {
+            # stdin = recipe body. Trivial = every surviving line is empty, a
+            # comment, or a bare no-op invocation (@?echo/@?true/@?:/@?exit 0).
+            ! grep -vqE '^[[:space:]]*(@?[[:space:]]*(#.*)?$|@?[[:space:]]*(echo|true|:|exit[[:space:]]+0)([[:space:]].*)?$)'
+          }
+          # H2/H7 review fix (HIGH, confirmed): splicing a directory input
+          # straight into an ERE without escaping let a `.` in the directory
+          # value act as a regex WILDCARD instead of a literal dot (reproduced:
+          # directory "api.old" matched unrelated recipe text "apiXold").
+          # Escapes every ERE metacharacter so the directory value can only
+          # ever match itself literally.
+          escape_for_ere() {
+            printf '%s' "$1" | sed -e 's/[][\.^$*+?(){}|]/\\&/g'
+          }
+          compute_makefile_trust() {
+            # $1 = check name (lint/typecheck/test), $2 = that stack's directory
+            # input value.
+            has=""
+            case "$1" in
+            lint) has="$HAS_MAKEFILE_LINT" ;;
+            typecheck) has="$HAS_MAKEFILE_TYPECHECK" ;;
+            test) has="$HAS_MAKEFILE_TEST" ;;
+            esac
+            if [ "$has" != true ]; then
+              echo false
+              return
+            fi
+            recipe="$(extract_makefile_recipe "$1")"
+            if echo "$recipe" | is_trivial_makefile_recipe; then
+              echo false
+              return
+            fi
+            if [ "$2" = "." ]; then
+              echo true
+              return
+            fi
+            # H2/H7 review fix (HIGH, confirmed): the boundary class used to
+            # exclude only [A-Za-z0-9_.] as "not a delimiter" - so `-` counted
+            # as a valid delimiter, and a directory value like "backend"
+            # wrongly matched inside unrelated text like "backend-legacy"
+            # (reproduced directly). Directory names routinely contain `-`
+            # and `/` (dash-suffixed variants, nested paths) without being a
+            # different directory each time one appears - widened here so
+            # those characters count as part of the "word" being matched, not
+            # as delimiters, matching how a real path segment is bounded (by
+            # whitespace, quotes, or string start/end - not by punctuation
+            # that's legal inside the segment itself).
+            escaped_dir="$(escape_for_ere "$2")"
+            if echo "$recipe" | grep -qE "(^|[^A-Za-z0-9_./-])${escaped_dir}([^A-Za-z0-9_./-]|\$)"; then
+              echo true
+            else
+              echo false
+            fi
+          }
+          # Single braced block, not six individual redirects (shellcheck SC2129) -
+          # the only spot in this step where that pattern was worth avoiding rather
+          # than adding to the pre-existing, already-documented SC2129 count in
+          # self-lint.yml's own suppression comment.
+          {
+            echo "trust_makefile_lint_for_node=$(compute_makefile_trust lint "$NODE_DIR")"
+            echo "trust_makefile_typecheck_for_node=$(compute_makefile_trust typecheck "$NODE_DIR")"
+            echo "trust_makefile_test_for_node=$(compute_makefile_trust test "$NODE_DIR")"
+            echo "trust_makefile_lint_for_python=$(compute_makefile_trust lint "$PYTHON_DIR")"
+            echo "trust_makefile_typecheck_for_python=$(compute_makefile_trust typecheck "$PYTHON_DIR")"
+            echo "trust_makefile_test_for_python=$(compute_makefile_trust test "$PYTHON_DIR")"
+          } >> "$GITHUB_OUTPUT"
+
           echo "has_package_json=$([ -f "$NODE_DIR/package.json" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+          # H1 review fix: every Node step below used to hardcode `npm`, with no
+          # detection at all - a pnpm-only or yarn-only repo (a lockfile other than
+          # package-lock.json, no npm one) hit `npm ci`'s own hard failure
+          # ("can only install with an existing package-lock.json") on its very
+          # first PR, no escape hatch (the recommended Makefile.node template's own
+          # install target was itself `npm ci`). `packageManager` (Corepack's own
+          # field, checked first - matches real Corepack precedence) wins over
+          # lockfile inference; default stays npm when neither signal is present, so
+          # every existing npm-only consumer's behavior is byte-for-byte unchanged.
+          PM_FIELD=""
+          if [ -f "$NODE_DIR/package.json" ]; then
+            PM_FIELD=$(jq -r '.packageManager // empty' "$NODE_DIR/package.json" 2>/dev/null || echo "")
+          fi
+          if [ -n "$PM_FIELD" ]; then
+            NODE_PACKAGE_MANAGER="${PM_FIELD%%@*}"
+          elif [ -f "$NODE_DIR/pnpm-lock.yaml" ]; then
+            NODE_PACKAGE_MANAGER="pnpm"
+          elif [ -f "$NODE_DIR/yarn.lock" ]; then
+            NODE_PACKAGE_MANAGER="yarn"
+          else
+            NODE_PACKAGE_MANAGER="npm"
+          fi
+          # SECURITY FIX (review finding, CRITICAL x2): PM_FIELD comes from the
+          # PR's own package.json - attacker-controlled content on every fork PR
+          # (templates/caller-pr-quality.yml triggers on plain pull_request, not
+          # pull_request_target). Before this allowlist, an unvalidated
+          # NODE_PACKAGE_MANAGER was (a) re-interpolated via a GitHub Actions
+          # expression directly into `case "..." in` at 5 run: sites below -
+          # GitHub substitutes that expression syntax into the script TEXT
+          # before bash ever parses it (NOTE: literally writing that syntax in
+          # this comment, even to describe it, would itself be substituted and
+          # break YAML parsing - deliberately not spelled out here, found the
+          # hard way while drafting this exact comment), so a `"` in the
+          # value broke out of the quoted case argument for arbitrary shell
+          # injection (reproduced: a crafted packageManager field achieved real
+          # command execution on the runner) - and (b) echoed unsanitized into
+          # $GITHUB_OUTPUT, where an embedded newline (packageManager fields are
+          # read via `jq -r`, which decodes JSON's own \n escapes to real
+          # newlines) let a crafted value forge EXTRA key=value lines - such as
+          # trust_makefile_test_for_node=true or has_package_json=false - that
+          # silently disable checks (reproduced: a crafted value flipped three
+          # trust_makefile_*_for_node outputs to 'true' and has_package_json to
+          # 'false', exactly the "check quietly finds nothing, job still reports
+          # green" failure class this file exists to prevent). Restricting to a
+          # fixed allowlist here closes BOTH: the value can never again contain
+          # a `"`, a newline, or anything the 5 case statements don't already
+          # explicitly branch on. Falls back to npm (today's universal default)
+          # rather than failing the job outright, matching this step's existing
+          # fail-open-to-npm posture for any other unrecognized signal.
+          case "$NODE_PACKAGE_MANAGER" in
+          npm | pnpm | yarn) ;;
+          *) NODE_PACKAGE_MANAGER="npm" ;;
+          esac
+          echo "node_package_manager=$NODE_PACKAGE_MANAGER" >> "$GITHUB_OUTPUT"
           echo "has_python=$([ -f "$PYTHON_DIR/pyproject.toml" ] || [ -f "$PYTHON_DIR/requirements.txt" ] || [ -f "$PYTHON_DIR/setup.py" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           # Written as an if/else, not a chain: `A || B || C && grep` binds as
           # `((A||B||C) && grep)`, so the grep on pyproject.toml gated ALL three
@@ -404,7 +560,26 @@ jobs:
             echo "has_mypy_config=false" >> "$GITHUB_OUTPUT"
           fi
           echo "uses_uv=$([ -f Makefile ] && grep -qE '(^|[^a-zA-Z])uv([^a-zA-Z]|$)' Makefile && echo true || ([ -f "$PYTHON_DIR/pyproject.toml" ] && [ -f "$PYTHON_DIR/uv.lock" ] && echo true || echo false))" >> "$GITHUB_OUTPUT"
-          echo "uses_node=$([ -f "$NODE_DIR/.nvmrc" ] || [ -f "$NODE_DIR/.node-version" ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          # H8 review fix (HIGH, confirmed): uses_uv can be true via the bare
+          # Makefile-grep path above with NONE of uv.lock/pyproject.toml/
+          # requirements*.txt existing in python-directory (e.g. a Makefile
+          # comment or a variable named uv_version, before any of those files
+          # exist). setup-uv's cache-dependency-glob THROWS when it's non-empty
+          # but matches zero files (verified against its pinned source,
+          # restore-cache.ts's computeKeys - contrary to this file's own
+          # earlier comment claiming a graceful degrade, which conflated that
+          # with the action's genuinely-graceful EMPTY-STRING-glob case, a
+          # different code path). Gates enable-cache on at least one of those
+          # three files actually existing, so caching is only ever attempted
+          # when there's real content for the glob to match.
+          # Round-2 review fix (cosmetic): braced, not two more individual
+          # redirects - keeps this file's own SC2129 count from silently
+          # growing (self-lint.yml's suppression is message-text-based, not
+          # line-scoped, so a new occurrence would otherwise go unnoticed).
+          {
+            echo "has_uv_cache_target=$([ -f "$PYTHON_DIR/uv.lock" ] || [ -f "$PYTHON_DIR/pyproject.toml" ] || ls "$PYTHON_DIR"/requirements*.txt >/dev/null 2>&1 && echo true || echo false)"
+            echo "uses_node=$([ -f "$NODE_DIR/.nvmrc" ] || [ -f "$NODE_DIR/.node-version" ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
 
           # WP5: audit-ci has no default config filename of its own (its CLI always
           # requires an explicit --config path) - these three names, checked in this
@@ -432,6 +607,29 @@ jobs:
           echo "has_pip_audit_ignore=$([ -f "$PYTHON_DIR/.pip-audit-ignore" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       # ---------- Tooling install (needed by Path 1 — make ci) ----------
+      # H8: enable-cache/cache-dependency-glob are documented, zero-extra-infra
+      # options on this exact action (verified against astral-sh/setup-uv's own
+      # README, v3.2.4) - not previously used anywhere in this file.
+      # H8 review fix (HIGH, confirmed): an earlier version of this comment
+      # claimed an unmatched glob "degrades to a less-precise cache key, not
+      # an error" - false. Verified against setup-uv's pinned source
+      # (restore-cache.ts computeKeys): a non-empty glob that matches ZERO
+      # files THROWS ("No file in <cwd> matched to [...]"), failing the step
+      # outright - the action's genuinely-graceful case is an EXPLICIT EMPTY
+      # STRING glob (its documented "never invalidate the cache" behavior), a
+      # different code path this file was conflating with the zero-match
+      # case. Since uses_uv can be true via the bare Makefile-grep path with
+      # none of uv.lock/pyproject.toml/requirements*.txt existing yet,
+      # enable-cache/cache-dependency-glob are now gated on
+      # has_uv_cache_target (at least one of those three files actually
+      # existing in python-directory) so caching is only attempted when
+      # there's real content for the glob to match - falls back to no caching
+      # (today's pre-H8 behavior) rather than failing the job outright.
+      # Multiple glob lines (the action's own documented multi-pattern
+      # syntax); globs are relative to the repo root per the action's own
+      # docs, so python-directory is spliced in via format() to scope
+      # correctly for a monorepo, same pattern this file already uses for
+      # hashFiles below.
       - name: Install uv
         if: steps.detect.outputs.uses_uv == 'true'
         uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
@@ -440,12 +638,55 @@ jobs:
           # and Actions ignores unknown inputs with only a warning. Python comes from
           # the setup-python step below, for uv and non-uv alike.
           version: "0.12.3"
+          enable-cache: ${{ steps.detect.outputs.has_uv_cache_target }}
+          cache-dependency-glob: |
+            ${{ inputs.python-directory }}/uv.lock
+            ${{ inputs.python-directory }}/pyproject.toml
+            ${{ inputs.python-directory }}/requirements*.txt
 
+      # H8 review fix (CRITICAL, confirmed independently by 3 reviewers):
+      # `cache: pnpm`/`cache: yarn` here USED to hard-crash "Install Node.js"
+      # for every real pnpm consumer - actions/setup-node's cache resolution
+      # shells out to `pnpm store path --silent`/`yarn cache dir` SYNCHRONOUSLY
+      # inside this same step (verified against its pinned source,
+      # cache-utils.ts), and pnpm isn't on PATH yet at this point - "Enable
+      # Corepack" (which provides the pnpm/yarn shims) runs AFTER this step,
+      # and stock GitHub-hosted ubuntu-latest runners don't preinstall pnpm
+      # (verified against actions/runner-images' own Ubuntu2404-Readme.md -
+      # yarn 1.22.22 ships preinstalled, pnpm does not). `io.which()` throws on
+      # a missing binary rather than degrading to a cache-miss - reproduced
+      # directly with the real @actions/exec package. Fixed by restricting
+      # `cache:` to npm only, which never needs Corepack (npm ships with
+      # Node.js itself) - genuinely gated on has_package_json specifically,
+      # not this step's own broader `if:` above (the step also runs when only
+      # uses_node is true, no package.json at all, where there's no lockfile
+      # for cache-dependency-path to point at).
+      # KNOWN, ACCEPTED RESIDUAL: pnpm/yarn consumers get no dependency
+      # caching yet (H8's original goal for those two managers) - restoring it
+      # correctly needs either reordering "Enable Corepack" before this step
+      # (which itself needs Node.js already on PATH, i.e. splitting this step
+      # in two) or a manual actions/cache step keyed on the resolved store
+      # path AFTER Corepack runs - real design work deferred rather than
+      # rushed back in under this fix's own review-response scope. npm - the
+      # only manager most consumers use today (verified: every current
+      # self-test fixture except node-pnpm-only) - keeps the real caching win.
       - name: Install Node.js
         if: steps.detect.outputs.has_package_json == 'true' || steps.detect.outputs.uses_node == 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
+          cache: ${{ steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.node_package_manager == 'npm' && 'npm' || '' }}
+          cache-dependency-path: ${{ format('{0}/package-lock.json', inputs.node-directory) }}
+
+      # H1: only needed for pnpm/yarn - npm ships with Node itself. If
+      # `packageManager` is set, Corepack pins the exact declared version on
+      # first invocation (fully reproducible); if only a lockfile was found (no
+      # `packageManager` field), Corepack installs its own "known good" default
+      # for that manager instead - a minor, documented non-determinism (see
+      # docs/repo-onboarding.md), not blocking.
+      - name: Enable Corepack
+        if: steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.node_package_manager != 'npm'
+        run: corepack enable
 
       # ---------- System Python for non-uv Python projects ----------
       # Gated on has_python ALONE, deliberately. An earlier version of this fix
@@ -453,11 +694,22 @@ jobs:
       # had covered the uv path - which left uv repos with NO interpreter, because
       # astral-sh/setup-uv@v3 has no `python-version` input and installs only the uv
       # binary. Every Python repo gets exactly one interpreter, here, at 3.12.
+      # H8: `cache: 'pip'` needs no extra conditional (this step's own `if:` -
+      # has_python alone - already guarantees at least one of the three
+      # manifest shapes below exists). `setup.py` is included alongside
+      # requirements.txt/pyproject.toml because has_python can be true via
+      # setup.py alone, with neither of the other two present - omitting it
+      # would leave that shape with no file for the glob to match.
       - name: Set up Python
         if: steps.detect.outputs.has_python == 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            ${{ inputs.python-directory }}/requirements.txt
+            ${{ inputs.python-directory }}/pyproject.toml
+            ${{ inputs.python-directory }}/setup.py
 
       # ---------- Path 1: Makefile-driven ----------
       # Root-only detection kept as-is (same as WP6's directory-input scope for the
@@ -515,55 +767,119 @@ jobs:
         run: make ci
 
       # ---------- Path 2: Node ----------
-      - name: npm ci
+      # H1: dispatches on node_package_manager (npm/pnpm/yarn, from "Detect
+      # project layout" above) instead of hardcoding npm - a pnpm-only or
+      # yarn-only repo (a lockfile other than package-lock.json) used to hit
+      # `npm ci`'s own hard failure here on every single PR, no escape hatch.
+      # Every existing npm-only consumer is unaffected: node_package_manager
+      # defaults to npm when no pnpm-lock.yaml/yarn.lock/packageManager field is
+      # present, so the `*)` branch below is byte-for-byte what ran before.
+      # SECURITY (review finding): dispatches via env: + a shell variable, not
+      # ${{ steps.detect.outputs.node_package_manager }} interpolated directly
+      # into the script - GitHub substitutes ${{ }} into the run: TEXT before
+      # bash parses it, so any unescaped value there is effectively script
+      # injection, whereas an env: value is passed as a real environment
+      # variable and never re-parsed as shell syntax. Defense-in-depth on top
+      # of "Detect project layout"'s own allowlist validation (this output can
+      # today only ever be npm/pnpm/yarn) - belt and suspenders for a value
+      # this file derives from repo content on every external contributor's PR.
+      - name: Install Node dependencies
         if: steps.detect.outputs.has_package_json == 'true'
         working-directory: ${{ inputs.node-directory }}
-        run: npm ci
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
+        run: |
+          case "$NODE_PACKAGE_MANAGER" in
+          pnpm) pnpm install --frozen-lockfile ;;
+          yarn) yarn install --immutable ;;
+          *) npm ci ;;
+          esac
 
-      # WP7: skipped when the root Makefile has its own discrete `lint:` target AND
-      # node-directory is '.' - `make lint` above runs instead, so this check gets
-      # exactly one severity decision, not two that can disagree (F6/F7). If
-      # node-directory points at a subdirectory, the root Makefile's target can't be
-      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
-      # `jobs:`), so this step runs alongside `make lint` rather than being skipped.
-      - name: npm lint
+      # H2/H7: skipped only when the root Makefile's `lint:` target is TRUSTED for
+      # node-directory (non-trivial recipe, and mentions the directory by name if
+      # it's not '.') - see the WP7 header comment's "STACK-DIRECTORY-AWARE,
+      # CONTENT-AWARE SKIP" bullet. Untrusted (missing, trivial, or doesn't
+      # demonstrably cover this directory) means this step runs alongside `make
+      # lint` rather than being skipped.
+      # H1: the `jq` existence check (rather than each manager's own "run a
+      # possibly-missing script" flag) is deliberate - npm's `--if-present` is
+      # verified to no-op cleanly; pnpm/yarn's equivalents were not independently
+      # verified here, so a single, manager-agnostic check standing in front of
+      # all three avoids trusting an unverified flag on either of the newly
+      # added managers.
+      # SECURITY (review finding): env: indirection, same reasoning as
+      # "Install Node dependencies" above.
+      - name: Node lint
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
-          (steps.detect.outputs.has_makefile_lint == 'false' || inputs.node-directory != '.')
+          steps.detect.outputs.trust_makefile_lint_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
-        run: npm run lint --if-present
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
+        run: |
+          if jq -e '.scripts.lint' package.json > /dev/null 2>&1; then
+            case "$NODE_PACKAGE_MANAGER" in
+            pnpm) pnpm run lint ;;
+            yarn) yarn run lint ;;
+            *) npm run lint --if-present ;;
+            esac
+          fi
 
-      # WP7: skipped when the root Makefile has its own discrete `typecheck:` target
-      # AND node-directory is '.' - `make typecheck` above runs instead (F6/F7). If
-      # node-directory points at a subdirectory, the root Makefile's target can't be
-      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
-      # `jobs:`), so this step runs alongside `make typecheck` rather than skipping.
-      - name: npm typecheck
+      # H2/H7: same mechanism as Node lint above, for `typecheck:`.
+      # SECURITY (review finding): env: indirection, same reasoning as
+      # "Install Node dependencies" above.
+      - name: Node typecheck
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
-          (steps.detect.outputs.has_makefile_typecheck == 'false' || inputs.node-directory != '.')
+          steps.detect.outputs.trust_makefile_typecheck_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
-        run: npm run typecheck --if-present
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
+        run: |
+          if jq -e '.scripts.typecheck' package.json > /dev/null 2>&1; then
+            case "$NODE_PACKAGE_MANAGER" in
+            pnpm) pnpm run typecheck ;;
+            yarn) yarn run typecheck ;;
+            *) npm run typecheck --if-present ;;
+            esac
+          fi
 
-      # WP7: skipped when the root Makefile has its own discrete `test:` target AND
-      # node-directory is '.' - `make test` above runs instead (F6/F7). If
-      # node-directory points at a subdirectory (e.g. citevyn's `frontend/`), the root
-      # Makefile's `test:` target can't be trusted to cover it - citevyn's own `test:`
-      # runs only `cd backend && uv run pytest`, never touching `frontend/` - so
-      # skipping this step in that case would silently drop frontend test coverage
-      # entirely while the gate stayed green (review fix - see STACK-DIRECTORY-AWARE
-      # SKIP above `jobs:`). This step runs alongside `make test` instead.
-      - name: npm test
+      # H2/H7: same mechanism as Node lint above, for `test:`. citevyn's own
+      # `frontend/` case (root Makefile's `test:` target never mentions
+      # `frontend`) stays untrusted, so this still runs - no coverage regression.
+      # SECURITY (review finding): env: indirection, same reasoning as
+      # "Install Node dependencies" above.
+      - name: Node test
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
-          (steps.detect.outputs.has_makefile_test == 'false' || inputs.node-directory != '.')
+          steps.detect.outputs.trust_makefile_test_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
-        run: npm test --if-present
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
+        run: |
+          if jq -e '.scripts.test' package.json > /dev/null 2>&1; then
+            case "$NODE_PACKAGE_MANAGER" in
+            pnpm) pnpm run test ;;
+            yarn) yarn run test ;;
+            *) npm test --if-present ;;
+            esac
+          fi
 
-      - name: npm build
+      # SECURITY (review finding): env: indirection, same reasoning as
+      # "Install Node dependencies" above.
+      - name: Node build
         if: steps.detect.outputs.has_package_json == 'true'
         working-directory: ${{ inputs.node-directory }}
-        run: npm run build --if-present
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
+        run: |
+          if jq -e '.scripts.build' package.json > /dev/null 2>&1; then
+            case "$NODE_PACKAGE_MANAGER" in
+            pnpm) pnpm run build ;;
+            yarn) yarn run build ;;
+            *) npm run build --if-present ;;
+            esac
+          fi
 
       # ADVISORY. A transitive dev-dependency advisory with no fix available would
       # otherwise block every unrelated PR in the repo. BLOCKING WHEN: node-directory
@@ -576,8 +892,19 @@ jobs:
       # (registry unreachable, etc.) - same exit code (1) either way, verified locally
       # against a live vs. a deliberately-unreachable registry. A crashed/offline npm
       # audit fails this step outright instead of being swallowed as advisory noise.
+      # H1: this step's crash-vs-finding JSON parsing was verified specifically
+      # against npm's own `audit --json` output shape (see above) - pnpm/yarn's
+      # audit JSON shapes were not independently verified here, so this stays
+      # npm-only rather than risk silently mis-parsing a crash as a clean run
+      # (or vice versa) for a manager whose output was never checked. A pnpm/
+      # yarn repo gets a clear notice instead of a wrong result; the BLOCKING
+      # audit-ci step below needs no such split - audit-ci already auto-detects
+      # the package manager from the lockfile itself.
       - name: npm audit (high+) — advisory
-        if: steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.has_audit_ci_config == 'false'
+        if: >-
+          steps.detect.outputs.has_package_json == 'true' &&
+          steps.detect.outputs.has_audit_ci_config == 'false' &&
+          steps.detect.outputs.node_package_manager == 'npm'
         working-directory: ${{ inputs.node-directory }}
         run: |
           set +e
@@ -596,6 +923,26 @@ jobs:
             echo "::error::npm audit failed to run (registry/network error, not a finding) - exit $AUDIT_EXIT"
             exit "$AUDIT_EXIT"
           fi
+
+      # H1: pnpm/yarn counterpart of the notice above - this step's own JSON
+      # parsing is npm-specific, so a non-npm repo without an audit-ci config
+      # gets an explicit, visible notice instead of silently having no advisory
+      # dependency-audit coverage at all.
+      # SECURITY (round-2 review fix): env: indirection, same reasoning as
+      # every other node_package_manager consumer - this was the one site
+      # the original fix missed (safe today only because the value is
+      # already allowlist-sanitized upstream, not because of anything this
+      # step itself does - closing it so that's true independent of this
+      # step, matching the other 5 sites).
+      - name: node audit (advisory) — not available for this package manager
+        if: >-
+          steps.detect.outputs.has_package_json == 'true' &&
+          steps.detect.outputs.has_audit_ci_config == 'false' &&
+          steps.detect.outputs.node_package_manager != 'npm'
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
+        run: |
+          echo "::warning::Advisory dependency audit is only implemented for npm today (this repo uses $NODE_PACKAGE_MANAGER). Add an audit-ci config to get BLOCKING coverage instead (audit-ci auto-detects pnpm/yarn) - see docs/repo-onboarding.md."
 
       # BLOCKING WHEN node-directory ships an audit-ci config (see "Detect project
       # layout" above). Bare `npm audit` cannot consume an allowlist at all - only the
@@ -705,15 +1052,14 @@ jobs:
             fi
           fi
 
-      # WP7: skipped when the root Makefile has its own discrete `lint:` target AND
-      # python-directory is '.' - `make lint` above runs instead (F6/F7). If
-      # python-directory points at a subdirectory, the root Makefile's target can't be
-      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
-      # `jobs:`), so this step runs alongside `make lint` rather than being skipped.
+      # H2/H7: skipped only when the root Makefile's `lint:` target is TRUSTED for
+      # python-directory - see the WP7 header comment's "STACK-DIRECTORY-AWARE,
+      # CONTENT-AWARE SKIP" bullet. Untrusted means this step runs alongside
+      # `make lint` rather than being skipped.
       - name: ruff check
         if: >-
           steps.detect.outputs.has_python == 'true' &&
-          (steps.detect.outputs.has_makefile_lint == 'false' || inputs.python-directory != '.')
+          steps.detect.outputs.trust_makefile_lint_for_python == 'false'
         working-directory: ${{ inputs.python-directory }}
         run: ruff check .
 
@@ -727,15 +1073,17 @@ jobs:
       # hashFiles patterns are always relative to GITHUB_WORKSPACE (they ignore
       # working-directory), so python-directory is spliced into each pattern via
       # format() to check for tests inside the declared Python subdirectory.
-      # WP7: skipped when the root Makefile has its own discrete `test:` target AND
-      # python-directory is '.' - `make test` above runs instead (F6/F7). If
-      # python-directory points at a subdirectory, the root Makefile's target can't be
-      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
-      # `jobs:`), so this step runs alongside `make test` rather than being skipped.
+      # H2/H7: skipped only when the root Makefile's `test:` target is TRUSTED for
+      # python-directory (non-trivial, and mentions the directory by name if not
+      # '.') - see the WP7 header comment's "STACK-DIRECTORY-AWARE, CONTENT-AWARE
+      # SKIP" bullet. citevyn's own real `test: cd backend && uv run pytest`
+      # target, with python-directory: backend, is now TRUSTED (its recipe
+      # mentions "backend") - this step correctly skips instead of re-running the
+      # same suite (H7's measured ~70-80% redundant-wall-clock finding).
       - name: pytest
         if: >-
           steps.detect.outputs.has_python == 'true' &&
-          (steps.detect.outputs.has_makefile_test == 'false' || inputs.python-directory != '.') &&
+          steps.detect.outputs.trust_makefile_test_for_python == 'false' &&
           hashFiles(
             format('{0}/tests/**', inputs.python-directory),
             format('{0}/test/**', inputs.python-directory),
@@ -745,16 +1093,15 @@ jobs:
         working-directory: ${{ inputs.python-directory }}
         run: pytest -q || { c=$?; [ $c -eq 5 ] && echo "::warning::pytest collected no tests" || exit $c; }
 
-      # WP7: skipped when the root Makefile has its own discrete `typecheck:` target
-      # AND python-directory is '.' - `make typecheck` above runs instead (F6/F7). If
-      # python-directory points at a subdirectory, the root Makefile's target can't be
-      # trusted to cover it (review fix - see STACK-DIRECTORY-AWARE SKIP above
-      # `jobs:`), so this step runs alongside `make typecheck` rather than skipping.
+      # H2/H7: skipped only when the root Makefile's `typecheck:` target is
+      # TRUSTED for python-directory - see the WP7 header comment's
+      # "STACK-DIRECTORY-AWARE, CONTENT-AWARE SKIP" bullet. Untrusted means this
+      # step runs alongside `make typecheck` rather than being skipped.
       - name: mypy
         if: >-
           steps.detect.outputs.has_python == 'true' &&
           steps.detect.outputs.has_mypy_config == 'true' &&
-          (steps.detect.outputs.has_makefile_typecheck == 'false' || inputs.python-directory != '.')
+          steps.detect.outputs.trust_makefile_typecheck_for_python == 'false'
         working-directory: ${{ inputs.python-directory }}
         run: mypy .
 

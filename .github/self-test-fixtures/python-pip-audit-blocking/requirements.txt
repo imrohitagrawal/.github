@@ -1,0 +1,16 @@
+# C1 self-test fixture (review finding): PyYAML==5.3 carries real,
+# permanently-published vulnerabilities (PYSEC-2020-96, PYSEC-2021-142) —
+# verified locally against the real PyPI advisory data and the pinned
+# pip-audit==2.10.1 tool. .pip-audit-ignore alongside this file does NOT
+# list either ID, so the "pip-audit (ignore-list) — blocking" step must
+# still fail. Proves WP5's blocking-promotion path actually blocks on a
+# real vulnerability not covered by the ignore-list, not just that
+# has_pip_audit_ignore routes to the right step.
+#
+# No .py files in this fixture, deliberately: pip-audit audits the
+# environment snapshot (pip freeze --all --exclude-editable), not source
+# code, so this needs to be the ONLY plausible failure point — a stray .py
+# file would risk an unrelated ruff/bandit/mypy finding muddying which
+# check actually blocked the gate (same discipline as node-lint-violation
+# and python-test-failure).
+PyYAML==5.3
