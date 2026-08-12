@@ -1,0 +1,32 @@
+# WP1 self-test fixture: deliberately empty (no runtime deps). has_python
+# detection only needs one of pyproject.toml/requirements.txt/setup.py to
+# exist; this file is the one chosen for this fixture specifically to avoid
+# pyproject.toml (see the note below on why).
+#
+# This fixture does NOT use pyproject.toml on purpose. WP1 fixture-building
+# discovered a real bug in the native Python path while first trying a
+# pyproject.toml-based fixture: with a working [build-system], `pip install
+# -e .` (reusable-pr-quality.yml's own step) succeeds and installs the
+# fixture package locally - which pip-audit --strict (no --skip-editable)
+# then tries to look up on PyPI to audit, fails ("Dependency not found on
+# PyPI and could not be audited"), and - because that error doesn't match the
+# step's own "Found N known vulnerabilit(y|ies)" crash-vs-finding signal -
+# gets treated as a tool crash and hard-fails the step. Reproduced locally
+# (pip install -e . with a real build-system succeeds, pip-audit --strict
+# then exits 1 with exactly that error for the package's own name) and not
+# specific to this fixture's name - it reproduces for ANY locally
+# editable-installed, not-published-to-PyPI project, which describes most
+# real consumers' own projects. Fixing pip-audit's invocation (adding
+# --skip-editable) is a real fix to reusable-pr-quality.yml itself, out of
+# WP1's stated scope ("purely additive... doesn't touch runtime behavior for
+# existing consumers") - flagged as a new follow-up finding in the WP1
+# commit/PR rather than fixed here. requirements.txt sidesteps it: it's
+# installed unconditionally (no `|| true` swallow, unlike the pyproject.toml
+# path), stays genuinely empty, and lets pip-audit audit only the job's
+# actual pinned tooling (ruff/pytest/mypy/bandit/pip-audit and their
+# transitive deps - all real, published packages) - reproduced locally: with
+# only those installed, pip-audit --strict correctly finds real advisories
+# against the runner's own bundled pip and reports them via the intended
+# "Found N known vulnerabilities" path (advisory warning, step exits 0), not
+# the crash path - proving the advisory step's real, intended behavior rather
+# than an artifact of this fixture's own packaging.

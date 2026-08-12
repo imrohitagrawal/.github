@@ -1,0 +1,12 @@
+{
+  "name": "self-test-node-only",
+  "private": true,
+  "version": "1.0.0",
+  "description": "WP1 self-test fixture: Node-only project (no Python manifest), calls the reusable workflow with default python-directory/node-directory so it exercises the root-detect Node path against a real, checked-in package.json rather than an asserted result.",
+  "scripts": {
+    "lint": "node -e \"console.log('fixture lint: ok')\"",
+    "typecheck": "node -e \"console.log('fixture typecheck: ok')\"",
+    "test": "node --test",
+    "build": "node -e \"console.log('fixture build: ok')\""
+  }
+}

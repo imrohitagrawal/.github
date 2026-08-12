@@ -1,0 +1,9 @@
+{
+  "name": "self-test-node-lint-violation",
+  "private": true,
+  "version": "1.0.0",
+  "description": "WP1 self-test fixture: deliberately failing lint script. Wired into self-test.yml with an inverted assertion (expects this job's result to be 'failure') so the self-test suite proves, on every run, that the reusable workflow's npm-lint step is a real blocking gate — not a swallow — rather than only proving the detection/routing logic for the happy path. This is the fixture that gives the self-test teeth: see the 'assert-negative-fixture-blocks' job in self-test.yml.",
+  "scripts": {
+    "lint": "node -e \"console.error('fixture: deliberate lint failure'); process.exit(1)\""
+  }
+}

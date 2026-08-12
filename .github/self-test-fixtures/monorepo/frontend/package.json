@@ -1,0 +1,12 @@
+{
+  "name": "self-test-monorepo-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "WP1 self-test fixture: monorepo scenario, Node half. Called via the reusable workflow's node-directory: .github/self-test-fixtures/monorepo/frontend input (WP6), proving the per-stack directory input actually works, not the root-detect default.",
+  "scripts": {
+    "lint": "node -e \"console.log('fixture lint: ok')\"",
+    "typecheck": "node -e \"console.log('fixture typecheck: ok')\"",
+    "test": "node --test",
+    "build": "node -e \"console.log('fixture build: ok')\""
+  }
+}

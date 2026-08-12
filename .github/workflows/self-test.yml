@@ -1,0 +1,178 @@
+name: Self-test (reusable-pr-quality.yml)
+
+# WP1 (F1/F25 - "the bootstrap repo does not consume its own product"):
+# exercises reusable-pr-quality.yml via workflow_call against real,
+# checked-in fixture scenarios (.github/self-test-fixtures/) - proving the
+# reusable workflow's own detection/dispatch logic actually works before
+# it's ever tagged, not just that its YAML parses. Before this file, the
+# workflow shipped to every consumer had zero runs, ever (F1).
+#
+# `uses: ./.github/workflows/reusable-pr-quality.yml` (a same-repo relative
+# path, not `imrohitagrawal/.github/.github/workflows/...@<ref>` the way
+# templates/caller-pr-quality.yml calls it) is deliberate: GitHub resolves a
+# relative-path reusable-workflow call at the exact commit of the CALLING
+# workflow run, so on a PR that touches reusable-pr-quality.yml, this
+# exercises the PR's own changes - not a previously-merged tag, which
+# wouldn't exist yet for an in-flight PR and wouldn't validate what's
+# actually changing.
+#
+# Six jobs:
+#   - node-only, python-only, monorepo (WP6 python-directory/node-directory
+#     inputs), no-manifest (this repo's own root - genuinely has no
+#     Makefile/package.json/pyproject.toml/requirements.txt/setup.py today,
+#     verified via `ls` before writing this file - so calling with no
+#     inputs against '.' is a real exercise of the fallback path, not a
+#     fabricated one) - all expected to PASS. Each fixture has real,
+#     executable content (not empty placeholder files) - see each
+#     directory under .github/self-test-fixtures/ and its own comments -
+#     validated locally before being checked in by extracting and running
+#     the exact commands reusable-pr-quality.yml runs (npm ci / npm run
+#     lint,typecheck,test,build / pip install / ruff / pytest / mypy /
+#     bandit / pip-audit) against each fixture directory in a clean venv.
+#   - node-lint-violation - a fixture whose package.json "lint" script
+#     deliberately `process.exit(1)`s - expected to FAIL. This is the
+#     scenario that gives the self-test real teeth: without it, this file
+#     only proves detection/routing works for clean input - it would stay
+#     green even if someone reintroduced `continue-on-error: true` on the
+#     reusable workflow's own npm-lint step (the exact historical bug fixed
+#     in c07ddce, before which nothing but gitleaks could fail this gate
+#     for a Node repo). `continue-on-error` cannot be set on a job that
+#     calls a reusable workflow via `uses:` (verified with actionlint:
+#     "when a reusable workflow is called with 'uses', 'continue-on-error'
+#     is not available") - so this job IS EXPECTED TO SHOW RED on every
+#     self-test run. That is correct, not a bug in this file. The real
+#     pass/fail signal for this scenario is the assert job below, and the
+#     final aggregate job (which is what branch protection should require)
+#     accounts for the expected failure correctly.
+#
+# assert-negative-fixture-blocks inverts node-lint-violation's result: it
+# fails (redding out the aggregate) if that fixture's job did NOT fail,
+# i.e. if the gate silently let a real lint violation through. `if:
+# always()` makes it run regardless of node-lint-violation's own outcome.
+#
+# self-test (the aggregate) is the one stable job name to point branch
+# protection at (WP0, once that's configured) - same reasoning
+# reusable-pr-quality.yml's own header comment gives for staying a single
+# job: one name, regardless of which scenarios ran, with no "a required job
+# quietly reports skipped and counts as green" hazard.
+#
+# HARD-REQUIREMENT PROOF (done once, for real, not asserted - see the WP1
+# commit message for exactly what was broken, run, observed, and reverted):
+# before this file was committed in its current form, the "npm lint" step's
+# exact `npm run lint --if-present` command was extracted from
+# reusable-pr-quality.yml and run locally against this file's
+# node-lint-violation fixture both as-is (real exit 1, matching what this
+# job now correctly reports as failure) and with a `|| true` swallow
+# reintroduced (the shell-level form of the pre-c07ddce continue-on-error
+# bug) appended, which silently turned that same exit 1 into exit 0 despite
+# identical fixture content - reproducing exactly the failure mode this
+# negative fixture and its assert job exist to catch, then reverted.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/reusable-pr-quality.yml'
+      - '.github/workflows/self-test.yml'
+      - '.github/self-test-fixtures/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/reusable-pr-quality.yml'
+      - '.github/workflows/self-test.yml'
+      - '.github/self-test-fixtures/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-only:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      node-directory: .github/self-test-fixtures/node-only
+
+  python-only:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/python-only
+
+  monorepo:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/monorepo/backend
+      node-directory: .github/self-test-fixtures/monorepo/frontend
+
+  no-manifest:
+    # No inputs: both directories default to '.', this repo's own root - see
+    # the header comment above for the verification that root has no
+    # recognized project files today.
+    uses: ./.github/workflows/reusable-pr-quality.yml
+
+  node-lint-violation:
+    # Expected to report "failure" - see the header comment above. Do not
+    # "fix" this job to be green; that would defeat the scenario.
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      node-directory: .github/self-test-fixtures/node-lint-violation
+
+  assert-negative-fixture-blocks:
+    name: assert negative fixture actually blocked
+    needs: [node-lint-violation]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the deliberately-broken fixture failed the gate
+        env:
+          FIXTURE_RESULT: ${{ needs.node-lint-violation.result }}
+        run: |
+          echo "node-lint-violation job result: $FIXTURE_RESULT"
+          if [ "$FIXTURE_RESULT" != "failure" ]; then
+            echo "::error::Expected the node-lint-violation fixture to FAIL the reusable workflow (its lint script deliberately exits 1) but the job result was '$FIXTURE_RESULT'. The gate is not actually blocking on a real lint violation - see F1 and the c07ddce history in reusable-pr-quality.yml's header comment."
+            exit 1
+          fi
+          echo "Confirmed: the reusable workflow correctly failed the job on a real lint violation."
+
+  self-test:
+    name: self-test
+    needs:
+      - node-only
+      - python-only
+      - monorepo
+      - no-manifest
+      - assert-negative-fixture-blocks
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Aggregate scenario results
+        env:
+          NODE_ONLY: ${{ needs.node-only.result }}
+          PYTHON_ONLY: ${{ needs.python-only.result }}
+          MONOREPO: ${{ needs.monorepo.result }}
+          NO_MANIFEST: ${{ needs.no-manifest.result }}
+          NEGATIVE_ASSERT: ${{ needs.assert-negative-fixture-blocks.result }}
+        run: |
+          echo "node-only: $NODE_ONLY"
+          echo "python-only: $PYTHON_ONLY"
+          echo "monorepo: $MONOREPO"
+          echo "no-manifest: $NO_MANIFEST"
+          echo "assert-negative-fixture-blocks: $NEGATIVE_ASSERT"
+          FAILED=0
+          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$NEGATIVE_ASSERT"; do
+            if [ "$r" != "success" ]; then
+              FAILED=1
+            fi
+          done
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::One or more self-test scenarios did not produce their expected result."
+            exit 1
+          fi
+          echo "All self-test scenarios produced their expected result."
