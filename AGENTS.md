@@ -42,10 +42,26 @@ review it with that in mind, not as an isolated docs/CI tweak.
   qualification overclaimed enforcement - as of this commit, neither
   workflow is yet a required branch-protection status check (see
   README.md's Dogfooding section), so a red run does not yet mechanically
-  block a merge. Treat a red `self-test`/`self-lint` run on a PR as a
+  block a merge. Treat a red **`self-test`/`self-lint` job's own
+  conclusion** (not the workflow run's overall conclusion) on a PR as a
   blocking finding anyway, the same as if it were already required -
   wiring that up is tracked as a follow-up, not a reason to relax the bar
   in the meantime.
+- **The `Self-test` workflow's overall run conclusion is expected to be
+  non-green on every run, by design** - real Codex finding on PR #15,
+  fixed here rather than in the workflow file itself: two of its jobs
+  (`node-lint-violation`, `python-test-failure`) deliberately call
+  `reusable-pr-quality.yml` against fixtures crafted to fail it, and
+  `continue-on-error` isn't available on a job that calls a reusable
+  workflow via `uses:` (confirmed with `actionlint`), so those two jobs
+  show red on every single run - that's correct, not a bug (see
+  `self-test.yml`'s own header comment). The signal that actually matters
+  is the final **`self-test` job** (and separately, `self-lint`'s job),
+  which aggregate every scenario's `needs.<job>.result` - including the
+  two negative fixtures' own assert jobs, not their raw pass/fail - and
+  only fail if an assertion is actually violated. Read the specific job's
+  conclusion in the PR checks list, not the workflow run's badge/summary
+  conclusion, which will always show red because of the two jobs above.
 - **Codex is the intelligent reviewer.** It reasons about correctness,
   design, security implications, and missing tests — especially whether a
   change to `reusable-pr-quality.yml` or `templates/caller-pr-quality.yml`

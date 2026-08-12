@@ -25,6 +25,8 @@ This repo consumes its own product, not only ships it (WP1). It has no `package.
 
 Making these required branch-protection status checks (alongside WP0's existing protection) is tracked as a follow-up, not yet done as of this commit.
 
+`self-test`'s overall workflow-run conclusion is expected to show red on every run — two of its jobs deliberately fail the reusable workflow on purpose, to prove the gate actually blocks. The signal that matters is the final `self-test` job's own conclusion specifically, not the run's overall badge; see `AGENTS.md`'s Review principles for the full reasoning (a real Codex finding on PR #15).
+
 ## Review model
 
 | Layer | Tool | Role |
