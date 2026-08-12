@@ -91,6 +91,12 @@ The reusable workflow runs on private repos too — GitHub Actions is free for p
 
 The reusable workflow has a fallback: if no `Makefile` ci target, `package.json`, or Python manifest is found, it runs only the secret scan and posts a notice. This is fine for repos that hold only documentation, schemas, or other non-executable content — Codex + manual review are the only quality layer for those.
 
+## What about pnpm or yarn instead of npm?
+
+Supported. The workflow detects the package manager via `package.json`'s `packageManager` field first (wins if present — this is Corepack's own field, so setting it also gets you a fully reproducible install, pinned to the exact version you declared), falling back to lockfile presence (`pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn) if that field isn't set, and to plain `npm` if neither signal exists. Existing npm-only repos are unaffected either way.
+
+One gap: the advisory `npm audit` step (the one that runs when the repo has *not* added an `audit-ci` config) is npm-only — a pnpm/yarn repo without an `audit-ci` config gets a notice instead, not silent advisory coverage. The **blocking** path (add an `audit-ci` config, see the main table above) works identically for all three package managers — `audit-ci` detects the manager from the lockfile itself.
+
 ## Why there's no "new workflow" picker entry for these templates
 
 GitHub can surface starter workflows directly in a repo's **Actions → New workflow** picker when they live in `.github/workflow-templates/` of an *Organization*-owned `.github` repo. `imrohitagrawal` is a personal User account, not an Organization (`gh api orgs/imrohitagrawal` → `404`) — there is no verified evidence that mechanism works the same way for a user-owned `.github` repo, and GitHub's documented procedure for it is written for org-owned repos specifically. Rather than ship `.github/workflow-templates/` and hope it gets picked up, the actual path is [`imrohitagrawal/repo-template`](https://github.com/imrohitagrawal/repo-template) — a separate, minimal, real template repo (`is_template: true`) that a new repo can be created from directly via "Use this template" — that route doesn't depend on the unverified picker behavior.

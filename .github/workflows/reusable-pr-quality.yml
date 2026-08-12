@@ -473,6 +473,30 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           echo "has_package_json=$([ -f "$NODE_DIR/package.json" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+          # H1 review fix: every Node step below used to hardcode `npm`, with no
+          # detection at all - a pnpm-only or yarn-only repo (a lockfile other than
+          # package-lock.json, no npm one) hit `npm ci`'s own hard failure
+          # ("can only install with an existing package-lock.json") on its very
+          # first PR, no escape hatch (the recommended Makefile.node template's own
+          # install target was itself `npm ci`). `packageManager` (Corepack's own
+          # field, checked first - matches real Corepack precedence) wins over
+          # lockfile inference; default stays npm when neither signal is present, so
+          # every existing npm-only consumer's behavior is byte-for-byte unchanged.
+          PM_FIELD=""
+          if [ -f "$NODE_DIR/package.json" ]; then
+            PM_FIELD=$(jq -r '.packageManager // empty' "$NODE_DIR/package.json" 2>/dev/null || echo "")
+          fi
+          if [ -n "$PM_FIELD" ]; then
+            NODE_PACKAGE_MANAGER="${PM_FIELD%%@*}"
+          elif [ -f "$NODE_DIR/pnpm-lock.yaml" ]; then
+            NODE_PACKAGE_MANAGER="pnpm"
+          elif [ -f "$NODE_DIR/yarn.lock" ]; then
+            NODE_PACKAGE_MANAGER="yarn"
+          else
+            NODE_PACKAGE_MANAGER="npm"
+          fi
+          echo "node_package_manager=$NODE_PACKAGE_MANAGER" >> "$GITHUB_OUTPUT"
           echo "has_python=$([ -f "$PYTHON_DIR/pyproject.toml" ] || [ -f "$PYTHON_DIR/requirements.txt" ] || [ -f "$PYTHON_DIR/setup.py" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           # Written as an if/else, not a chain: `A || B || C && grep` binds as
           # `((A||B||C) && grep)`, so the grep on pyproject.toml gated ALL three
@@ -526,6 +550,16 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
+
+      # H1: only needed for pnpm/yarn - npm ships with Node itself. If
+      # `packageManager` is set, Corepack pins the exact declared version on
+      # first invocation (fully reproducible); if only a lockfile was found (no
+      # `packageManager` field), Corepack installs its own "known good" default
+      # for that manager instead - a minor, documented non-determinism (see
+      # docs/repo-onboarding.md), not blocking.
+      - name: Enable Corepack
+        if: steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.node_package_manager != 'npm'
+        run: corepack enable
 
       # ---------- System Python for non-uv Python projects ----------
       # Gated on has_python ALONE, deliberately. An earlier version of this fix
@@ -595,10 +629,22 @@ jobs:
         run: make ci
 
       # ---------- Path 2: Node ----------
-      - name: npm ci
+      # H1: dispatches on node_package_manager (npm/pnpm/yarn, from "Detect
+      # project layout" above) instead of hardcoding npm - a pnpm-only or
+      # yarn-only repo (a lockfile other than package-lock.json) used to hit
+      # `npm ci`'s own hard failure here on every single PR, no escape hatch.
+      # Every existing npm-only consumer is unaffected: node_package_manager
+      # defaults to npm when no pnpm-lock.yaml/yarn.lock/packageManager field is
+      # present, so the `*)` branch below is byte-for-byte what ran before.
+      - name: Install Node dependencies
         if: steps.detect.outputs.has_package_json == 'true'
         working-directory: ${{ inputs.node-directory }}
-        run: npm ci
+        run: |
+          case "${{ steps.detect.outputs.node_package_manager }}" in
+          pnpm) pnpm install --frozen-lockfile ;;
+          yarn) yarn install --immutable ;;
+          *) npm ci ;;
+          esac
 
       # H2/H7: skipped only when the root Makefile's `lint:` target is TRUSTED for
       # node-directory (non-trivial recipe, and mentions the directory by name if
@@ -606,35 +652,69 @@ jobs:
       # CONTENT-AWARE SKIP" bullet. Untrusted (missing, trivial, or doesn't
       # demonstrably cover this directory) means this step runs alongside `make
       # lint` rather than being skipped.
-      - name: npm lint
+      # H1: the `jq` existence check (rather than each manager's own "run a
+      # possibly-missing script" flag) is deliberate - npm's `--if-present` is
+      # verified to no-op cleanly; pnpm/yarn's equivalents were not independently
+      # verified here, so a single, manager-agnostic check standing in front of
+      # all three avoids trusting an unverified flag on either of the newly
+      # added managers.
+      - name: Node lint
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
           steps.detect.outputs.trust_makefile_lint_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
-        run: npm run lint --if-present
+        run: |
+          if jq -e '.scripts.lint' package.json > /dev/null 2>&1; then
+            case "${{ steps.detect.outputs.node_package_manager }}" in
+            pnpm) pnpm run lint ;;
+            yarn) yarn run lint ;;
+            *) npm run lint --if-present ;;
+            esac
+          fi
 
-      # H2/H7: same mechanism as npm lint above, for `typecheck:`.
-      - name: npm typecheck
+      # H2/H7: same mechanism as Node lint above, for `typecheck:`.
+      - name: Node typecheck
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
           steps.detect.outputs.trust_makefile_typecheck_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
-        run: npm run typecheck --if-present
+        run: |
+          if jq -e '.scripts.typecheck' package.json > /dev/null 2>&1; then
+            case "${{ steps.detect.outputs.node_package_manager }}" in
+            pnpm) pnpm run typecheck ;;
+            yarn) yarn run typecheck ;;
+            *) npm run typecheck --if-present ;;
+            esac
+          fi
 
-      # H2/H7: same mechanism as npm lint above, for `test:`. citevyn's own
+      # H2/H7: same mechanism as Node lint above, for `test:`. citevyn's own
       # `frontend/` case (root Makefile's `test:` target never mentions
       # `frontend`) stays untrusted, so this still runs - no coverage regression.
-      - name: npm test
+      - name: Node test
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
           steps.detect.outputs.trust_makefile_test_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
-        run: npm test --if-present
+        run: |
+          if jq -e '.scripts.test' package.json > /dev/null 2>&1; then
+            case "${{ steps.detect.outputs.node_package_manager }}" in
+            pnpm) pnpm run test ;;
+            yarn) yarn run test ;;
+            *) npm test --if-present ;;
+            esac
+          fi
 
-      - name: npm build
+      - name: Node build
         if: steps.detect.outputs.has_package_json == 'true'
         working-directory: ${{ inputs.node-directory }}
-        run: npm run build --if-present
+        run: |
+          if jq -e '.scripts.build' package.json > /dev/null 2>&1; then
+            case "${{ steps.detect.outputs.node_package_manager }}" in
+            pnpm) pnpm run build ;;
+            yarn) yarn run build ;;
+            *) npm run build --if-present ;;
+            esac
+          fi
 
       # ADVISORY. A transitive dev-dependency advisory with no fix available would
       # otherwise block every unrelated PR in the repo. BLOCKING WHEN: node-directory
@@ -647,8 +727,19 @@ jobs:
       # (registry unreachable, etc.) - same exit code (1) either way, verified locally
       # against a live vs. a deliberately-unreachable registry. A crashed/offline npm
       # audit fails this step outright instead of being swallowed as advisory noise.
+      # H1: this step's crash-vs-finding JSON parsing was verified specifically
+      # against npm's own `audit --json` output shape (see above) - pnpm/yarn's
+      # audit JSON shapes were not independently verified here, so this stays
+      # npm-only rather than risk silently mis-parsing a crash as a clean run
+      # (or vice versa) for a manager whose output was never checked. A pnpm/
+      # yarn repo gets a clear notice instead of a wrong result; the BLOCKING
+      # audit-ci step below needs no such split - audit-ci already auto-detects
+      # the package manager from the lockfile itself.
       - name: npm audit (high+) — advisory
-        if: steps.detect.outputs.has_package_json == 'true' && steps.detect.outputs.has_audit_ci_config == 'false'
+        if: >-
+          steps.detect.outputs.has_package_json == 'true' &&
+          steps.detect.outputs.has_audit_ci_config == 'false' &&
+          steps.detect.outputs.node_package_manager == 'npm'
         working-directory: ${{ inputs.node-directory }}
         run: |
           set +e
@@ -667,6 +758,18 @@ jobs:
             echo "::error::npm audit failed to run (registry/network error, not a finding) - exit $AUDIT_EXIT"
             exit "$AUDIT_EXIT"
           fi
+
+      # H1: pnpm/yarn counterpart of the notice above - this step's own JSON
+      # parsing is npm-specific, so a non-npm repo without an audit-ci config
+      # gets an explicit, visible notice instead of silently having no advisory
+      # dependency-audit coverage at all.
+      - name: node audit (advisory) — not available for this package manager
+        if: >-
+          steps.detect.outputs.has_package_json == 'true' &&
+          steps.detect.outputs.has_audit_ci_config == 'false' &&
+          steps.detect.outputs.node_package_manager != 'npm'
+        run: |
+          echo "::warning::Advisory dependency audit is only implemented for npm today (this repo uses ${{ steps.detect.outputs.node_package_manager }}). Add an audit-ci config to get BLOCKING coverage instead (audit-ci auto-detects pnpm/yarn) - see docs/repo-onboarding.md."
 
       # BLOCKING WHEN node-directory ships an audit-ci config (see "Detect project
       # layout" above). Bare `npm audit` cannot consume an allowlist at all - only the

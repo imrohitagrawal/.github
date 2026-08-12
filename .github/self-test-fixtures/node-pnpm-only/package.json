@@ -1,0 +1,12 @@
+{
+  "name": "self-test-node-pnpm-only",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "pnpm@9.1.0",
+  "description": "H1 self-test fixture (review finding): a standard pnpm-only Node repo (packageManager field + pnpm-lock.yaml, deliberately NO package-lock.json). Before this fix, native `npm ci` hard-failed here on every PR (EUSAGE: npm ci requires an existing package-lock.json). Proves node_package_manager detection + dispatch works end-to-end for a real, non-npm repo shape.",
+  "scripts": {
+    "lint": "node -e \"process.exit(0)\"",
+    "typecheck": "node -e \"process.exit(0)\"",
+    "test": "node -e \"process.exit(0)\""
+  }
+}
