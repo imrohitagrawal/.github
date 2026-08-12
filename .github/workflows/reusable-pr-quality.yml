@@ -658,7 +658,24 @@ jobs:
         working-directory: ${{ inputs.python-directory }}
         run: |
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f pyproject.toml ]; then pip install -e . || true; fi
+          if [ -f pyproject.toml ]; then
+            # WP-Consumer fix: a PEP 735 `[dependency-groups]` `dev` group (where
+            # citevyn's own pytest-asyncio/fakeredis/etc. live) is NOT installed by
+            # plain `pip install -e .` - reproduced directly: a fresh venv seeded
+            # this way raised ModuleNotFoundError for both packages, then failed 6
+            # real tests with them missing. `uv` (already installed earlier in this
+            # job for Python-version setup) understands PEP 735 via `uv pip install
+            # --group <name>`, confirmed empirically against citevyn's real
+            # pyproject.toml: installs cleanly, both modules importable afterward.
+            # Same swallow-on-failure as the plain path below (tracked residual,
+            # gate-severity-table's "native Python install" note - not fixed here,
+            # kept consistent rather than half-fixed on just this one line).
+            if grep -q '^\[dependency-groups\]' pyproject.toml && grep -q '^dev = \[' pyproject.toml; then
+              uv pip install --group dev -e . || true
+            else
+              pip install -e . || true
+            fi
+          fi
 
       # WP7: skipped when the root Makefile has its own discrete `lint:` target AND
       # python-directory is '.' - `make lint` above runs instead (F6/F7). If
@@ -817,12 +834,31 @@ jobs:
       # (gate-severity-table note, "native Python install") - fixing it there fixes
       # this step's blind spot too; not duplicated here to avoid two places owning
       # one fix.
+      # WP-Consumer fix: `--strict` treats the local package itself (installed via
+      # `pip install -e .` just above, always unresolvable via a PyPI lookup by
+      # definition - it's not a third-party dependency) as a hard failure, not just
+      # a skip - reproduced directly against citevyn's real pyproject.toml: exit 1,
+      # "Dependency not found on PyPI and could not be audited". `--skip-editable`
+      # alone does not fix this - empirically, pip-audit 2.10.1 still hard-fails an
+      # explicitly-skipped editable package when `--strict` is also set ("distribution
+      # marked as editable", still exit 1). Dropping `--strict` in favor of
+      # `--skip-editable` alone still correctly distinguishes a real finding from a
+      # crash: confirmed empirically in all three cases - clean (exit 0), a genuine
+      # vulnerability present (exit 1, "Found N known vulnerabilities" line present,
+      # matches the crash-vs-finding regex below), and the editable package alone
+      # present with nothing else wrong (exit 0, shown in a separate "Skip Reason"
+      # table, not counted as a finding or a crash). This narrows `--strict`'s
+      # original protection (a genuinely unresolvable THIRD-PARTY dependency now
+      # again reads as skipped rather than fatal) in exchange for not hard-failing on
+      # the one package that can never be resolved via PyPI by design - judged the
+      # right tradeoff since the alternative is this step blocking on every single
+      # PR for every repo using `pip install -e .` at all, not a rare edge case.
       - name: pip-audit — advisory
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_pip_audit_ignore == 'false'
         working-directory: ${{ inputs.python-directory }}
         run: |
           set +e
-          OUTPUT=$(pip-audit --strict 2>&1)
+          OUTPUT=$(pip-audit --skip-editable 2>&1)
           PIP_AUDIT_EXIT=$?
           set -e
           echo "$OUTPUT"
@@ -841,7 +877,11 @@ jobs:
       # pip-audit needs this workflow to invent one). Every surviving ID becomes its
       # own `--ignore-vuln <ID>`; anything pip-audit still reports past that filter is
       # by definition unreviewed, so no swallow. Same crash-vs-finding signal as the
-      # advisory step.
+      # advisory step - and the same `--skip-editable` (not `--strict`) fix, for the
+      # same reason: the local editable package can never be resolved via PyPI, so
+      # `--strict` hard-fails this step on every PR for any repo using
+      # `pip install -e .`, promoted (blocking) or not. See the advisory step's
+      # comment above for the full empirical verification.
       - name: pip-audit (ignore-list) — blocking
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_pip_audit_ignore == 'true'
         working-directory: ${{ inputs.python-directory }}
@@ -854,7 +894,7 @@ jobs:
             IGNORE_ARGS+=(--ignore-vuln "$line")
           done < .pip-audit-ignore
           set +e
-          OUTPUT=$(pip-audit --strict "${IGNORE_ARGS[@]}" 2>&1)
+          OUTPUT=$(pip-audit --skip-editable "${IGNORE_ARGS[@]}" 2>&1)
           PIP_AUDIT_EXIT=$?
           set -e
           echo "$OUTPUT"
