@@ -61,11 +61,20 @@
 # "Found N known vulnerabilit(y|ies)" line); an unpinned future release
 # changing either could silently break the crash-vs-finding distinction
 # (Codex review, Phase 4).
+#
+# Pinned tools install BEFORE requirements.txt (real GitHub Codex review
+# finding on PR #14, caught after Phase 4 wrapped): the native workflow
+# installs its tool pins first (reusable-pr-quality.yml:650-654) and project
+# requirements after (:656-661), so a repo's own pin in requirements.txt
+# (e.g. `pytest<9` for a plugin that doesn't yet support pytest 9) takes
+# precedence over this template's pins, not the other way around. Installing
+# requirements.txt first, as an earlier version of this file did, would let
+# this template's pins silently overwrite a repo's deliberate constraint.
 
 install:
 	python -m pip install --upgrade pip
-	if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 	pip install ruff==0.16.2 pytest==9.1.1 mypy==2.3.0 bandit==1.9.4 pip-audit==2.10.1
+	if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
 lint: install
 	ruff check .
