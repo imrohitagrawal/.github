@@ -20,7 +20,7 @@ Global GitHub defaults, reusable CI gates, and Codex review guidance for `@imroh
 
 This repo consumes its own product, not only ships it (WP1). It has no `package.json`/`pyproject.toml` — its content IS GitHub Actions YAML and docs — so it runs two first-party workflows on its own PRs:
 
-- **`self-test`** — calls `reusable-pr-quality.yml` via `workflow_call` against real, checked-in fixture scenarios under `.github/self-test-fixtures/` (Node-only, Python-only, a monorepo using the `python-directory`/`node-directory` inputs, the no-manifest fallback, and a deliberately-failing fixture that proves the gate actually blocks rather than silently passing).
+- **`self-test`** — calls `reusable-pr-quality.yml` via `workflow_call` against real, checked-in fixture scenarios under `.github/self-test-fixtures/` (Node-only, Python-only, a monorepo using the `python-directory`/`node-directory` inputs, the no-manifest fallback, and two deliberately-failing fixtures — one Node, one Python — that prove the gate actually blocks rather than silently passing).
 - **`self-lint`** — `actionlint` (with bundled `shellcheck`) on `reusable-pr-quality.yml`, `templates/caller-pr-quality.yml`, and this repo's own workflow files, plus `markdownlint` on the docs.
 
 Making these required branch-protection status checks (alongside WP0's existing protection) is tracked as a follow-up, not yet done as of this commit.
@@ -67,7 +67,8 @@ Onboarding a target repo is roughly 10 hand-run steps spanning local Git/reposit
     monorepo/
       backend/
       frontend/
-    node-lint-violation/         # deliberately fails — proves the gate actually blocks
+    node-lint-violation/         # deliberately fails — proves the gate actually blocks (npm lint)
+    python-test-failure/         # deliberately fails — proves the gate actually blocks (pytest)
   CODEOWNERS                     # WP1: this repo's own code owners (adapted from templates/CODEOWNERS)
   dependabot.yml                 # WP2: dependabot config for this repo's own github-actions ecosystem
 templates/

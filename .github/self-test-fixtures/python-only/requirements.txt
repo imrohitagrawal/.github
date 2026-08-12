@@ -24,9 +24,17 @@
 # installed unconditionally (no `|| true` swallow, unlike the pyproject.toml
 # path), stays genuinely empty, and lets pip-audit audit only the job's
 # actual pinned tooling (ruff/pytest/mypy/bandit/pip-audit and their
-# transitive deps - all real, published packages) - reproduced locally: with
-# only those installed, pip-audit --strict correctly finds real advisories
-# against the runner's own bundled pip and reports them via the intended
-# "Found N known vulnerabilities" path (advisory warning, step exits 0), not
-# the crash path - proving the advisory step's real, intended behavior rather
-# than an artifact of this fixture's own packaging.
+# transitive deps - all real, published packages).
+#
+# Whether that produces a clean "No known vulnerabilities found" (exit 0) or
+# a genuine "Found N known vulnerabilities" advisory report (also exit 0,
+# via the step's own warn-not-crash handling) depends on the ambient
+# versions of those pinned tools/their deps at run time, not on anything
+# this fixture controls - both were observed locally at different points
+# during WP1's own development (a stale pip version once surfaced 6 real
+# CVEs against itself; a freshly-upgraded pip found none), and both are the
+# CORRECT, intended outcome for this step - only a crash (unmatched exit
+# code, e.g. the PyPI-lookup failure described above) would be wrong. This
+# fixture proves the advisory step runs against real, non-fabricated
+# content and doesn't crash - it does not, and cannot, deterministically
+# force one specific one of those two legitimate outcomes.

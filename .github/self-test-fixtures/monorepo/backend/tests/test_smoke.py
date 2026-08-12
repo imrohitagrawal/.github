@@ -1,4 +1,4 @@
-from self_test_monorepo_backend import multiply
+from self_check_monorepo_backend import multiply
 
 
 def test_multiply():

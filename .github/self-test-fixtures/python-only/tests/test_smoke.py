@@ -1,4 +1,4 @@
-from self_test_python_only import add
+from self_check_python_only import add
 
 
 def test_add():

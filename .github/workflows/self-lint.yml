@@ -26,8 +26,24 @@ name: Self-lint (first-party quality)
 # and already recorded, not something WP1 is hiding - see the WP1 commit
 # message for the exact `actionlint` output this suppression was checked
 # against (with vs. without -ignore, confirming these are the ONLY two
-# findings and nothing else got swept up in the suppression net).
+# findings and nothing else got swept up in the suppression net as of this
+# commit).
 #
+# KNOWN, ACCEPTED IMPRECISION (caught during WP1's own Phase-3 adversarial
+# review, not fixed): `-ignore` is a regular expression matched against the
+# diagnostic MESSAGE TEXT across every scanned file, with no file- or
+# line-scoping (confirmed via `actionlint -h`). It does not pin these two
+# suppressions to their two specific, originally-intended locations - any
+# future SC2015 or SC2129 finding introduced anywhere in the four scanned
+# files would also be silently swallowed, not just the two pre-existing
+# ones this comment describes. actionlint has no more precise ignore
+# mechanism (e.g. no inline `# shellcheck disable=SC2015` support scoped
+# to just that line without editing the target file itself, which would
+# mean touching reusable-pr-quality.yml - out of this package's additive-
+# only scope). Accepted as a real, recorded trade-off rather than silently
+# left for a reviewer to rediscover: re-run the "with vs. without -ignore"
+# diff (see the WP1 commit message) whenever this file changes, to catch a
+# new finding hiding behind the same two codes.
 # rhysd/actionlint's official Docker image bundles shellcheck already
 # (verified locally: `docker run --rm --entrypoint sh rhysd/actionlint ...
 # which shellcheck` -> /usr/local/bin/shellcheck), pinned by digest - same

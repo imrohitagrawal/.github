@@ -16,7 +16,7 @@ name: Self-test (reusable-pr-quality.yml)
 # wouldn't exist yet for an in-flight PR and wouldn't validate what's
 # actually changing.
 #
-# Six jobs:
+# Eight jobs:
 #   - node-only, python-only, monorepo (WP6 python-directory/node-directory
 #     inputs), no-manifest (this repo's own root - genuinely has no
 #     Makefile/package.json/pyproject.toml/requirements.txt/setup.py today,
@@ -30,31 +30,63 @@ name: Self-test (reusable-pr-quality.yml)
 #     lint,typecheck,test,build / pip install / ruff / pytest / mypy /
 #     bandit / pip-audit) against each fixture directory in a clean venv.
 #   - node-lint-violation - a fixture whose package.json "lint" script
-#     deliberately `process.exit(1)`s - expected to FAIL. This is the
-#     scenario that gives the self-test real teeth: without it, this file
-#     only proves detection/routing works for clean input - it would stay
-#     green even if someone reintroduced `continue-on-error: true` on the
-#     reusable workflow's own npm-lint step (the exact historical bug fixed
-#     in c07ddce, before which nothing but gitleaks could fail this gate
-#     for a Node repo). `continue-on-error` cannot be set on a job that
-#     calls a reusable workflow via `uses:` (verified with actionlint:
-#     "when a reusable workflow is called with 'uses', 'continue-on-error'
-#     is not available") - so this job IS EXPECTED TO SHOW RED on every
-#     self-test run. That is correct, not a bug in this file. The real
-#     pass/fail signal for this scenario is the assert job below, and the
-#     final aggregate job (which is what branch protection should require)
-#     accounts for the expected failure correctly.
+#     deliberately `process.exit(1)`s - expected to FAIL. This is one of
+#     two scenarios that give the self-test real teeth: without it, this
+#     file only proves detection/routing works for clean input - it would
+#     stay green even if someone reintroduced `continue-on-error: true` on
+#     the reusable workflow's own npm-lint step (the exact historical bug
+#     fixed in c07ddce, before which nothing but gitleaks could fail this
+#     gate for a Node repo).
+#   - python-test-failure - a fixture with a genuinely failing pytest
+#     assertion - expected to FAIL. Added during this file's own Phase-3
+#     adversarial review, which found that node-lint-violation alone proved
+#     only ONE of reusable-pr-quality.yml's ~7 documented historical
+#     severity-swallow bugs stays fixed. This covers a second, different
+#     one (pytest's swallow) on a second, different stack (Python) -
+#     proving the negative-fixture pattern generalizes, not that it was
+#     only ever exercised once. KNOWN, ACCEPTED RESIDUAL: typecheck/build
+#     (npm) and bandit/pip-audit/npm-audit swallow-regressions still have
+#     no covering negative fixture - not built out further here, given
+#     diminishing returns against this package's time budget; see the WP1
+#     final report.
+#   `continue-on-error` cannot be set on a job that calls a reusable
+#   workflow via `uses:` (verified with actionlint: "when a reusable
+#   workflow is called with 'uses', 'continue-on-error' is not available")
+#   - so node-lint-violation and python-test-failure are BOTH EXPECTED TO
+#   SHOW RED on every self-test run. That is correct, not a bug in this
+#   file. The real pass/fail signal for each is its own assert job below,
+#   and the final aggregate job (what branch protection should require)
+#   accounts for both expected failures correctly.
 #
-# assert-negative-fixture-blocks inverts node-lint-violation's result: it
-# fails (redding out the aggregate) if that fixture's job did NOT fail,
-# i.e. if the gate silently let a real lint violation through. `if:
-# always()` makes it run regardless of node-lint-violation's own outcome.
+# assert-negative-fixture-blocks / assert-python-negative-fixture-blocks
+# invert their fixture's result: each fails (redding out the aggregate) if
+# that fixture's job did NOT fail, i.e. if the gate silently let a real
+# violation through. `if: always()` makes each run regardless of its own
+# fixture job's outcome.
 #
 # self-test (the aggregate) is the one stable job name to point branch
 # protection at (WP0, once that's configured) - same reasoning
 # reusable-pr-quality.yml's own header comment gives for staying a single
 # job: one name, regardless of which scenarios ran, with no "a required job
 # quietly reports skipped and counts as green" hazard.
+#
+# STRUCTURAL LIMITATION (recorded, not fixed - real, not hypothetical):
+# self-test can only observe JOB-level results (success/failure/cancelled/
+# skipped) via `needs.<job>.result` - workflow_call exposes no `outputs:`
+# from reusable-pr-quality.yml today, so nothing here can distinguish "a
+# step genuinely ran and passed" from "a step's `if:` condition silently
+# evaluated false and got skipped, with nothing else in the job failing".
+# For the 4 should-pass scenarios, this means a future edit that
+# accidentally narrows a step's `if:` (e.g. a wrong has_makefile_test /
+# node-directory check, the exact shape of condition WP7 added) could make
+# a fixture job still report "success" for the wrong reason - the F5
+# failure mode, reintroduced at a granularity this file cannot see from
+# outside. Fixing this would mean adding `outputs:` to
+# reusable-pr-quality.yml itself, out of this package's stated scope
+# ("purely additive... doesn't touch runtime behavior for existing
+# consumers") - flagged as a follow-up finding, not fixed here. Caught
+# during this file's own Phase-3 adversarial review; recorded rather than
+# silently left for someone else to rediscover.
 #
 # HARD-REQUIREMENT PROOF (done once, for real, not asserted - see the WP1
 # commit message for exactly what was broken, run, observed, and reverted):
@@ -120,8 +152,15 @@ jobs:
     with:
       node-directory: .github/self-test-fixtures/node-lint-violation
 
+  python-test-failure:
+    # Expected to report "failure" - see the header comment above. Do not
+    # "fix" this job to be green; that would defeat the scenario.
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/python-test-failure
+
   assert-negative-fixture-blocks:
-    name: assert negative fixture actually blocked
+    name: assert node-lint-violation actually blocked
     needs: [node-lint-violation]
     if: always()
     runs-on: ubuntu-latest
@@ -139,6 +178,25 @@ jobs:
           fi
           echo "Confirmed: the reusable workflow correctly failed the job on a real lint violation."
 
+  assert-python-negative-fixture-blocks:
+    name: assert python-test-failure actually blocked
+    needs: [python-test-failure]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the deliberately-failing fixture failed the gate
+        env:
+          FIXTURE_RESULT: ${{ needs.python-test-failure.result }}
+        run: |
+          echo "python-test-failure job result: $FIXTURE_RESULT"
+          if [ "$FIXTURE_RESULT" != "failure" ]; then
+            echo "::error::Expected the python-test-failure fixture to FAIL the reusable workflow (its pytest suite has a genuine failing assertion) but the job result was '$FIXTURE_RESULT'. The gate is not actually blocking on a real test failure - see the pre-c07ddce 'pytest -q || echo ...' history in reusable-pr-quality.yml's header comment."
+            exit 1
+          fi
+          echo "Confirmed: the reusable workflow correctly failed the job on a real test failure."
+
   self-test:
     name: self-test
     needs:
@@ -147,6 +205,7 @@ jobs:
       - monorepo
       - no-manifest
       - assert-negative-fixture-blocks
+      - assert-python-negative-fixture-blocks
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -159,14 +218,16 @@ jobs:
           MONOREPO: ${{ needs.monorepo.result }}
           NO_MANIFEST: ${{ needs.no-manifest.result }}
           NEGATIVE_ASSERT: ${{ needs.assert-negative-fixture-blocks.result }}
+          PYTHON_NEGATIVE_ASSERT: ${{ needs.assert-python-negative-fixture-blocks.result }}
         run: |
           echo "node-only: $NODE_ONLY"
           echo "python-only: $PYTHON_ONLY"
           echo "monorepo: $MONOREPO"
           echo "no-manifest: $NO_MANIFEST"
           echo "assert-negative-fixture-blocks: $NEGATIVE_ASSERT"
+          echo "assert-python-negative-fixture-blocks: $PYTHON_NEGATIVE_ASSERT"
           FAILED=0
-          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$NEGATIVE_ASSERT"; do
+          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT"; do
             if [ "$r" != "success" ]; then
               FAILED=1
             fi
