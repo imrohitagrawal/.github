@@ -113,20 +113,30 @@ for attempt in $(seq 1 "$DOWNLOAD_ATTEMPTS"); do
 	# transfer never returns, so the retry loop below never re-fires and the
 	# required `self-test` check hangs to the job timeout on a PR with no
 	# defect at all.
+	set +e
 	HTTP_CODE="$(curl -sS -L \
 		--connect-timeout 10 --max-time 120 \
 		-H "Authorization: Bearer ${GH_TOKEN}" \
 		-H "Accept: application/vnd.github+json" \
 		-H "X-GitHub-Api-Version: 2022-11-28" \
 		-o "$RAW_LOG" -w '%{http_code}' \
-		"https://api.github.com/repos/${GITHUB_REPO}/actions/jobs/${JOB_ID}/logs" || true)"
+		"https://api.github.com/repos/${GITHUB_REPO}/actions/jobs/${JOB_ID}/logs")"
+	CURL_EXIT=$?
+	set -e
 	[ -n "$HTTP_CODE" ] || HTTP_CODE=000
-	if [ "$HTTP_CODE" = 200 ] && [ -s "$RAW_LOG" ]; then
+	# CURL_EXIT is checked as well as the status code, and that is not
+	# belt-and-braces (review finding): --max-time can abort a transfer that
+	# already received its 200 response line, leaving %{http_code} == 200 and
+	# a TRUNCATED body on disk. Accepting that would mean asserting against
+	# half a log - a missing marker would then read as a gate regression. curl
+	# exits 28 in that case, so requiring exit 0 sends it back through the
+	# retry loop instead.
+	if [ "$CURL_EXIT" -eq 0 ] && [ "$HTTP_CODE" = 200 ] && [ -s "$RAW_LOG" ]; then
 		DOWNLOADED=true
 		break
 	fi
 	if [ "$attempt" -lt "$DOWNLOAD_ATTEMPTS" ]; then
-		echo "Log for job ${JOB_ID} not ready (HTTP ${HTTP_CODE}, attempt ${attempt}/${DOWNLOAD_ATTEMPTS}); retrying in 10s."
+		echo "Log for job ${JOB_ID} not ready (HTTP ${HTTP_CODE}, curl exit ${CURL_EXIT}, attempt ${attempt}/${DOWNLOAD_ATTEMPTS}); retrying in 10s."
 		sleep 10
 	fi
 done
@@ -138,7 +148,7 @@ if [ "$DOWNLOADED" != true ]; then
 	echo "----- last response body (first 20 lines) -----"
 	head -n 20 "$RAW_LOG" || true
 	echo "-----------------------------------------------"
-	echo "::error::assert-fixture-job.sh: could not download the log for job '$TARGET_JOB' (id ${JOB_ID}) after ${DOWNLOAD_ATTEMPTS} attempts (last HTTP ${HTTP_CODE}). This says nothing about whether the fixture behaved correctly."
+	echo "::error::assert-fixture-job.sh: could not download the log for job '$TARGET_JOB' (id ${JOB_ID}) after ${DOWNLOAD_ATTEMPTS} attempts (last HTTP ${HTTP_CODE}, curl exit ${CURL_EXIT}). This says nothing about whether the fixture behaved correctly."
 	exit 1
 fi
 

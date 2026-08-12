@@ -34,8 +34,11 @@
 #     is_trivial_makefile_recipe to `@?`          -> T04-T09 fail (6 cases)
 #   - revert escape_for_ere to a bare `printf`    -> T18 fails
 #   - narrow the boundary class to `[^A-Za-z0-9_.]` -> T20 fails
-#   - delete the root Makefile's `-` prefix, or the directory name in its
-#     `lint:` recipe comment                      -> T24/T25 fail
+#   - delete the root Makefile's `-` prefix, delete the directory name from
+#     its `lint:` recipe comment, or retarget that name at a path INSIDE the
+#     fixture directory                           -> T24 fails (T25 does not,
+#     and an earlier version of this line wrongly named both - the third
+#     asserted-not-observed claim this round, caught by review)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -199,15 +202,31 @@ is_trivial_at_prefix_only() {
 	! grep -vqE '^[[:space:]]*(@?[[:space:]]*(#.*)?$|@?[[:space:]]*(echo|true|:|exit[[:space:]]+0)([[:space:]].*)?$)'
 }
 
+# Review finding on the first version of T24: it hand-rolled the second half
+# of the check as `grep -qF "$FIXTURE_DIR"`, which is plain containment and
+# NOT what compute_makefile_trust does - that uses a boundary-aware match. So
+# retargeting the comment at, say, "<dir>/requirements.txt" left T24 green
+# (the substring is still there) while the real function correctly stopped
+# matching, and the fixture silently stopped discriminating: exactly the decay
+# T24 exists to prevent. Fixed by running the REAL compute_makefile_trust with
+# only is_trivial_makefile_recipe swapped for the legacy one - so every other
+# part of the decision, boundary matching included, is the shipping code.
 CASES=$((CASES + 1))
 root_lint_recipe="$(cd "$REPO_ROOT" && extract_makefile_recipe lint)"
-if [ -n "$root_lint_recipe" ] &&
-	! printf '%s\n' "$root_lint_recipe" | is_trivial_at_prefix_only &&
-	printf '%s\n' "$root_lint_recipe" | grep -qF "$FIXTURE_DIR"; then
-	printf 'ok   %-52s %s\n' "T24 root lint: recipe would be TRUSTED pre-fix" "(so the fixture discriminates)"
+legacy_trust="$(
+	cd "$REPO_ROOT" || exit 1
+	# shellcheck disable=SC2329 # invoked indirectly: compute_makefile_trust
+	# calls is_trivial_makefile_recipe by name, and bash resolves that at
+	# call time, so this subshell-local redefinition is what runs.
+	is_trivial_makefile_recipe() { is_trivial_at_prefix_only; }
+	HAS_MAKEFILE_LINT=true HAS_MAKEFILE_TYPECHECK=false HAS_MAKEFILE_TEST=false \
+		compute_makefile_trust lint "$FIXTURE_DIR"
+)"
+if [ "$legacy_trust" = true ]; then
+	printf 'ok   %-52s trust=%s\n' "T24 root lint: TRUSTED under the pre-fix regex" "$legacy_trust"
 else
-	printf 'FAIL %-52s %s\n' "T24 root lint: recipe would be TRUSTED pre-fix" \
-		"-- the root Makefile's lint: recipe must keep BOTH a Make prefix char that only the new regex strips AND the literal text '$FIXTURE_DIR', or makefile-trust-dash-negative stops proving anything. Recipe is now: $(printf '%s' "$root_lint_recipe" | tr '\n' ';')"
+	printf 'FAIL %-52s expected trust=true, got trust=%s\n' "T24 root lint: TRUSTED under the pre-fix regex" "$legacy_trust"
+	printf '     %s\n' "-- the root Makefile's lint: recipe must keep BOTH a Make prefix char that only the NEW regex strips AND a boundary-matched mention of '$FIXTURE_DIR', or makefile-trust-dash-negative stops proving anything. Recipe is now: $(printf '%s' "$root_lint_recipe" | tr '\n' ';')"
 	FAILURES=$((FAILURES + 1))
 fi
 

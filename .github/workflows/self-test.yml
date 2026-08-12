@@ -136,17 +136,24 @@ name: Self-test (reusable-pr-quality.yml)
 # at all: scripts/assert-fixture-job.sh reads the fixture job's real log from
 # the Actions API (`actions: read`) and requires a step-specific marker to be
 # present - and, where a wrong-reason pass is the specific hazard, requires
-# another marker to be ABSENT. Every deliberately-failing fixture and every
-# should-pass fixture whose value depends on a specific step having RUN now
-# has one.
+# another marker to be ABSENT. Every deliberately-failing fixture has one, as
+# do the should-pass fixtures whose entire value is that a specific step RAN:
+# python-pip-audit-advisory, python-uv-cache, root-makefile-and-semgrep.
 #
-# RESIDUAL (narrowed, not eliminated): the four original should-pass
-# scenarios that predate this - node-only, node-pnpm-only, python-only,
-# monorepo - are still job-result-only. Their value is "a normal repo of this
-# shape passes cleanly end to end", which a green job does evidence; a
-# silently-skipped step inside one of them would still go unnoticed. Adding
-# log assertions for each of their ~10 steps is a bigger, lower-yield job
-# than the ones above, and is written down here rather than done.
+# RESIDUAL (narrowed, not eliminated) - five should-pass scenarios are still
+# job-result-only, and the exemption list is spelled out rather than implied,
+# because an earlier version of this paragraph claimed "every" and was wrong
+# about two of them:
+#   - node-only, node-pnpm-only, python-only, monorepo. Their value is "a
+#     normal repo of this shape passes cleanly end to end", which a green job
+#     does evidence; a silently-skipped step inside one would go unnoticed.
+#     Log assertions for each of their ~10 steps is a bigger, lower-yield job.
+#   - python-dev-group. Weaker than the four above, and worth naming: its
+#     fixture's own test imports freezegun, so if the PEP 735 dev-group
+#     install path regresses, that test fails and the job goes red by itself -
+#     but only IF the pytest step ran at all. A narrowed `if:` that skipped
+#     pytest would leave it green and silent. An assert job for it is cheap
+#     and is in the round-4 backlog.
 #
 # HARD-REQUIREMENT PROOF (done once, for real, not asserted - see the WP1
 # commit message for exactly what was broken, run, observed, and reverted):
@@ -763,9 +770,26 @@ jobs:
   #
   # `Ran N rules? on M files` is real semgrep output, not the echoed `run:`
   # body (which contains only the `semgrep scan --error --config ...`
-  # command). Requiring M >= 1 also catches the quieter failure: a Semgrep
-  # step that runs but scans nothing, e.g. if `--baseline-commit` or the
-  # config path ever resolves wrongly.
+  # command).
+  #
+  # M IS DELIBERATELY UNCONSTRAINED, and the first version of this assertion
+  # got that wrong. It required `[1-9][0-9]*` files - "a step that runs but
+  # scans nothing must be a failure" - which is false, because this step
+  # passes `--baseline-commit`: the scan is DIFF-SCOPED. Measured, after two
+  # review lenses disagreed about it:
+  #   full scan, no baseline            -> "Ran 1 rule on 13 files"
+  #   this PR (4 yaml files changed)    -> "Ran 1 rule on 4 files"
+  #   --baseline-commit HEAD (0 changed)-> "Ran 1 rule on 0 files"
+  # So M is the count of CHANGED yaml files, not repo content. A docs-only,
+  # scripts-only or fixture-only PR legitimately scans zero, and the strict
+  # version of this pattern would have turned the required `self-test` check
+  # RED on a defect-free PR while blaming a missing semgrep config.
+  #
+  # What this therefore proves is that the Semgrep step RAN TO COMPLETION -
+  # which is the actual question, since its `if:` is a root-scoped
+  # hashFiles() that could silently stop matching. It does not prove any
+  # particular file was scanned, and that is correct: on most PRs, none
+  # should be.
   #
   # MEASURED WHILE WRITING THIS, and worth recording because a deleted
   # comment nearby used to claim the opposite ("it doesn't run for any of
@@ -804,8 +828,8 @@ jobs:
           TARGET_JOB: root-makefile-and-semgrep / quality-gate
           ACTUAL_RESULT: ${{ needs.root-makefile-and-semgrep.result }}
           EXPECT_RESULT: success
-          EXPECT_PATTERN: '^[^ ]+ Ran [0-9]+ rules? on [1-9][0-9]* files'
-          FAILURE_HINT: "The Semgrep step did not run, or ran against zero files. Its `if:` requires a semgrep config at the REPO ROOT (semgrep.yml / .semgrep.yml / .semgrep/ / semgrep/) - a green job here without that line means the gate's only cross-language security scan is silently skipped for every consumer that ships one."
+          EXPECT_PATTERN: '^[^ ]+ Ran [0-9]+ rules? on [0-9]+ files'
+          FAILURE_HINT: "The Semgrep step did not run to completion. Its `if:` requires a semgrep config at the REPO ROOT (semgrep.yml / .semgrep.yml / .semgrep/ / semgrep/) - a green job with no scan-summary line means the gate's only cross-language security scan is silently skipped for every consumer that ships one. Note a scan of ZERO files is normal and expected: the step passes --baseline-commit, so it only scans yaml the PR actually changed."
         run: scripts/assert-fixture-job.sh
 
   # ROUND-4 (LOW): the marker is the runner's echo of setup-uv's RESOLVED
