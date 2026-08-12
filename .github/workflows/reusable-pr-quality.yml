@@ -572,8 +572,14 @@ jobs:
           # different code path). Gates enable-cache on at least one of those
           # three files actually existing, so caching is only ever attempted
           # when there's real content for the glob to match.
-          echo "has_uv_cache_target=$([ -f "$PYTHON_DIR/uv.lock" ] || [ -f "$PYTHON_DIR/pyproject.toml" ] || ls "$PYTHON_DIR"/requirements*.txt >/dev/null 2>&1 && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "uses_node=$([ -f "$NODE_DIR/.nvmrc" ] || [ -f "$NODE_DIR/.node-version" ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          # Round-2 review fix (cosmetic): braced, not two more individual
+          # redirects - keeps this file's own SC2129 count from silently
+          # growing (self-lint.yml's suppression is message-text-based, not
+          # line-scoped, so a new occurrence would otherwise go unnoticed).
+          {
+            echo "has_uv_cache_target=$([ -f "$PYTHON_DIR/uv.lock" ] || [ -f "$PYTHON_DIR/pyproject.toml" ] || ls "$PYTHON_DIR"/requirements*.txt >/dev/null 2>&1 && echo true || echo false)"
+            echo "uses_node=$([ -f "$NODE_DIR/.nvmrc" ] || [ -f "$NODE_DIR/.node-version" ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
 
           # WP5: audit-ci has no default config filename of its own (its CLI always
           # requires an explicit --config path) - these three names, checked in this
@@ -922,13 +928,21 @@ jobs:
       # parsing is npm-specific, so a non-npm repo without an audit-ci config
       # gets an explicit, visible notice instead of silently having no advisory
       # dependency-audit coverage at all.
+      # SECURITY (round-2 review fix): env: indirection, same reasoning as
+      # every other node_package_manager consumer - this was the one site
+      # the original fix missed (safe today only because the value is
+      # already allowlist-sanitized upstream, not because of anything this
+      # step itself does - closing it so that's true independent of this
+      # step, matching the other 5 sites).
       - name: node audit (advisory) — not available for this package manager
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
           steps.detect.outputs.has_audit_ci_config == 'false' &&
           steps.detect.outputs.node_package_manager != 'npm'
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
         run: |
-          echo "::warning::Advisory dependency audit is only implemented for npm today (this repo uses ${{ steps.detect.outputs.node_package_manager }}). Add an audit-ci config to get BLOCKING coverage instead (audit-ci auto-detects pnpm/yarn) - see docs/repo-onboarding.md."
+          echo "::warning::Advisory dependency audit is only implemented for npm today (this repo uses $NODE_PACKAGE_MANAGER). Add an audit-ci config to get BLOCKING coverage instead (audit-ci auto-detects pnpm/yarn) - see docs/repo-onboarding.md."
 
       # BLOCKING WHEN node-directory ships an audit-ci config (see "Detect project
       # layout" above). Bare `npm audit` cannot consume an allowlist at all - only the

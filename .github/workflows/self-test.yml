@@ -227,6 +227,20 @@ jobs:
   # repo's real tracked content (previously never executed at all, in any
   # job, ever). No inputs: both directories default to '.', this repo's own
   # root.
+  # ROUND-2 REVIEW NOTE: compute_makefile_trust has a separate, pre-existing
+  # short-circuit for directory == '.' (any non-trivial recipe is trusted
+  # unconditionally there, no substring match needed - see
+  # reusable-pr-quality.yml's own comment on that branch). Since FR15 made
+  # the root Makefile's test: target non-trivial, THIS job's own
+  # trust_makefile_test_for_python/node now evaluate true too, via that
+  # bypass, not via directory-name matching. Currently harmless only because
+  # this repo's own root has neither a Python nor a Node manifest (has_python/
+  # has_package_json are false here regardless), so no native step is gated
+  # by that trust value in the first place - not because the bypass doesn't
+  # apply to this job. If this repo's root ever gained a real pyproject.toml/
+  # package.json while keeping default '.' directories, that native step
+  # would start being skipped in favor of `make test` with no test coverage
+  # catching it - flagged, not fixed, since it's not reachable today.
   root-makefile-and-semgrep:
     uses: ./.github/workflows/reusable-pr-quality.yml
 

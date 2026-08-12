@@ -40,14 +40,31 @@
 # real semgrep (1.172.0): the env: fix fixture now scans clean (0 findings),
 # both original vulnerable fixtures still block (exit 1), and the whole real
 # repo tree still scans clean (0 findings).
-# KNOWN, ACCEPTED RESIDUAL: this is a text heuristic, not true YAML
-# awareness, so a `run: ${{ ... }}` step whose ENTIRE value is nothing but
-# the bare expression (no surrounding shell text at all -- an unusual way to
-# write a run: step, and still just as vulnerable as the caught cases) is
-# syntactically indistinguishable from `KEY: ${{ ... }}` by text pattern
-# alone and is NOT caught by this rule. Narrower than the bug this fix
-# closes (which blocked the recommended remediation entirely); left as a
-# documented gap rather than chasing full YAML-structural matching here.
+# KNOWN, ACCEPTED RESIDUALS (round-2 review, both real, both text-heuristic
+# limitations of `generic`-mode pattern-regex having no true YAML awareness --
+# not chasing full structural matching here, same posture as every other
+# documented trade-off in this repo):
+#   1. A `run: ${{ ... }}` step whose ENTIRE value is nothing but the bare
+#      expression (no surrounding shell text at all -- an unusual way to
+#      write a run: step, and still just as vulnerable as the caught cases)
+#      is syntactically indistinguishable from `KEY: ${{ ... }}` by text
+#      pattern alone and is NOT caught.
+#   2. The env: fix verified above only covers the SINGLE-LINE form
+#      (`KEY: ${{ ... }}`). A BLOCK-SCALAR env: value (`KEY: >-` or `KEY: |`
+#      on one line, the expression alone on the next) still trips this rule:
+#      the anchor char search can walk back across the line break and land
+#      on the `>`/`|` indicator itself, which satisfies the "non-colon,
+#      non-whitespace" requirement. Reproduced directly (round-2 review).
+#      Considered restricting the skippable whitespace to same-line-only
+#      (excluding newlines) to fix this -- rejected: that same-line
+#      restriction would ALSO un-catch the genuinely vulnerable
+#      `run: |` + bare-expression-on-its-own-line shape (residual 1's sibling,
+#      currently caught only because it walks back to `run: |`'s own `|`) --
+#      trading a false-positive annoyance for a false-negative security gap
+#      is the wrong trade. Left as a known gap: a block-scalar env: value
+#      hits the same "my fix trips the rule" experience this commit exists
+#      to prevent. Workaround: use the single-line env: form, or add an
+#      inline suppression comment.
 rules:
   - id: github-actions-untrusted-context-in-run
     languages: [generic]
