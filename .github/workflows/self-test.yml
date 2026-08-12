@@ -286,6 +286,31 @@ jobs:
           fi
           echo "Confirmed: the reusable workflow correctly failed the job on a real test failure."
 
+  # H4 (review finding): scripts/retrofit-quality-gate.sh had zero test
+  # coverage of any kind - not even run once in CI, despite being a
+  # ~465-line script with real git side effects (branch creation, commits,
+  # optional push/PR). Runs the real functional test suite
+  # (scripts/test-retrofit-quality-gate.sh) against throwaway scratch repos
+  # under $RUNNER_TEMP, never this checkout itself. fetch-depth: 0 below so
+  # the suite's T11 case can resolve tag v6 against this repo's own history
+  # (catching "PINNED_SHA silently drifted behind the real tag", not just
+  # internal self-consistency) - this is also the regression test for H3's
+  # doubled-version-comment fix.
+  retrofit-script-tests:
+    name: retrofit-quality-gate.sh functional tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run functional test suite
+        run: scripts/test-retrofit-quality-gate.sh
+
   self-test:
     name: self-test
     needs:
@@ -296,6 +321,7 @@ jobs:
       - python-dev-group
       - assert-negative-fixture-blocks
       - assert-python-negative-fixture-blocks
+      - retrofit-script-tests
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -310,6 +336,7 @@ jobs:
           PYTHON_DEV_GROUP: ${{ needs.python-dev-group.result }}
           NEGATIVE_ASSERT: ${{ needs.assert-negative-fixture-blocks.result }}
           PYTHON_NEGATIVE_ASSERT: ${{ needs.assert-python-negative-fixture-blocks.result }}
+          RETROFIT_SCRIPT_TESTS: ${{ needs.retrofit-script-tests.result }}
         run: |
           echo "node-only: $NODE_ONLY"
           echo "python-only: $PYTHON_ONLY"
@@ -318,8 +345,9 @@ jobs:
           echo "python-dev-group: $PYTHON_DEV_GROUP"
           echo "assert-negative-fixture-blocks: $NEGATIVE_ASSERT"
           echo "assert-python-negative-fixture-blocks: $PYTHON_NEGATIVE_ASSERT"
+          echo "retrofit-script-tests: $RETROFIT_SCRIPT_TESTS"
           FAILED=0
-          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$PYTHON_DEV_GROUP" "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT"; do
+          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$PYTHON_DEV_GROUP" "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
             if [ "$r" != "success" ]; then
               FAILED=1
             fi

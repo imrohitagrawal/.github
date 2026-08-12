@@ -149,6 +149,19 @@ jobs:
             --config .markdownlint.jsonc \
             docs/*.md README.md templates/AGENTS.md AGENTS.md
 
+      # H4 (review finding): scripts/retrofit-quality-gate.sh had zero test
+      # coverage of any kind - not even linted. actionlint can't cover it
+      # (it's a freestanding .sh, not workflow YAML with embedded run:
+      # blocks), so it gets its own direct shellcheck invocation, same
+      # digest-pin-by-image convention as actionlint above.
+      - name: "shellcheck: scripts/retrofit-quality-gate.sh, scripts/check-pin-consistency.sh, scripts/test-retrofit-quality-gate.sh"
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            koalaman/shellcheck@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d \
+            scripts/retrofit-quality-gate.sh \
+            scripts/check-pin-consistency.sh \
+            scripts/test-retrofit-quality-gate.sh
+
       # H6 (review finding): the reusable-workflow self-reference pin and the
       # duplicated Python/Node CI tool-version pins are hand-copied across
       # templates/caller-pr-quality.yml, scripts/retrofit-quality-gate.sh, and
