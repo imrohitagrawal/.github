@@ -24,6 +24,30 @@
 # failure point" design if a future fixture ever needed a .yml file of its
 # own -- not a concern today (no current fixture has one), but excluded
 # defensively rather than left implicit.
+#
+# REVIEW FIX (HIGH, confirmed): the original pattern (bare
+# `\$\{\{\s*(...)\s*\}\}`, no context awareness) blocked its own recommended
+# remediation -- moving the value into `env:` and referencing it as a shell
+# variable still matched, because `generic`-mode pattern-regex has no
+# YAML/run-vs-env structural awareness, only raw text. Reproduced directly:
+# both the vulnerable `run: echo "${{ ... }}"` AND the recommended
+# `env: KEY: ${{ ... }}` / `run: echo "$KEY"` fix tripped the same blocking
+# rule. Fixed by requiring a non-whitespace, non-colon character to
+# immediately precede the expression (skipping only whitespace in between) --
+# a bare `KEY: ${{ ... }}` value assignment (env-block shape) has only a
+# colon before it and no longer matches; `echo "${{ ... }}"` (a quote before
+# it) and `X=${{ ... }}` (an equals sign before it) still do. Verified with
+# real semgrep (1.172.0): the env: fix fixture now scans clean (0 findings),
+# both original vulnerable fixtures still block (exit 1), and the whole real
+# repo tree still scans clean (0 findings).
+# KNOWN, ACCEPTED RESIDUAL: this is a text heuristic, not true YAML
+# awareness, so a `run: ${{ ... }}` step whose ENTIRE value is nothing but
+# the bare expression (no surrounding shell text at all -- an unusual way to
+# write a run: step, and still just as vulnerable as the caught cases) is
+# syntactically indistinguishable from `KEY: ${{ ... }}` by text pattern
+# alone and is NOT caught by this rule. Narrower than the bug this fix
+# closes (which blocked the recommended remediation entirely); left as a
+# documented gap rather than chasing full YAML-structural matching here.
 rules:
   - id: github-actions-untrusted-context-in-run
     languages: [generic]
@@ -38,7 +62,7 @@ rules:
       value through `env:` instead and reference it as a shell variable
       (`"$MY_VAR"`), which is not string-interpolated.
     patterns:
-      - pattern-regex: '\$\{\{\s*(github\.event\.(issue|pull_request)\.(title|body)|github\.event\.commits\[.*\]\.message|github\.head_ref)\s*\}\}'
+      - pattern-regex: '[^\n:\s]\s*\$\{\{\s*(github\.event\.(issue|pull_request)\.(title|body)|github\.event\.commits\[.*\]\.message|github\.head_ref)\s*\}\}'
     paths:
       include:
         - "*.yml"
