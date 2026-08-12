@@ -431,6 +431,15 @@ jobs:
             # comment, or a bare no-op invocation (@?echo/@?true/@?:/@?exit 0).
             ! grep -vqE '^[[:space:]]*(@?[[:space:]]*(#.*)?$|@?[[:space:]]*(echo|true|:|exit[[:space:]]+0)([[:space:]].*)?$)'
           }
+          # H2/H7 review fix (HIGH, confirmed): splicing a directory input
+          # straight into an ERE without escaping let a `.` in the directory
+          # value act as a regex WILDCARD instead of a literal dot (reproduced:
+          # directory "api.old" matched unrelated recipe text "apiXold").
+          # Escapes every ERE metacharacter so the directory value can only
+          # ever match itself literally.
+          escape_for_ere() {
+            printf '%s' "$1" | sed -e 's/[][\.^$*+?(){}|]/\\&/g'
+          }
           compute_makefile_trust() {
             # $1 = check name (lint/typecheck/test), $2 = that stack's directory
             # input value.
@@ -453,7 +462,19 @@ jobs:
               echo true
               return
             fi
-            if echo "$recipe" | grep -qE "(^|[^A-Za-z0-9_.])${2}([^A-Za-z0-9_.]|\$)"; then
+            # H2/H7 review fix (HIGH, confirmed): the boundary class used to
+            # exclude only [A-Za-z0-9_.] as "not a delimiter" - so `-` counted
+            # as a valid delimiter, and a directory value like "backend"
+            # wrongly matched inside unrelated text like "backend-legacy"
+            # (reproduced directly). Directory names routinely contain `-`
+            # and `/` (dash-suffixed variants, nested paths) without being a
+            # different directory each time one appears - widened here so
+            # those characters count as part of the "word" being matched, not
+            # as delimiters, matching how a real path segment is bounded (by
+            # whitespace, quotes, or string start/end - not by punctuation
+            # that's legal inside the segment itself).
+            escaped_dir="$(escape_for_ere "$2")"
+            if echo "$recipe" | grep -qE "(^|[^A-Za-z0-9_./-])${escaped_dir}([^A-Za-z0-9_./-]|\$)"; then
               echo true
             else
               echo false
