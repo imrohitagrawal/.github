@@ -22,7 +22,12 @@
 # Advisory mode separates "found something real" (warning, exit 0) from
 # "the scanner itself failed to run" (hard failure), same as the native
 # npm-audit step, by checking captured JSON output for the "vulnerabilities"
-# key that only a genuine report includes.
+# key that only a genuine report includes. Uses `jq -e 'has(...)'` when jq
+# is available - the same real JSON-key check the native step uses, not a
+# substring match - falling back to a plain `grep` on the literal key text
+# only when jq isn't installed (a local dev machine without it; every
+# GitHub-hosted runner has jq preinstalled, so the CI path always gets the
+# stronger check).
 
 install:
 	npm ci
@@ -57,7 +62,8 @@ audit:
 		set -e; \
 		if [ "$$code" -eq 0 ]; then \
 			echo "npm audit: no high+ severity advisories."; \
-		elif echo "$$output" | grep -q '"vulnerabilities"'; then \
+		elif (command -v jq >/dev/null 2>&1 && echo "$$output" | jq -e 'has("vulnerabilities")' >/dev/null 2>&1) || \
+			(! command -v jq >/dev/null 2>&1 && echo "$$output" | grep -q '"vulnerabilities"'); then \
 			echo "$$output"; \
 			echo "WARNING: npm audit found high+ advisories (advisory - not blocking; add an audit-ci config to promote)"; \
 		else \
