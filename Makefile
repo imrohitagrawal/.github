@@ -30,5 +30,15 @@ lint:
 typecheck:
 	@true
 
+# H7 review fix (test coverage, review finding): genuinely non-trivial (per
+# compute_makefile_trust's own is_trivial_makefile_recipe check) and names
+# .github/self-test-fixtures/makefile-trust-positive by path, so that ONE
+# fixture's trust_makefile_test_for_python evaluates true - proving the
+# actual trust=true skip path fires in CI, not just that the underlying
+# logic is correct in isolation. Every other job's directory string doesn't
+# appear here, so this target stays untrusted (and thus harmless) for them -
+# `cd`ing into this directory and succeeding is universally safe regardless
+# of which fixture a given job is otherwise exercising, since it always runs
+# from the repo root.
 test:
-	@true
+	cd .github/self-test-fixtures/makefile-trust-positive && true

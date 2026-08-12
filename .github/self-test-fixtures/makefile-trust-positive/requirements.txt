@@ -1,0 +1,3 @@
+# C1/H7 self-test fixture (review finding): proves the actual trust=true
+# skip path fires - see tests/test_something.py and the root Makefile's
+# `test:` target (which names this directory) for the mechanism.

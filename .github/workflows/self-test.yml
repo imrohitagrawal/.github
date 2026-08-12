@@ -16,13 +16,15 @@ name: Self-test (reusable-pr-quality.yml)
 # wouldn't exist yet for an in-flight PR and wouldn't validate what's
 # actually changing.
 #
-# 24 jobs: the original ten (seven workflow_call scenario jobs, two assert
+# 25 jobs: the original ten (seven workflow_call scenario jobs, two assert
 # jobs inverting the two deliberately-failing scenarios' results, and the
 # final aggregate job) plus, since the review that added C1/H4/H1 below,
-# seven more (six deliberately-failing scenario+assert pairs - bandit-
+# eight more (six deliberately-failing scenario+assert pairs - bandit-
 # baseline, audit-ci, pip-audit-ignore, npm typecheck, mypy, and a
-# nonexistent directory input - plus a pnpm-only should-pass scenario) and
-# a functional-test job for scripts/retrofit-quality-gate.sh. See each
+# nonexistent directory input - plus a pnpm-only should-pass scenario, plus
+# a should-pass scenario proving the trust=true Makefile-skip path actually
+# fires, not just that its logic is correct in isolation) and a
+# functional-test job for scripts/retrofit-quality-gate.sh. See each
 # job's own comment for what it proves and why:
 #   - node-only, node-pnpm-only (H1: a real pnpm-only repo - packageManager
 #     field + pnpm-lock.yaml, no package-lock.json - proving
@@ -227,6 +229,24 @@ jobs:
   # root.
   root-makefile-and-semgrep:
     uses: ./.github/workflows/reusable-pr-quality.yml
+
+  # H7 review fix (test coverage, review finding): prior coverage only
+  # exercised trust=false (untrusted) paths - no fixture's directory string
+  # ever appeared in the root Makefile's (previously all-trivial) recipes,
+  # so the actual trust=true skip path - the mechanism that delivers H7's
+  # measured ~70-80% redundant-wall-clock fix for citevyn's real shape - had
+  # never fired once in CI. This fixture's tests/test_something.py has a
+  # deliberately failing assertion; the root Makefile's `test:` target now
+  # names this exact directory (see Makefile) and is genuinely non-trivial,
+  # so compute_makefile_trust should evaluate true here and skip the native
+  # pytest step entirely. Expected to PASS: if trust=true doesn't fire (a
+  # future regression in the directory-matching logic), native pytest DOES
+  # run, the deliberate failure fires, and this job goes red - a real
+  # regression signal that didn't exist before this fixture.
+  makefile-trust-positive:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/makefile-trust-positive
 
   node-lint-violation:
     # Expected to report "failure" - see the header comment above. Do not
@@ -536,6 +556,7 @@ jobs:
       - python-only
       - monorepo
       - root-makefile-and-semgrep
+      - makefile-trust-positive
       - python-dev-group
       - assert-negative-fixture-blocks
       - assert-python-negative-fixture-blocks
@@ -558,6 +579,7 @@ jobs:
           PYTHON_ONLY: ${{ needs.python-only.result }}
           MONOREPO: ${{ needs.monorepo.result }}
           ROOT_MAKEFILE_SEMGREP: ${{ needs.root-makefile-and-semgrep.result }}
+          MAKEFILE_TRUST_POSITIVE: ${{ needs.makefile-trust-positive.result }}
           PYTHON_DEV_GROUP: ${{ needs.python-dev-group.result }}
           NEGATIVE_ASSERT: ${{ needs.assert-negative-fixture-blocks.result }}
           PYTHON_NEGATIVE_ASSERT: ${{ needs.assert-python-negative-fixture-blocks.result }}
@@ -574,6 +596,7 @@ jobs:
           echo "python-only: $PYTHON_ONLY"
           echo "monorepo: $MONOREPO"
           echo "root-makefile-and-semgrep: $ROOT_MAKEFILE_SEMGREP"
+          echo "makefile-trust-positive: $MAKEFILE_TRUST_POSITIVE"
           echo "python-dev-group: $PYTHON_DEV_GROUP"
           echo "assert-negative-fixture-blocks: $NEGATIVE_ASSERT"
           echo "assert-python-negative-fixture-blocks: $PYTHON_NEGATIVE_ASSERT"
@@ -585,7 +608,7 @@ jobs:
           echo "assert-bad-directory-input-blocks: $BAD_DIRECTORY_ASSERT"
           echo "retrofit-script-tests: $RETROFIT_SCRIPT_TESTS"
           FAILED=0
-          for r in "$NODE_ONLY" "$NODE_PNPM_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$ROOT_MAKEFILE_SEMGREP" "$PYTHON_DEV_GROUP" \
+          for r in "$NODE_ONLY" "$NODE_PNPM_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$ROOT_MAKEFILE_SEMGREP" "$MAKEFILE_TRUST_POSITIVE" "$PYTHON_DEV_GROUP" \
             "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$BANDIT_BLOCKING_ASSERT" \
             "$NPM_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_BLOCKING_ASSERT" "$NODE_TYPECHECK_ASSERT" \
             "$PYTHON_MYPY_ASSERT" "$BAD_DIRECTORY_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
