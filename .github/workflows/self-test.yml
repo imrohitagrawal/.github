@@ -16,7 +16,7 @@ name: Self-test (reusable-pr-quality.yml)
 # wouldn't exist yet for an in-flight PR and wouldn't validate what's
 # actually changing.
 #
-# 25 jobs: the original ten (seven workflow_call scenario jobs, two assert
+# 32 jobs: the original ten (seven workflow_call scenario jobs, two assert
 # jobs inverting the two deliberately-failing scenarios' results, and the
 # final aggregate job) plus, since the review that added C1/H4/H1 below,
 # eight more (six deliberately-failing scenario+assert pairs - bandit-
@@ -24,8 +24,12 @@ name: Self-test (reusable-pr-quality.yml)
 # nonexistent directory input - plus a pnpm-only should-pass scenario, plus
 # a should-pass scenario proving the trust=true Makefile-skip path actually
 # fires, not just that its logic is correct in isolation) and a
-# functional-test job for scripts/retrofit-quality-gate.sh. See each
-# job's own comment for what it proves and why:
+# functional-test job for scripts/retrofit-quality-gate.sh, plus three
+# scenario+assert pairs added in round 4 (makefile-trust-dash-negative,
+# python-pip-audit-advisory, python-uv-cache - see each job's own comment)
+# and one more assert job added by round 4's own review, covering the
+# previously-unasserted root-makefile-and-semgrep scenario.
+# See each job's own comment for what it proves and why:
 #   - node-only, node-pnpm-only (H1: a real pnpm-only repo - packageManager
 #     field + pnpm-lock.yaml, no package-lock.json - proving
 #     node_package_manager detection/dispatch works end-to-end, not just
@@ -101,29 +105,55 @@ name: Self-test (reusable-pr-quality.yml)
 # violation through. `if: always()` makes each run regardless of its own
 # fixture job's outcome.
 #
+# ROUND-4 (HIGH): every assert job below now ALSO greps its fixture job's
+# real log, via scripts/assert-fixture-job.sh, for a marker only the intended
+# step can emit - the job-level `needs.<job>.result` check alone is not
+# enough, and that was not a theoretical concern. python-pip-audit-blocking
+# spent its entire life failing on a pip dependency-RESOLUTION crash instead
+# of the vulnerability finding it exists to prove blocks, and its assert job
+# reported success on every single run, because the job was red either way.
+# See scripts/assert-fixture-job.sh's own header for the mechanism and the
+# pattern-writing rule (match the RENDERED "##[error]..." annotation or real
+# tool output - never the echoed source of an `echo "::error::..."` line,
+# which appears in the log whether or not that branch ran).
+#
 # self-test (the aggregate) is the one stable job name to point branch
 # protection at (WP0, once that's configured) - same reasoning
 # reusable-pr-quality.yml's own header comment gives for staying a single
 # job: one name, regardless of which scenarios ran, with no "a required job
 # quietly reports skipped and counts as green" hazard.
 #
-# STRUCTURAL LIMITATION (recorded, not fixed - real, not hypothetical):
-# self-test can only observe JOB-level results (success/failure/cancelled/
-# skipped) via `needs.<job>.result` - workflow_call exposes no `outputs:`
-# from reusable-pr-quality.yml today, so nothing here can distinguish "a
-# step genuinely ran and passed" from "a step's `if:` condition silently
-# evaluated false and got skipped, with nothing else in the job failing".
-# For the 4 should-pass scenarios, this means a future edit that
-# accidentally narrows a step's `if:` (e.g. a wrong has_makefile_test /
-# node-directory check, the exact shape of condition WP7 added) could make
-# a fixture job still report "success" for the wrong reason - the F5
-# failure mode, reintroduced at a granularity this file cannot see from
-# outside. Fixing this would mean adding `outputs:` to
-# reusable-pr-quality.yml itself, out of this package's stated scope
-# ("purely additive... doesn't touch runtime behavior for existing
-# consumers") - flagged as a follow-up finding, not fixed here. Caught
-# during this file's own Phase-3 adversarial review; recorded rather than
-# silently left for someone else to rediscover.
+# STRUCTURAL LIMITATION - CLOSED IN ROUND 4 for every fixture that has an
+# assert job. It used to read: self-test can only observe JOB-level results
+# via `needs.<job>.result`, so nothing here could distinguish "a step
+# genuinely ran and passed/failed" from "a step's `if:` silently evaluated
+# false and got skipped" or "some unrelated step crashed first". That was
+# real, and it cost this effort a whole review round (see the assert-job
+# comment above `on:`). The proposed fix at the time was `outputs:` on
+# reusable-pr-quality.yml, deferred as out of scope.
+#
+# Round 4 closes it a different way, with no change to the reusable workflow
+# at all: scripts/assert-fixture-job.sh reads the fixture job's real log from
+# the Actions API (`actions: read`) and requires a step-specific marker to be
+# present - and, where a wrong-reason pass is the specific hazard, requires
+# another marker to be ABSENT. Every deliberately-failing fixture has one, as
+# do the should-pass fixtures whose entire value is that a specific step RAN:
+# python-pip-audit-advisory, python-uv-cache, root-makefile-and-semgrep.
+#
+# RESIDUAL (narrowed, not eliminated) - five should-pass scenarios are still
+# job-result-only, and the exemption list is spelled out rather than implied,
+# because an earlier version of this paragraph claimed "every" and was wrong
+# about two of them:
+#   - node-only, node-pnpm-only, python-only, monorepo. Their value is "a
+#     normal repo of this shape passes cleanly end to end", which a green job
+#     does evidence; a silently-skipped step inside one would go unnoticed.
+#     Log assertions for each of their ~10 steps is a bigger, lower-yield job.
+#   - python-dev-group. Weaker than the four above, and worth naming: its
+#     fixture's own test imports freezegun, so if the PEP 735 dev-group
+#     install path regresses, that test fails and the job goes red by itself -
+#     but only IF the pytest step ran at all. A narrowed `if:` that skipped
+#     pytest would leave it green and silent. An assert job for it is cheap
+#     and is in the round-4 backlog.
 #
 # HARD-REQUIREMENT PROOF (done once, for real, not asserted - see the WP1
 # commit message for exactly what was broken, run, observed, and reverted):
@@ -262,6 +292,45 @@ jobs:
     with:
       python-directory: .github/self-test-fixtures/makefile-trust-positive
 
+  # ROUND-4 (HIGH): the negative twin of makefile-trust-positive above.
+  # compute_makefile_trust never handled Make's `-` (ignore-error) recipe
+  # prefix, only `@` - so a `test:`/`lint:` recipe of `-true` was read as a
+  # real command, earned full trust, and SKIPPED the native step: the exact
+  # H2 false-green class the whole trust mechanism exists to close, reached
+  # via a different one of Make's three standard prefixes. The root
+  # Makefile's `lint:` target is now exactly that shape (`-true`, with a
+  # comment naming this fixture directory so the directory-mention half of
+  # the trust check is satisfied), leaving is_trivial_makefile_recipe as the
+  # only thing keeping trust false here. Expected to FAIL: this fixture ships
+  # a deliberate ruff F401, so if trust ever wrongly flips to true, `ruff
+  # check .` is skipped, this job goes GREEN, and its assert job reports the
+  # regression. scripts/test-makefile-trust.sh covers the same function
+  # directly, including the directory == '.' case no fixture here can reach.
+  makefile-trust-dash-negative:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/makefile-trust-dash-negative
+
+  # ROUND-4: the ADVISORY pip-audit path (what every Python consumer gets by
+  # default, with no `.pip-audit-ignore` opt-in) had zero fixture coverage -
+  # only the blocking path had one, and that one turned out never to reach
+  # its intended branch at all. Expected to PASS; the assert job is what
+  # gives it teeth, by requiring the advisory warning annotation in the log.
+  python-pip-audit-advisory:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/python-pip-audit-advisory
+
+  # ROUND-4 (LOW): uv detection (`uses_uv`/`has_uv_cache_target`) and the
+  # setup-uv zero-match-glob hard-fail guard had never run in CI - no fixture
+  # anywhere had a uv.lock. Expected to PASS; the assert job requires
+  # setup-uv to actually appear in this job's log, since a silently-skipped
+  # "Install uv" step looks identical to a passing one from outside.
+  python-uv-cache:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      python-directory: .github/self-test-fixtures/python-uv-cache
+
   node-lint-violation:
     # Expected to report "failure" - see the header comment above. Do not
     # "fix" this job to be green; that would defeat the scenario.
@@ -325,52 +394,55 @@ jobs:
     with:
       python-directory: .github/self-test-fixtures/does-not-exist
 
-  # KNOWN LIMITATION, argued down not fully closed (real Codex finding,
-  # round-1 review): this job (and assert-python-negative-fixture-blocks
-  # below) can only observe node-lint-violation's overall JOB result via
-  # `needs.<job>.result` - "failure" doesn't, by itself, prove the FAILURE
-  # was specifically the lint step (checkout/npm-ci/audit or an unrelated
-  # step failing first would look identical from here; see the "STRUCTURAL
-  # LIMITATION" comment above `on:`). This is mitigated, not eliminated, by
-  # fixture design: node-lint-violation/package.json declares ONLY a
-  # "lint" script (no typecheck/test/build scripts for `--if-present` to
-  # even find), has zero dependencies (npm ci / npm audit both verified
-  # locally to succeed cleanly against it), and nothing precedes "npm
-  # lint" in the reusable workflow's Node path (npm ci is the only earlier
-  # step and it succeeds) - so of every step the reusable workflow could
-  # run against this fixture, "npm lint" is the only one that plausibly
-  # fails, verified by having actually run every other step against this
-  # exact fixture locally (see the WP1 commit message). (Semgrep is
-  # correctly out of scope here for an unrelated reason: its `if:` checks
-  # for a semgrep config at the REPO ROOT, not per fixture directory - it
-  # doesn't run for any of this file's six scenario jobs, not something
-  # specific to this fixture's own design; round-2 review fix, an earlier
-  # version of this comment miscredited that to node-lint-violation
-  # itself.) That
-  # is fixture-design evidence, not a step-level guarantee - a genuinely
-  # unrelated future breakage (e.g. actions/checkout itself failing) would
-  # still be misread by this assertion as "the lint gate is working". A
-  # full fix needs `outputs:` on reusable-pr-quality.yml itself, out of
-  # this package's additive-only scope - flagged as a follow-up, not
-  # silently left as if it were fully solved.
+  # HISTORICAL NOTE (round-4 review fix): a long comment used to sit here
+  # arguing that this job could only observe node-lint-violation's overall JOB
+  # result, that "npm lint is the only step that plausibly fails" was
+  # fixture-design evidence rather than a step-level guarantee, and that a
+  # full fix needed `outputs:` on reusable-pr-quality.yml. All three
+  # statements stopped being true when this job started reading the fixture's
+  # real log (see the header above `on:`), and the stale comment survived the
+  # conversion - flagged by review, removed here rather than left to make a
+  # future maintainer either redo closed work or delete the EXPECT_PATTERN
+  # believing it adds nothing.
+  #
+  # What replaced the argument: EXPECT_PATTERN below requires npm's own
+  # "> <pkg>@<version> lint" run banner in the log. An unrelated earlier
+  # failure - actions/checkout, npm ci, anything - means that banner never
+  # appears, and this job fails saying so.
   assert-negative-fixture-blocks:
     name: assert node-lint-violation actually blocked
     needs: [node-lint-violation]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      # ROUND-4: needed by scripts/assert-fixture-job.sh to read the fixture
+      # job's log. Read-only, and scoped to this one job rather than raised
+      # workflow-wide.
+      actions: read
     steps:
-      - name: Check the deliberately-broken fixture failed the gate
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The marker is npm's own "> <pkg>@<version> lint" run banner, which
+      # only appears when npm actually invoked the lint script - not the
+      # workflow's `npm run lint --if-present` source line, which is echoed
+      # into the log whether or not the step ran.
+      - name: Check the deliberately-broken fixture failed the gate, via lint
         env:
-          FIXTURE_RESULT: ${{ needs.node-lint-violation.result }}
-        run: |
-          echo "node-lint-violation job result: $FIXTURE_RESULT"
-          if [ "$FIXTURE_RESULT" != "failure" ]; then
-            echo "::error::Expected the node-lint-violation fixture to FAIL the reusable workflow (its lint script deliberately exits 1) but the job result was '$FIXTURE_RESULT'. The gate is not actually blocking on a real lint violation - see F1 and the c07ddce history in reusable-pr-quality.yml's header comment."
-            exit 1
-          fi
-          echo "Confirmed: the reusable workflow correctly failed the job on a real lint violation."
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: node-lint-violation / quality-gate
+          ACTUAL_RESULT: ${{ needs.node-lint-violation.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: '^[^ ]+ > self-test-node-lint-violation@[0-9.]+ lint$'
+          FAILURE_HINT: "The gate is not actually blocking on a real lint violation - see F1 and the c07ddce history in reusable-pr-quality.yml's header comment."
+        run: scripts/assert-fixture-job.sh
 
   # Same known limitation and same fixture-design mitigation as
   # assert-negative-fixture-blocks above: python-test-failure/requirements.txt
@@ -406,136 +478,407 @@ jobs:
     needs: [python-test-failure]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
     steps:
-      - name: Check the deliberately-failing fixture failed the gate
-        env:
-          FIXTURE_RESULT: ${{ needs.python-test-failure.result }}
-        run: |
-          echo "python-test-failure job result: $FIXTURE_RESULT"
-          if [ "$FIXTURE_RESULT" != "failure" ]; then
-            echo "::error::Expected the python-test-failure fixture to FAIL the reusable workflow (its pytest suite has a genuine failing assertion) but the job result was '$FIXTURE_RESULT'. The gate is not actually blocking on a real test failure - see the pre-c07ddce 'pytest -q || echo ...' history in reusable-pr-quality.yml's header comment."
-            exit 1
-          fi
-          echo "Confirmed: the reusable workflow correctly failed the job on a real test failure."
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-  # Same known limitation as assert-negative-fixture-blocks above (job-level
-  # result only, not step-level) - accepted for the same reason, not
-  # re-argued six more times.
+      # ROUND-4: the marker is pytest's own FAILED summary line naming the
+      # exact test - which settles, rather than argues from fixture design,
+      # the "did ruff fail first and skip pytest entirely?" question the
+      # round-2 comment above had to reason its way through.
+      - name: Check the deliberately-failing fixture failed the gate, via pytest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: python-test-failure / quality-gate
+          ACTUAL_RESULT: ${{ needs.python-test-failure.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: '^[^ ]+ FAILED tests/test_deliberate_failure\.py::test_deliberately_fails'
+          FAILURE_HINT: "The gate is not actually blocking on a real test failure - see the pre-c07ddce 'pytest -q || echo ...' history in reusable-pr-quality.yml's header comment."
+        run: scripts/assert-fixture-job.sh
+
   assert-bandit-blocking-fixture-blocks:
     name: assert python-bandit-blocking actually blocked
     needs: [python-bandit-blocking]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
     steps:
-      - name: Check the deliberately-unbaselined bandit finding failed the gate
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The marker is the RENDERED annotation, not the `echo "::error::..."`
+      # source line the step's own script body puts in the log regardless.
+      # FORBID_PATTERN pins the crash-vs-finding split: bandit exiting >= 2
+      # (it itself failed) must never be mistaken for the finding this
+      # fixture exists to prove blocks.
+      - name: Check the unbaselined bandit finding blocked, and not a crash
         env:
-          FIXTURE_RESULT: ${{ needs.python-bandit-blocking.result }}
-        run: |
-          echo "python-bandit-blocking job result: $FIXTURE_RESULT"
-          if [ "$FIXTURE_RESULT" != "failure" ]; then
-            echo "::error::Expected the python-bandit-blocking fixture to FAIL the reusable workflow (a real bandit finding not present in its empty .bandit-baseline.json) but the job result was '$FIXTURE_RESULT'. WP5's bandit-baseline blocking promotion is not actually blocking."
-            exit 1
-          fi
-          echo "Confirmed: the reusable workflow correctly failed the job on a real, unbaselined bandit finding."
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: python-bandit-blocking / quality-gate
+          ACTUAL_RESULT: ${{ needs.python-bandit-blocking.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: '##\[error\]bandit reported findings not present in \.bandit-baseline\.json'
+          FORBID_PATTERN: '##\[error\]bandit failed to run'
+          FAILURE_HINT: "WP5's bandit-baseline blocking promotion did not block on a real, unbaselined finding."
+        run: scripts/assert-fixture-job.sh
 
   assert-npm-audit-blocking-fixture-blocks:
     name: assert npm-audit-blocking actually blocked
     needs: [npm-audit-blocking]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
     steps:
-      - name: Check the unallowlisted lodash CVE failed the gate
-        env:
-          FIXTURE_RESULT: ${{ needs.npm-audit-blocking.result }}
-        run: |
-          echo "npm-audit-blocking job result: $FIXTURE_RESULT"
-          if [ "$FIXTURE_RESULT" != "failure" ]; then
-            echo "::error::Expected the npm-audit-blocking fixture to FAIL the reusable workflow (lodash@4.17.4's real, unallowlisted advisories, audit-ci --high) but the job result was '$FIXTURE_RESULT'. WP5's audit-ci blocking promotion is not actually blocking."
-            exit 1
-          fi
-          echo "Confirmed: the reusable workflow correctly failed the job on a real, unallowlisted npm advisory."
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
+      # The marker is audit-ci's own verdict line, which it prints only after
+      # actually evaluating advisories against the configured severity floor -
+      # so this also catches the silent all-false-severity-map failure the
+      # explicit `--high` flag exists to prevent (audit-ci would exit 0 with
+      # "Passed npm security audit." instead).
+      - name: Check the unallowlisted lodash CVEs blocked via audit-ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: npm-audit-blocking / quality-gate
+          ACTUAL_RESULT: ${{ needs.npm-audit-blocking.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: '^[^ ]+ Failed security audit due to .*vulnerabilities\.$'
+          FAILURE_HINT: "WP5's audit-ci blocking promotion is not actually blocking on lodash@4.17.4's real, unallowlisted advisories."
+        run: scripts/assert-fixture-job.sh
+
+  # THIS is the assert job round 4 exists for. Its old form checked only
+  # `needs.python-pip-audit-blocking.result != 'failure'` and reported success
+  # on every run for months while the fixture was failing on a pip
+  # dependency-RESOLUTION crash - never once on the vulnerability finding it
+  # exists to prove blocks. Verified by replaying this exact assertion against
+  # the real, already-merged run 31635781539 before the fixture fix: it fails,
+  # naming the missing marker. See the fixture's requirements.txt.
   assert-pip-audit-blocking-fixture-blocks:
     name: assert python-pip-audit-blocking actually blocked
     needs: [python-pip-audit-blocking]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
     steps:
-      - name: Check the unignored PyYAML CVEs failed the gate
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the unignored CVEs blocked, and not a resolver crash
         env:
-          FIXTURE_RESULT: ${{ needs.python-pip-audit-blocking.result }}
-        run: |
-          echo "python-pip-audit-blocking job result: $FIXTURE_RESULT"
-          if [ "$FIXTURE_RESULT" != "failure" ]; then
-            echo "::error::Expected the python-pip-audit-blocking fixture to FAIL the reusable workflow (PyYAML==5.3's real, unignored PYSEC advisories) but the job result was '$FIXTURE_RESULT'. WP5's pip-audit ignore-list blocking promotion is not actually blocking."
-            exit 1
-          fi
-          echo "Confirmed: the reusable workflow correctly failed the job on real, unignored pip-audit findings."
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: python-pip-audit-blocking / quality-gate
+          ACTUAL_RESULT: ${{ needs.python-pip-audit-blocking.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: '##\[error\]pip-audit reported findings not present in \.pip-audit-ignore'
+          FORBID_PATTERN: '##\[error\]pip-audit failed to run'
+          FAILURE_HINT: "WP5's pip-audit ignore-list blocking promotion did not block on a genuine finding. If the FORBIDDEN marker matched, pip-audit crashed instead of reporting - most likely a tool pin in reusable-pr-quality.yml's 'pip install tools' step now conflicts with this fixture's deliberately vulnerable pin, which is exactly the round-3 bug this assertion was written to catch."
+        run: scripts/assert-fixture-job.sh
+
+  # ROUND-4: the advisory twin of the assert above. A passing job proves
+  # nothing on its own here - the whole point is that pip-audit found
+  # something real and CHOSE not to block, which is only visible in the log.
+  assert-pip-audit-advisory-warns:
+    name: assert python-pip-audit-advisory warned without blocking
+    needs: [python-pip-audit-advisory]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check pip-audit warned on a real finding without failing the job
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: python-pip-audit-advisory / quality-gate
+          ACTUAL_RESULT: ${{ needs.python-pip-audit-advisory.result }}
+          EXPECT_RESULT: success
+          EXPECT_PATTERN: '##\[warning\]pip-audit reported findings \(advisory step, not blocking\)'
+          FORBID_PATTERN: '##\[error\]pip-audit failed to run'
+          FAILURE_HINT: "The advisory pip-audit path did not reach its 'found something real, warn but do not block' branch. A green job with no warning means pip-audit found nothing (the fixture's vulnerable pin stopped being vulnerable, or never got installed) - not that the advisory path works."
+        run: scripts/assert-fixture-job.sh
 
   assert-node-typecheck-violation-fixture-blocks:
     name: assert node-typecheck-violation actually blocked
     needs: [node-typecheck-violation]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
     steps:
-      - name: Check the deliberately-broken fixture failed the gate
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the deliberately-broken fixture failed the gate, via typecheck
         env:
-          FIXTURE_RESULT: ${{ needs.node-typecheck-violation.result }}
-        run: |
-          echo "node-typecheck-violation job result: $FIXTURE_RESULT"
-          if [ "$FIXTURE_RESULT" != "failure" ]; then
-            echo "::error::Expected the node-typecheck-violation fixture to FAIL the reusable workflow (its typecheck script deliberately exits 1) but the job result was '$FIXTURE_RESULT'. npm typecheck is not actually blocking."
-            exit 1
-          fi
-          echo "Confirmed: the reusable workflow correctly failed the job on a real typecheck violation."
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: node-typecheck-violation / quality-gate
+          ACTUAL_RESULT: ${{ needs.node-typecheck-violation.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: '^[^ ]+ > self-test-node-typecheck-violation@[0-9.]+ typecheck$'
+          FAILURE_HINT: "npm typecheck is not actually blocking."
+        run: scripts/assert-fixture-job.sh
 
   assert-python-mypy-violation-fixture-blocks:
     name: assert python-mypy-violation actually blocked
     needs: [python-mypy-violation]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
     steps:
-      - name: Check the deliberate type error failed the gate
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # mypy's own summary line - present only when mypy ran AND found
+      # something, which together rule out both "the step was skipped" and
+      # "something earlier failed first".
+      - name: Check the deliberate type error failed the gate, via mypy
         env:
-          FIXTURE_RESULT: ${{ needs.python-mypy-violation.result }}
-        run: |
-          echo "python-mypy-violation job result: $FIXTURE_RESULT"
-          if [ "$FIXTURE_RESULT" != "failure" ]; then
-            echo "::error::Expected the python-mypy-violation fixture to FAIL the reusable workflow (a genuine mypy type error) but the job result was '$FIXTURE_RESULT'. mypy is not actually blocking."
-            exit 1
-          fi
-          echo "Confirmed: the reusable workflow correctly failed the job on a real type error."
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: python-mypy-violation / quality-gate
+          ACTUAL_RESULT: ${{ needs.python-mypy-violation.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: '^[^ ]+ Found [0-9]+ error(s)? in [0-9]+ file'
+          FAILURE_HINT: "mypy is not actually blocking on a genuine type error."
+        run: scripts/assert-fixture-job.sh
 
   assert-bad-directory-input-blocks:
     name: assert bad-directory-input actually blocked
     needs: [bad-directory-input]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
     steps:
-      - name: Check the nonexistent directory input failed closed
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the nonexistent directory input failed closed, by name
         env:
-          FIXTURE_RESULT: ${{ needs.bad-directory-input.result }}
-        run: |
-          echo "bad-directory-input job result: $FIXTURE_RESULT"
-          if [ "$FIXTURE_RESULT" != "failure" ]; then
-            echo "::error::Expected bad-directory-input to FAIL the reusable workflow (python-directory points at a path that doesn't exist) but the job result was '$FIXTURE_RESULT'. WP6's fail-closed directory validation is not actually failing closed - see the silent-stack-disable bug its own comment describes."
-            exit 1
-          fi
-          echo "Confirmed: the reusable workflow correctly rejected a nonexistent directory input."
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: bad-directory-input / quality-gate
+          ACTUAL_RESULT: ${{ needs.bad-directory-input.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: "##\\[error\\]python-directory '[^']*does-not-exist' does not exist in this repository"
+          FAILURE_HINT: "WP6's fail-closed directory validation is not actually failing closed - see the silent-stack-disable bug its own comment describes."
+        run: scripts/assert-fixture-job.sh
+
+  # ROUND-4 (HIGH): the `-true` trust regression guard. If
+  # is_trivial_makefile_recipe stops recognising Make's `-` prefix, the root
+  # Makefile's `lint:` target earns trust for this fixture's directory, the
+  # native `ruff check .` step is SKIPPED, and the fixture job goes GREEN with
+  # its deliberate F401 unexamined. Both halves matter: the result check
+  # catches the skip, and the log marker proves the failure really was ruff.
+  assert-makefile-trust-dash-negative-blocks:
+    name: assert makefile-trust-dash-negative actually blocked
+    needs: [makefile-trust-dash-negative]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the native ruff step ran and failed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: makefile-trust-dash-negative / quality-gate
+          ACTUAL_RESULT: ${{ needs.makefile-trust-dash-negative.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: 'F401 .* imported but unused'
+          FAILURE_HINT: "The native ruff step did not run for this fixture, which means compute_makefile_trust wrongly TRUSTED the root Makefile's `-true` lint recipe - the H2 false-green class, via Make's `-` prefix. scripts/test-makefile-trust.sh covers the same function directly and should name the exact case."
+        run: scripts/assert-fixture-job.sh
+
+  # ROUND-4 review fix: root-makefile-and-semgrep exists (per its own comment)
+  # to prove two things that had never executed at all - WP7's Makefile
+  # dispatch and the Semgrep step. Its value therefore depends entirely on a
+  # specific step having RUN, and it had no assert job, while this file's own
+  # header claimed every such fixture now had one. Rather than narrow the
+  # claim, close the gap: semgrep's own scan-summary line is the marker.
+  #
+  # `Ran N rules? on M files` is real semgrep output, not the echoed `run:`
+  # body (which contains only the `semgrep scan --error --config ...`
+  # command).
+  #
+  # M IS DELIBERATELY UNCONSTRAINED, and the first version of this assertion
+  # got that wrong. It required `[1-9][0-9]*` files - "a step that runs but
+  # scans nothing must be a failure" - which is false, because this step
+  # passes `--baseline-commit`: the scan is DIFF-SCOPED. Measured, after two
+  # review lenses disagreed about it:
+  #   full scan, no baseline            -> "Ran 1 rule on 13 files"
+  #   this PR (4 yaml files changed)    -> "Ran 1 rule on 4 files"
+  #   --baseline-commit HEAD (0 changed)-> "Ran 1 rule on 0 files"
+  # So M is the count of CHANGED yaml files, not repo content. A docs-only,
+  # scripts-only or fixture-only PR legitimately scans zero, and the strict
+  # version of this pattern would have turned the required `self-test` check
+  # RED on a defect-free PR while blaming a missing semgrep config.
+  #
+  # What this therefore proves is that the Semgrep step RAN TO COMPLETION -
+  # which is the actual question, since its `if:` is a root-scoped
+  # hashFiles() that could silently stop matching. It does not prove any
+  # particular file was scanned, and that is correct: on most PRs, none
+  # should be.
+  #
+  # MEASURED WHILE WRITING THIS, and worth recording because a deleted
+  # comment nearby used to claim the opposite ("it doesn't run for any of
+  # this file's six scenario jobs"): the Semgrep step's `if:` is
+  # hashFiles() over REPO-ROOT paths and this repo's root ships semgrep.yml,
+  # so Semgrep runs in EVERY fixture job, not just this one. Confirmed
+  # against run 31639687237 - python-only, node-only and this job all log
+  # "Ran 1 rule on 4 files: 0 findings." So this assertion is not unique to
+  # this job; it is simply the job designated to own the claim. The real
+  # cost that follows - one Docker pull and one identical 4-file scan per
+  # fixture job, currently 18 of them per run - is a consequence of the
+  # reusable workflow's documented root-scoped detection, not something this
+  # file can fix, and is written into the round-4 backlog rather than
+  # silently absorbed.
+  assert-semgrep-actually-ran:
+    name: assert root-makefile-and-semgrep really ran semgrep
+    needs: [root-makefile-and-semgrep]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check semgrep scanned at least one file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: root-makefile-and-semgrep / quality-gate
+          ACTUAL_RESULT: ${{ needs.root-makefile-and-semgrep.result }}
+          EXPECT_RESULT: success
+          EXPECT_PATTERN: '^[^ ]+ Ran [0-9]+ rules? on [0-9]+ files'
+          FAILURE_HINT: "The Semgrep step did not run to completion. Its `if:` requires a semgrep config at the REPO ROOT (semgrep.yml / .semgrep.yml / .semgrep/ / semgrep/) - a green job with no scan-summary line means the gate's only cross-language security scan is silently skipped for every consumer that ships one. Note a scan of ZERO files is normal and expected: the step passes --baseline-commit, so it only scans yaml the PR actually changed."
+        run: scripts/assert-fixture-job.sh
+
+  # ROUND-4 (LOW): the marker is the runner's echo of setup-uv's RESOLVED
+  # `enable-cache` input, not just the step header.
+  #
+  # Review finding, and a fair one: the first version matched only
+  # "Run astral-sh/setup-uv@", which the runner prints whenever the step
+  # executes at all. That proves `uses_uv` was true and says nothing about
+  # `has_uv_cache_target` - the output the zero-match-glob guard actually
+  # keys on. Mutating `enable-cache` to a hardcoded `true` left every job
+  # green while the fixture's own text claimed the guard was covered: the
+  # same "the assertion is satisfied by something other than what it claims"
+  # shape as the pip-audit bug this whole round exists for. Matching the
+  # resolved input closes it (verified present in the real log:
+  # "  enable-cache: true", inside the step's own `with:` group).
+  #
+  # STILL UNCOVERED, deliberately: the guard's NEGATIVE side - uses_uv true
+  # via the root-Makefile grep with no python manifest anywhere, where
+  # enable-cache must resolve to false or setup-uv hard-fails on a
+  # zero-match glob. That needs a fixture whose job makes the ROOT Makefile
+  # mention uv, which would turn uv detection on for every other job in this
+  # file at once. Backlogged, not silently skipped.
+  assert-uv-cache-step-ran:
+    name: assert python-uv-cache installed uv
+    needs: [python-uv-cache]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check setup-uv ran for the uv.lock fixture
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: python-uv-cache / quality-gate
+          ACTUAL_RESULT: ${{ needs.python-uv-cache.result }}
+          EXPECT_RESULT: success
+          EXPECT_PATTERN: '^[^ ]+   enable-cache: true$'
+          FAILURE_HINT: "Either uses_uv did not evaluate true for a python-directory containing both pyproject.toml and uv.lock (so setup-uv never ran), or has_uv_cache_target did not evaluate true (so caching was never enabled and the zero-match-glob guard is still unexercised). Check whether 'Run astral-sh/setup-uv@' appears in that job's log at all: present means the second case, absent means the first."
+        run: scripts/assert-fixture-job.sh
 
   # H4 (review finding): scripts/retrofit-quality-gate.sh had zero test
   # coverage of any kind - not even run once in CI, despite being a
@@ -550,6 +893,7 @@ jobs:
   retrofit-script-tests:
     name: retrofit-quality-gate.sh functional tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -577,12 +921,17 @@ jobs:
       - assert-bandit-blocking-fixture-blocks
       - assert-npm-audit-blocking-fixture-blocks
       - assert-pip-audit-blocking-fixture-blocks
+      - assert-pip-audit-advisory-warns
       - assert-node-typecheck-violation-fixture-blocks
       - assert-python-mypy-violation-fixture-blocks
       - assert-bad-directory-input-blocks
+      - assert-makefile-trust-dash-negative-blocks
+      - assert-uv-cache-step-ran
+      - assert-semgrep-actually-ran
       - retrofit-script-tests
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -600,9 +949,13 @@ jobs:
           BANDIT_BLOCKING_ASSERT: ${{ needs.assert-bandit-blocking-fixture-blocks.result }}
           NPM_AUDIT_BLOCKING_ASSERT: ${{ needs.assert-npm-audit-blocking-fixture-blocks.result }}
           PIP_AUDIT_BLOCKING_ASSERT: ${{ needs.assert-pip-audit-blocking-fixture-blocks.result }}
+          PIP_AUDIT_ADVISORY_ASSERT: ${{ needs.assert-pip-audit-advisory-warns.result }}
           NODE_TYPECHECK_ASSERT: ${{ needs.assert-node-typecheck-violation-fixture-blocks.result }}
           PYTHON_MYPY_ASSERT: ${{ needs.assert-python-mypy-violation-fixture-blocks.result }}
           BAD_DIRECTORY_ASSERT: ${{ needs.assert-bad-directory-input-blocks.result }}
+          DASH_TRUST_ASSERT: ${{ needs.assert-makefile-trust-dash-negative-blocks.result }}
+          UV_CACHE_ASSERT: ${{ needs.assert-uv-cache-step-ran.result }}
+          SEMGREP_ASSERT: ${{ needs.assert-semgrep-actually-ran.result }}
           RETROFIT_SCRIPT_TESTS: ${{ needs.retrofit-script-tests.result }}
         run: |
           echo "node-only: $NODE_ONLY"
@@ -617,15 +970,20 @@ jobs:
           echo "assert-bandit-blocking-fixture-blocks: $BANDIT_BLOCKING_ASSERT"
           echo "assert-npm-audit-blocking-fixture-blocks: $NPM_AUDIT_BLOCKING_ASSERT"
           echo "assert-pip-audit-blocking-fixture-blocks: $PIP_AUDIT_BLOCKING_ASSERT"
+          echo "assert-pip-audit-advisory-warns: $PIP_AUDIT_ADVISORY_ASSERT"
           echo "assert-node-typecheck-violation-fixture-blocks: $NODE_TYPECHECK_ASSERT"
           echo "assert-python-mypy-violation-fixture-blocks: $PYTHON_MYPY_ASSERT"
           echo "assert-bad-directory-input-blocks: $BAD_DIRECTORY_ASSERT"
+          echo "assert-makefile-trust-dash-negative-blocks: $DASH_TRUST_ASSERT"
+          echo "assert-uv-cache-step-ran: $UV_CACHE_ASSERT"
+          echo "assert-semgrep-actually-ran: $SEMGREP_ASSERT"
           echo "retrofit-script-tests: $RETROFIT_SCRIPT_TESTS"
           FAILED=0
           for r in "$NODE_ONLY" "$NODE_PNPM_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$ROOT_MAKEFILE_SEMGREP" "$MAKEFILE_TRUST_POSITIVE" "$PYTHON_DEV_GROUP" \
             "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$BANDIT_BLOCKING_ASSERT" \
-            "$NPM_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_BLOCKING_ASSERT" "$NODE_TYPECHECK_ASSERT" \
-            "$PYTHON_MYPY_ASSERT" "$BAD_DIRECTORY_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
+            "$NPM_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_ADVISORY_ASSERT" \
+            "$NODE_TYPECHECK_ASSERT" "$PYTHON_MYPY_ASSERT" "$BAD_DIRECTORY_ASSERT" \
+            "$DASH_TRUST_ASSERT" "$UV_CACHE_ASSERT" "$SEMGREP_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
             if [ "$r" != "success" ]; then
               FAILED=1
             fi

@@ -85,4 +85,21 @@ rules:
         - "*.yml"
         - "*.yaml"
       exclude:
+        # Round-4: semgrep emits a live deprecation warning against this
+        # exact line on every real run -- 'Rule
+        # github-actions-untrusted-context-in-run contains an exclude pattern
+        # ".github/self-test-fixtures/" that will soon be interpreted as
+        # "/.github/self-test-fixtures/"'. Confirmed harmless today and left
+        # as-is deliberately: the path is already root-relative and unique in
+        # this repo, so the announced reinterpretation resolves to the same
+        # set of files either way. Recorded here because this file documents
+        # far more obscure edge cases than this one, and a live warning that
+        # nothing explains reads like an unnoticed problem.
+        #
+        # Semgrep's own suggested migrations, when someone wants the warning
+        # gone: '/.github/self-test-fixtures/' keeps today's anchored meaning
+        # explicitly, '**/.github/self-test-fixtures/' makes it unanchored.
+        # Not applied here on purpose - changing the exclusion semantics of a
+        # security rule is a behavioural change, and this round is scoped to
+        # documenting a warning that has no functional impact.
         - ".github/self-test-fixtures/"

@@ -1,0 +1,27 @@
+# ROUND-4 fixture: the ADVISORY twin of python-pip-audit-blocking.
+#
+# The blocking path (a `.pip-audit-ignore` file present) had a fixture; the
+# advisory path - the one every Python consumer gets by DEFAULT, with no
+# opt-in file - had none. So "pip-audit found something real, warn but do
+# not block" had never once executed in this repo's CI, and the branch that
+# distinguishes it from "pip-audit itself crashed" was unproven in exactly
+# the way the blocking path's turned out to be wrong (see
+# python-pip-audit-blocking/requirements.txt).
+#
+# Deliberately NO .pip-audit-ignore in this directory: its absence is what
+# routes this fixture to the advisory step (has_pip_audit_ignore == 'false').
+#
+# Same vulnerable pin as the blocking fixture, and for the same reason:
+# Jinja2 is not a dependency, direct or transitive, of any of the reusable
+# workflow's five pinned tools (ruff/pytest/mypy/bandit/pip-audit), so no
+# tool's own version floor can ever conflict with this pin and crash the
+# resolve before the CVEs are looked up - the exact bug that left the
+# blocking fixture never reaching its intended branch.
+#
+# Expected result: this job PASSES (advisory means advisory), and its assert
+# job greps its real log for the rendered
+# "##[warning]pip-audit reported findings (advisory step, not blocking)"
+# annotation - because a job that passes proves nothing on its own here. It
+# also asserts the crash annotation is ABSENT, so a future resolver conflict
+# cannot masquerade as advisory coverage.
+Jinja2==3.1.4

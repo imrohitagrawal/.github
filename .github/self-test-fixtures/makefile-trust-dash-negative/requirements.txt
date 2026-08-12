@@ -1,0 +1,29 @@
+# ROUND-4 fixture (HIGH): the negative twin of makefile-trust-positive.
+#
+# makefile-trust-positive proves compute_makefile_trust says TRUE for a real
+# recipe (so the native step is correctly skipped). Nothing proved it says
+# FALSE for a recipe that only LOOKS real - and it didn't: Make's `-`
+# (ignore-error) prefix was never handled, so a `-true` recipe was classified
+# non-trivial, earned full trust, and SKIPPED the native step. That is the
+# original H2 false-green failure class, reached through `-` instead of the
+# already-handled `@`.
+#
+# HOW THIS BITES: the root Makefile's `lint:` target has a recipe of
+# `-true`, and its comment names THIS directory - so the directory-mention
+# half of compute_makefile_trust is satisfied, and the ONLY thing standing
+# between this fixture and trust=true is is_trivial_makefile_recipe
+# recognising the `-` prefix. If it stops recognising it, `ruff check .` is
+# skipped for this job, unused_import.py's deliberate F401 is never seen, and
+# the job goes GREEN - which its assert job (expecting failure, and grepping
+# this job's real log for ruff's own F401 output) then reports as the
+# regression it is.
+#
+# Root-directory coverage (directory == '.') is deliberately NOT here: it
+# would need a real Python/Node manifest at this repo's own root, which
+# self-test.yml's root-makefile-and-semgrep comment already explains is a
+# trade-off not worth making. scripts/test-makefile-trust.sh covers that half
+# directly, against the same helper functions extracted from the workflow.
+#
+# No runtime dependencies - this file exists only so has_python evaluates
+# true for this directory, which is what makes the native `ruff check .` step
+# eligible to run at all.

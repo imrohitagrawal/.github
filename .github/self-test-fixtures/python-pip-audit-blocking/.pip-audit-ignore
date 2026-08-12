@@ -1,5 +1,13 @@
-# Deliberately does NOT list PYSEC-2020-96 or PYSEC-2021-142 (the real IDs
-# PyYAML==5.3 triggers) -- this file exists to prove the blocking step still
-# fails when the ignore-list doesn't cover the actual finding, not to
-# demonstrate the ignore-list mechanism itself.
+# Deliberately does NOT list any ID that Jinja2==3.1.4 actually triggers
+# (PYSEC-2026-1471 / PYSEC-2026-1475 / PYSEC-2026-1472 as of this commit) --
+# this file exists to prove the blocking step still fails when the
+# ignore-list doesn't cover the actual finding, not to demonstrate the
+# ignore-list mechanism itself.
+#
+# The one entry below is a syntactically valid but nonexistent ID, so this
+# file is a real, parsed ignore-list (proving the parsing path runs) that
+# covers nothing real. Round-4 note: this is deliberately NOT pinned to the
+# specific PYSEC IDs above -- advisory databases renumber and re-issue IDs
+# over time, and a fixture that hard-codes them would go red for a
+# bookkeeping change rather than a real regression.
 CVE-2099-99999

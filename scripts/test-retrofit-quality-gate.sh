@@ -378,6 +378,130 @@ assert_contains "explains why" "$SCRIPT_OUTPUT" "refusing to push -- monorepo de
 assert_not_contains "never attempted a real git push" "$SCRIPT_OUTPUT" "No configured push destination"
 
 # ============================================================================
+# T13: the Makefile this script actually copies dispatches on the repo's real
+# package manager (round-4, MEDIUM).
+#
+# WHY: H1 taught the reusable workflow to dispatch on pnpm/yarn/npm at all six
+# of its native `run:` sites, but templates/Makefile.node - the file THIS
+# script copies verbatim into any repo with a package.json - kept hardcoding
+# `npm ci`. So a pnpm-only or yarn-only repo that onboarded through this
+# script and adopted the recommended root Makefile reproduced the original H1
+# hard failure (`npm ci` against a repo with no package-lock.json) through the
+# Makefile route instead of the native one. These cases run the REAL copied
+# Makefile through `make -n` (dry run - nothing is installed, no network) and
+# read back which manager it resolved to.
+#
+# WHICH CHANGE TURNS THESE RED: revert templates/Makefile.node's PKG_MANAGER
+# detection to a bare `npm ci` install target and ALL FIVE fail - run, not
+# assumed (an earlier version of this comment said three, on the reasoning
+# that npm-shaped repos would still pass; wrong, because every case asserts
+# the literal `case "<manager>" in` line, which a bare `npm ci` recipe never
+# prints for any manager).
+
+makefile_pm_case() {
+	# makefile_pm_case NAME EXPECTED_MANAGER PACKAGE_JSON [LOCKFILE]
+	local name="$1" expected="$2" pkgjson="$3" lockfile="${4:-}"
+	CURRENT_TEST="$name"
+	echo "$CURRENT_TEST"
+	local repo
+	repo="$(new_scratch_repo)"
+	track "$repo"
+	printf '%s' "$pkgjson" >"$repo/package.json"
+	if [ -n "$lockfile" ]; then
+		: >"$repo/$lockfile"
+	fi
+	git -C "$repo" add -A && git -C "$repo" commit -q -m "node manifest"
+	run_script "$repo"
+	assert_exit_code "$name: retrofit succeeded" 0 "$SCRIPT_EXIT"
+	assert_file_exists "$repo/Makefile" "$name: Makefile copied"
+
+	local dry
+	set +e
+	dry="$(cd "$repo" && make -n install 2>&1)"
+	set -e
+	assert_contains "$name: install dispatches to $expected" "$dry" "case \"$expected\" in"
+}
+
+makefile_pm_case "T13a pnpm lockfile" pnpm \
+	'{"name":"x","version":"1.0.0"}' pnpm-lock.yaml
+makefile_pm_case "T13b yarn lockfile" yarn \
+	'{"name":"x","version":"1.0.0"}' yarn.lock
+makefile_pm_case "T13c npm lockfile" npm \
+	'{"name":"x","version":"1.0.0"}' package-lock.json
+# packageManager wins over a contradicting lockfile, matching the reusable
+# workflow's own precedence (Corepack's field first, lockfile inference second).
+makefile_pm_case "T13d packageManager beats lockfile" pnpm \
+	'{"name":"x","version":"1.0.0","packageManager":"pnpm@9.1.0"}' package-lock.json
+# An unrecognised packageManager must fall back to npm, never be passed
+# through - the value reaches a `case` statement and comes from repo content.
+makefile_pm_case "T13e unknown packageManager falls back to npm" npm \
+	'{"name":"x","version":"1.0.0","packageManager":"bun@1.0.0"}' ""
+
+# ============================================================================
+# T14: the copied Makefile REALLY enforces yarn lockfile integrity (round-4,
+# P1 from Codex review on PR #21, independently found by that round's SRE lens).
+#
+# T13 only inspects `make -n` output, which cannot catch a runtime flag that
+# the tool accepts and ignores - and that was exactly the bug: `--immutable` is
+# a Yarn Berry flag, and Yarn Classic accepts it, ignores it, and rewrites the
+# lockfile. Measured against real yarn 1.22.22:
+#   yarn install --immutable       -> exit 0, "success Saved lockfile", rewritten
+#   yarn install --frozen-lockfile -> exit 1, "Your lockfile needs to be updated"
+#
+# This case asserts the PROPERTY, not the flag: whatever yarn ends up on PATH,
+# a package.json whose dependency is absent from yarn.lock must FAIL `make
+# install` and must not rewrite the lockfile. That statement is true for Yarn
+# Classic (--frozen-lockfile) and Berry (--immutable) alike, so this test does
+# not need updating when the runner's default yarn major changes.
+#
+# WHICH CHANGE TURNS THIS RED: revert templates/Makefile.node's install target
+# to an unconditional `yarn install --immutable`. Verified.
+#
+# Yarn source: the runner's preinstalled yarn if present (ubuntu-latest ships
+# 1.22.22), else a pinned `npx yarn@1.22.22` shim - so this runs everywhere
+# rather than silently skipping on a machine without yarn.
+yarn_shim_dir=""
+if command -v yarn >/dev/null 2>&1; then
+	echo "T14: using preinstalled yarn $(yarn --version 2>/dev/null)"
+else
+	yarn_shim_dir="$(mktemp -d)"
+	track "$yarn_shim_dir"
+	printf '#!/bin/sh\nexec npx --yes yarn@1.22.22 "$@"\n' >"$yarn_shim_dir/yarn"
+	chmod +x "$yarn_shim_dir/yarn"
+	echo "T14: no yarn on PATH; using a pinned npx yarn@1.22.22 shim"
+fi
+
+CURRENT_TEST="T14 (yarn lockfile integrity is really enforced)"
+echo "$CURRENT_TEST"
+repo="$(new_scratch_repo)"
+track "$repo"
+# A declared dependency that the lockfile does not cover: the minimal input
+# every yarn major must refuse under an immutable-install flag.
+printf '{"name":"y","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}' >"$repo/package.json"
+printf '# yarn lockfile v1\n' >"$repo/yarn.lock"
+git -C "$repo" add -A && git -C "$repo" commit -q -m "yarn manifest with a stale lockfile"
+run_script "$repo"
+assert_exit_code "T14: retrofit succeeded" 0 "$SCRIPT_EXIT"
+
+lock_before="$(cksum <"$repo/yarn.lock")"
+set +e
+if [ -n "$yarn_shim_dir" ]; then
+	YARN_INSTALL_OUTPUT="$(cd "$repo" && PATH="$yarn_shim_dir:$PATH" make install 2>&1)"
+else
+	YARN_INSTALL_OUTPUT="$(cd "$repo" && make install 2>&1)"
+fi
+YARN_INSTALL_EXIT=$?
+set -e
+lock_after="$(cksum <"$repo/yarn.lock")"
+
+if [ "$YARN_INSTALL_EXIT" -ne 0 ]; then
+	pass "T14: stale yarn.lock fails make install (exit $YARN_INSTALL_EXIT)"
+else
+	fail "T14: stale yarn.lock did NOT fail make install -- yarn accepted an install flag it ignores, so this repo's lockfile integrity is not enforced at all. Output: $(printf '%s' "$YARN_INSTALL_OUTPUT" | tail -3 | tr '\n' ' ')"
+fi
+assert_eq "T14: yarn.lock was not rewritten" "$lock_before" "$lock_after"
+
+# ============================================================================
 
 echo ""
 echo "============================================================"
