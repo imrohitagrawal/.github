@@ -1,0 +1,19 @@
+[project]
+name = "python-dev-group-fixture"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+# freezegun is deliberately NOT in [project.dependencies] and is confirmed
+# absent from every transitive dependency of the reusable workflow's own
+# pinned tools (ruff==0.16.2, pytest==9.1.1, mypy==2.3.0, bandit==1.9.4,
+# pip-audit==2.10.1 - checked directly with a clean venv containing only
+# those five before choosing it). If the dev-group install path silently
+# no-ops, this fixture's own test fails on ImportError - it can't pass by
+# accident the way a dependency already present some other way could.
+dev = ["freezegun>=1.5,<2"]
