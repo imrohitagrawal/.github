@@ -335,15 +335,24 @@ copy_file "$TEMPLATES_DIR/dependabot.yml" "$TARGET_ROOT/.github/dependabot.yml" 
 CALLER_TMP="$(mktemp)"
 trap 'rm -f "$CALLER_TMP"' EXIT
 EXPECTED_PIN="uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@${PINNED_SHA} # ${PINNED_TAG}"
-sed -E "s|uses: imrohitagrawal/\.github/\.github/workflows/reusable-pr-quality\.yml@[^[:space:]]+|${EXPECTED_PIN}|" \
+# The trailing `([[:space:]]+#.*)?` consumes templates/caller-pr-quality.yml's
+# own pre-existing ` # vN` readability comment along with the SHA, so it gets
+# REPLACED, not left in place alongside EXPECTED_PIN's own comment (found in
+# review: `[^[:space:]]+` alone stops at the SHA, so every retrofit run --
+# not just re-runs, since the template ships with the comment already
+# present -- produced a doubled `# v6 # v6`).
+sed -E "s|uses: imrohitagrawal/\.github/\.github/workflows/reusable-pr-quality\.yml@[^[:space:]]+([[:space:]]+#.*)?\$|${EXPECTED_PIN}|" \
 	"$TEMPLATES_DIR/caller-pr-quality.yml" >"$CALLER_TMP"
-# Verify the substitution actually happened rather than trusting sed's exit
-# code -- sed exits 0 even on zero matches, which would otherwise silently
-# ship a caller file still pinned to whatever templates/caller-pr-quality.yml
-# had (a mutable tag), while this script reports it as SHA-pinned (found in
-# review).
-if ! grep -qF "$EXPECTED_PIN" "$CALLER_TMP"; then
-	echo "error: failed to substitute the SHA pin into caller-pr-quality.yml -- templates/caller-pr-quality.yml's 'uses:' line may have changed format. Not writing an unpinned caller workflow." >&2
+# Verify the substitution produced EXACTLY the expected line, not just that
+# EXPECTED_PIN appears somewhere in the output (found in review: the
+# original `grep -qF "$EXPECTED_PIN"` check passed even on the doubled-
+# comment bug above, since EXPECTED_PIN is a true substring of the doubled
+# line -- it never actually caught the class of bug it was written to catch).
+# Trim leading/trailing whitespace so the comparison isn't sensitive to
+# incidental indentation.
+ACTUAL_LINE="$(grep -m1 'uses: imrohitagrawal/\.github/\.github/workflows/reusable-pr-quality\.yml@' "$CALLER_TMP" | sed -E 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+if [ "$ACTUAL_LINE" != "$EXPECTED_PIN" ]; then
+	echo "error: failed to substitute the SHA pin into caller-pr-quality.yml -- templates/caller-pr-quality.yml's 'uses:' line may have changed format (got: '$ACTUAL_LINE', want: '$EXPECTED_PIN'). Not writing a caller workflow that doesn't match." >&2
 	exit 1
 fi
 CALLER_DEST="$TARGET_ROOT/.github/workflows/pr-quality.yml"
