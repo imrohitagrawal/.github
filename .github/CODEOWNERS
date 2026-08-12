@@ -1,0 +1,14 @@
+# CODEOWNERS — code owners for this repository.
+#
+# This is imrohitagrawal/.github itself: the source of the reusable PR
+# quality gate and templates every other @imrohitagrawal repo adopts. One
+# person owns everything, same as every consumer repo this file's own
+# template (templates/CODEOWNERS) hands out — see AGENTS.md and
+# docs/branch-protection.md for why this repo does not pair CODEOWNERS with
+# branch protection's "Require review from Code Owners" setting: a sole
+# owner can't approve their own PR, so that setting either deadlocks every
+# PR (admin bypass off) or does nothing (admin bypass on, GitHub's default).
+# CODEOWNERS here is for review routing if a second maintainer ever joins,
+# not an enforced gate today.
+
+* @imrohitagrawal

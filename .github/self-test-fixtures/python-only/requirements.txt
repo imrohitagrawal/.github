@@ -1,0 +1,40 @@
+# WP1 self-test fixture: deliberately empty (no runtime deps). has_python
+# detection only needs one of pyproject.toml/requirements.txt/setup.py to
+# exist; this file is the one chosen for this fixture specifically to avoid
+# pyproject.toml (see the note below on why).
+#
+# This fixture does NOT use pyproject.toml on purpose. WP1 fixture-building
+# discovered a real bug in the native Python path while first trying a
+# pyproject.toml-based fixture: with a working [build-system], `pip install
+# -e .` (reusable-pr-quality.yml's own step) succeeds and installs the
+# fixture package locally - which pip-audit --strict (no --skip-editable)
+# then tries to look up on PyPI to audit, fails ("Dependency not found on
+# PyPI and could not be audited"), and - because that error doesn't match the
+# step's own "Found N known vulnerabilit(y|ies)" crash-vs-finding signal -
+# gets treated as a tool crash and hard-fails the step. Reproduced locally
+# (pip install -e . with a real build-system succeeds, pip-audit --strict
+# then exits 1 with exactly that error for the package's own name) and not
+# specific to this fixture's name - it reproduces for ANY locally
+# editable-installed, not-published-to-PyPI project, which describes most
+# real consumers' own projects. Fixing pip-audit's invocation (adding
+# --skip-editable) is a real fix to reusable-pr-quality.yml itself, out of
+# WP1's stated scope ("purely additive... doesn't touch runtime behavior for
+# existing consumers") - flagged as a new follow-up finding in the WP1
+# commit/PR rather than fixed here. requirements.txt sidesteps it: it's
+# installed unconditionally (no `|| true` swallow, unlike the pyproject.toml
+# path), stays genuinely empty, and lets pip-audit audit only the job's
+# actual pinned tooling (ruff/pytest/mypy/bandit/pip-audit and their
+# transitive deps - all real, published packages).
+#
+# Whether that produces a clean "No known vulnerabilities found" (exit 0) or
+# a genuine "Found N known vulnerabilities" advisory report (also exit 0,
+# via the step's own warn-not-crash handling) depends on the ambient
+# versions of those pinned tools/their deps at run time, not on anything
+# this fixture controls - both were observed locally at different points
+# during WP1's own development (a stale pip version once surfaced 6 real
+# CVEs against itself; a freshly-upgraded pip found none), and both are the
+# CORRECT, intended outcome for this step - only a crash (unmatched exit
+# code, e.g. the PyPI-lookup failure described above) would be wrong. This
+# fixture proves the advisory step runs against real, non-fabricated
+# content and doesn't crash - it does not, and cannot, deterministically
+# force one specific one of those two legitimate outcomes.

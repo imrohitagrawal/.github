@@ -1,0 +1,18 @@
+# WP1 self-test fixture: deliberately empty (no runtime deps). Exists only
+# so has_python detection is true (see python-only/requirements.txt for why
+# this fixture set prefers requirements.txt over pyproject.toml).
+#
+# Added during WP1's own Phase-3 adversarial review, which found the
+# original single negative fixture (node-lint-violation) proved only ONE of
+# reusable-pr-quality.yml's ~7 documented historical severity-swallow bugs
+# (npm lint's continue-on-error) actually stays fixed - typecheck/test/build
+# swallow (npm) and pytest/bandit/pip-audit swallow (Python) had no
+# fixture proving they're still real gates. This fixture covers a second,
+# different one (pytest's swallow) on a second, different stack (Python),
+# to show the negative-fixture pattern generalizes rather than only ever
+# having been exercised once. The remaining ~5 severity decisions
+# (typecheck, build, bandit, pip-audit, npm audit) are NOT yet covered by a
+# negative fixture - left as an explicit, recorded residual (see the WP1
+# final report) rather than built out fully here, given diminishing returns
+# against this package's time budget - not a claim that coverage is
+# complete.

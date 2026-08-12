@@ -38,7 +38,7 @@ With **Automatic Reviews** on, Codex posts a review on every PR. The review foll
 If automatic review is off, or you want a fresh review after pushing new commits:
 
 - Comment on the PR:
-  ```
+  ```text
   @codex review
   ```
 
@@ -46,7 +46,7 @@ If automatic review is off, or you want a fresh review after pushing new commits
 
 For PRs that touch auth, payments, infra, secrets, or CI/CD:
 
-```
+```text
 @codex review this PR for security regressions, missing tests, risky behavior changes, secret exposure, CI/CD weakening, and rollback risks.
 ```
 
@@ -57,7 +57,7 @@ Codex review is **advisory**. The author is responsible for deciding what to act
 1. **Read the full review.** Don't skim.
 2. **Validate every finding.** Codex can be wrong, especially around architectural or domain-specific decisions. Verify each P0/P1 by reading the code.
 3. **For valid issues**, fix them in the same PR — or in a follow-up PR if the fix is large. If you want Codex to apply the fixes, comment:
-   ```
+   ```text
    @codex fix the valid issues from your review while preserving existing behavior and tests.
    ```
 4. **For invalid findings**, mark them resolved with a short comment explaining why.

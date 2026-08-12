@@ -1,0 +1,12 @@
+{
+  "name": "self-test-node-only",
+  "private": true,
+  "version": "1.0.0",
+  "description": "WP1 self-test fixture: Node-only project (no Python manifest). Round-2 review fix (real Codex finding): this description previously claimed the calling job uses 'default python-directory/node-directory' to exercise 'the root-detect Node path' - false. self-test.yml's node-only job passes an EXPLICIT node-directory pointing at this fixture directory (necessary since this repo's own root genuinely has no package.json - the default '.' would find nothing here), leaving only python-directory at its default '.' (which also correctly finds nothing, since this repo's root has no Python manifest either - true root-detection for the Python side, not the Node side). This fixture's actual distinguishing role is exercising the reusable workflow's Node stack against a real, checked-in package.json with no Python fixture alongside it - not root-detection specifically; monorepo/frontend (WP6) is the fixture that deliberately exercises per-stack directory input. lint/typecheck/build each run a real check against real content (node --check, requiring package.json, requiring+executing smoke.test.js), not print-only stubs - round-1 review fixed lint/typecheck; round-2 review found build was left as the same kind of stub and fixed it too.",
+  "scripts": {
+    "lint": "node --check smoke.test.js",
+    "typecheck": "node -e \"require('./package.json')\"",
+    "test": "node --test",
+    "build": "node -e \"require('./smoke.test.js'); console.log('fixture build: ok')\""
+  }
+}

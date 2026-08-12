@@ -1,0 +1,6 @@
+# WP1 self-test fixture: monorepo scenario, Python half. Deliberately empty
+# (no runtime deps) — see .github/self-test-fixtures/python-only/requirements.txt
+# for why this fixture avoids pyproject.toml. Called via the reusable
+# workflow's `python-directory: .github/self-test-fixtures/monorepo/backend`
+# input (WP6), proving the per-stack directory input actually works, not the
+# root-detect default every other fixture in this directory exercises.
