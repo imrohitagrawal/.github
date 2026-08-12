@@ -25,12 +25,11 @@ name: Self-test (reusable-pr-quality.yml)
 # scripts/retrofit-quality-gate.sh. See each job's own comment for what it
 # proves and why:
 #   - node-only, python-only, monorepo (WP6 python-directory/node-directory
-#     inputs), no-manifest (this repo's own root - genuinely has no
-#     Makefile/package.json/pyproject.toml/requirements.txt/setup.py today,
-#     verified via `ls` before writing this file - so calling with no
-#     inputs against '.' is a real exercise of the fallback path, not a
-#     fabricated one), python-dev-group (WP-Consumer fix, added after a
-#     real Codex finding on PR #16: a PEP 735 [dependency-groups] dev
+#     inputs), root-makefile-and-semgrep (this repo's own root - formerly
+#     `no-manifest`, see that job's own comment for why it was repurposed
+#     and the real trade-off that came with it), python-dev-group
+#     (WP-Consumer fix, added after a real Codex finding on PR #16: a PEP
+#     735 [dependency-groups] dev
 #     dependency, freezegun, that's declared nowhere else and confirmed
 #     absent from every pinned tool's own transitive deps - proves
 #     `pip install --group dev -e .` actually installs it, not just that
@@ -194,10 +193,27 @@ jobs:
     with:
       python-directory: .github/self-test-fixtures/python-dev-group
 
-  no-manifest:
-    # No inputs: both directories default to '.', this repo's own root - see
-    # the header comment above for the verification that root has no
-    # recognized project files today.
+  # C1 (review finding): formerly `no-manifest`, exercising "this repo's own
+  # root has no recognized project files, fall back to secret-scan-only."
+  # That premise is gone as of this package: this repo's root now has a
+  # real Makefile and semgrep.yml (see both files' own comments), added
+  # specifically so self-test's root-scoped checks (WP7's Makefile dispatch,
+  # the Semgrep step) execute for real at least once, closing a bigger gap
+  # than the one this trade-off costs. REAL, DELIBERATE TRADE-OFF, not an
+  # oversight: has_makefile_ci is root-scoped unconditionally (see "Detect
+  # project layout" in reusable-pr-quality.yml - it ignores every job's own
+  # python-directory/node-directory), so once this repo's root has a
+  # Makefile, NO fixture in this file can ever make has_makefile_ci
+  # evaluate false again - the "no recognized project files" fallback
+  # branch (reusable-pr-quality.yml's final elif/else) is now structurally
+  # unreachable by self-test, permanently, from this commit forward. This
+  # job now instead proves: (a) the root Makefile's discrete lint/typecheck/
+  # test targets are correctly detected and dispatched to (WP7's mechanism,
+  # previously untested), (b) Semgrep runs and passes cleanly against this
+  # repo's real tracked content (previously never executed at all, in any
+  # job, ever). No inputs: both directories default to '.', this repo's own
+  # root.
+  root-makefile-and-semgrep:
     uses: ./.github/workflows/reusable-pr-quality.yml
 
   node-lint-violation:
@@ -506,7 +522,7 @@ jobs:
       - node-only
       - python-only
       - monorepo
-      - no-manifest
+      - root-makefile-and-semgrep
       - python-dev-group
       - assert-negative-fixture-blocks
       - assert-python-negative-fixture-blocks
@@ -527,7 +543,7 @@ jobs:
           NODE_ONLY: ${{ needs.node-only.result }}
           PYTHON_ONLY: ${{ needs.python-only.result }}
           MONOREPO: ${{ needs.monorepo.result }}
-          NO_MANIFEST: ${{ needs.no-manifest.result }}
+          ROOT_MAKEFILE_SEMGREP: ${{ needs.root-makefile-and-semgrep.result }}
           PYTHON_DEV_GROUP: ${{ needs.python-dev-group.result }}
           NEGATIVE_ASSERT: ${{ needs.assert-negative-fixture-blocks.result }}
           PYTHON_NEGATIVE_ASSERT: ${{ needs.assert-python-negative-fixture-blocks.result }}
@@ -542,7 +558,7 @@ jobs:
           echo "node-only: $NODE_ONLY"
           echo "python-only: $PYTHON_ONLY"
           echo "monorepo: $MONOREPO"
-          echo "no-manifest: $NO_MANIFEST"
+          echo "root-makefile-and-semgrep: $ROOT_MAKEFILE_SEMGREP"
           echo "python-dev-group: $PYTHON_DEV_GROUP"
           echo "assert-negative-fixture-blocks: $NEGATIVE_ASSERT"
           echo "assert-python-negative-fixture-blocks: $PYTHON_NEGATIVE_ASSERT"
@@ -554,7 +570,7 @@ jobs:
           echo "assert-bad-directory-input-blocks: $BAD_DIRECTORY_ASSERT"
           echo "retrofit-script-tests: $RETROFIT_SCRIPT_TESTS"
           FAILED=0
-          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$NO_MANIFEST" "$PYTHON_DEV_GROUP" \
+          for r in "$NODE_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$ROOT_MAKEFILE_SEMGREP" "$PYTHON_DEV_GROUP" \
             "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$BANDIT_BLOCKING_ASSERT" \
             "$NPM_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_BLOCKING_ASSERT" "$NODE_TYPECHECK_ASSERT" \
             "$PYTHON_MYPY_ASSERT" "$BAD_DIRECTORY_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
