@@ -82,21 +82,39 @@ RAW_LOG="$(mktemp)"
 LOG_FILE="$(mktemp)"
 trap 'rm -f "$RAW_LOG" "$LOG_FILE"' EXIT
 
-# Log availability can lag job completion by a few seconds; retry rather than
-# flake. Deliberately bounded - a log that genuinely never materializes is a
-# failure to report, not something to wait out indefinitely.
+# Log availability lags job completion - MEASURED, not guessed: on this
+# workflow's first real run, a fixture job that completed at 20:39:51 still
+# had no retrievable log at 20:40:47, and was fine shortly after. A 50s budget
+# (5 x 10s) was therefore too short and produced one spurious red. The budget
+# below is ~3.5 minutes with an escalating backoff. Deliberately still
+# bounded: a log that genuinely never materializes is a failure to report, not
+# something to wait out indefinitely.
+DOWNLOAD_ATTEMPTS=12
+DOWNLOAD_ERR="$(mktemp)"
+trap 'rm -f "$RAW_LOG" "$LOG_FILE" "$DOWNLOAD_ERR"' EXIT
 DOWNLOADED=false
-for attempt in 1 2 3 4 5; do
-	if gh api "repos/${GITHUB_REPO}/actions/jobs/${JOB_ID}/logs" >"$RAW_LOG" 2>/dev/null && [ -s "$RAW_LOG" ]; then
+for attempt in $(seq 1 "$DOWNLOAD_ATTEMPTS"); do
+	if gh api "repos/${GITHUB_REPO}/actions/jobs/${JOB_ID}/logs" >"$RAW_LOG" 2>"$DOWNLOAD_ERR" && [ -s "$RAW_LOG" ]; then
 		DOWNLOADED=true
 		break
 	fi
-	echo "Log for job ${JOB_ID} not available yet (attempt ${attempt}/5); retrying in 10s."
-	sleep 10
+	if [ "$attempt" -lt "$DOWNLOAD_ATTEMPTS" ]; then
+		backoff=$((attempt * 5))
+		[ "$backoff" -gt 30 ] && backoff=30
+		echo "Log for job ${JOB_ID} not available yet (attempt ${attempt}/${DOWNLOAD_ATTEMPTS}); retrying in ${backoff}s."
+		sleep "$backoff"
+	fi
 done
 
 if [ "$DOWNLOADED" != true ]; then
-	fail "assert-fixture-job.sh: could not download the log for job '$TARGET_JOB' (id ${JOB_ID}) after 5 attempts."
+	# Deliberately NOT routed through fail(): this is an infrastructure
+	# problem, and printing FAILURE_HINT here would assert something about
+	# the fixture's behaviour that was never actually observed.
+	echo "----- last gh api error -----"
+	cat "$DOWNLOAD_ERR"
+	echo "-----------------------------"
+	echo "::error::assert-fixture-job.sh: could not download the log for job '$TARGET_JOB' (id ${JOB_ID}) after ${DOWNLOAD_ATTEMPTS} attempts. This says nothing about whether the fixture behaved correctly - re-run this job."
+	exit 1
 fi
 
 # Strip ANSI colour codes: the runner colourises the echoed `run:` script
