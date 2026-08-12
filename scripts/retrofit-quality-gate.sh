@@ -227,19 +227,50 @@ fi
 SKIPPED_FILES=()
 ADDED_OR_UPDATED=()
 
+# Round-2 Codex review: checking only the IMMEDIATE parent (as the first
+# version of copy_file did) misses a symlinked GRANDPARENT -- e.g. a tracked
+# `.github -> /elsewhere` symlink. `.github/workflows` (dest's immediate
+# parent) is not itself a symlink, so that check passed, but `mkdir -p`/`cp`
+# still traverse through `.github` to get there, escaping the repo.
+# Reproduced by the reviewer: `--no-commit` created a real file in the
+# external symlink target. Fixed by walking every existing ancestor between
+# TARGET_ROOT and dest's parent, not just the nearest one - all `dest`
+# arguments passed to copy_file are always "$TARGET_ROOT/..." (absolute,
+# anchored at TARGET_ROOT), so this walk is guaranteed to terminate exactly
+# at TARGET_ROOT rather than needing to guess a stopping point.
+ancestor_is_symlinked() {
+	check="$(dirname "$1")"
+	while [ "$check" != "$TARGET_ROOT" ]; do
+		if [ -L "$check" ]; then
+			echo "$check"
+			return 0
+		fi
+		next="$(dirname "$check")"
+		# Safety valve, should be unreachable given the "$TARGET_ROOT/..."
+		# invariant above: stop if dirname stops making progress (hit "/"
+		# or a loop) rather than spinning forever.
+		[ "$next" = "$check" ] && return 1
+		check="$next"
+	done
+	return 1
+}
+
 copy_file() {
 	src="$1"
 	dest="$2"
 	desc="$3"
 
 	dest_parent="$(dirname "$dest")"
-	# Refuse to create-into or write-through a symlinked parent directory
-	# (e.g. a tracked `.github -> /somewhere-else` symlink) -- `mkdir -p`
-	# and `cp` would otherwise follow it outside the repo (found in review,
-	# real P0: a tracked symlink can redirect a copy anywhere on disk).
-	if [ -L "$dest_parent" ]; then
-		echo "  SKIPPED:   $desc -- parent directory '$dest_parent' is a symlink, refusing to write through it" >&2
-		SKIPPED_FILES+=("$dest (symlinked parent dir)")
+	# Refuse to create-into or write-through ANY symlinked ancestor
+	# directory between TARGET_ROOT and dest (e.g. a tracked
+	# `.github -> /somewhere-else` symlink, not just dest's immediate
+	# parent) -- `mkdir -p` and `cp` would otherwise follow it outside the
+	# repo (found in review, real P0: a tracked symlink can redirect a copy
+	# anywhere on disk; round-2 review found the immediate-parent-only
+	# version of this check still missed a symlinked grandparent).
+	if bad_ancestor="$(ancestor_is_symlinked "$dest")"; then
+		echo "  SKIPPED:   $desc -- ancestor directory '$bad_ancestor' is a symlink, refusing to write through it" >&2
+		SKIPPED_FILES+=("$dest (symlinked ancestor: $bad_ancestor)")
 		return
 	fi
 	mkdir -p "$dest_parent"
