@@ -1,19 +1,154 @@
+.PHONY: install lint typecheck test bandit pip-audit security ci
+
+# Makefile template for Python repos consuming imrohitagrawal/.github's
+# reusable-pr-quality.yml. Severity policy mirrors the reusable workflow's
+# native Python path exactly (see .github/workflows/reusable-pr-quality.yml,
+# the WP5/WP7 comment blocks above `jobs:`) so a repo gets the same
+# behavior whether the reusable workflow's native steps run or these
+# discrete targets do.
+#
+# Every check target below depends on `install` (Codex review, Phase 4):
+# the reusable workflow's "Run make lint"/"Run make typecheck"/
+# "Run make test" steps run BEFORE its own "pip install tools" step
+# (reusable-pr-quality.yml:477-487 vs. :650) - a pre-existing ordering gap
+# from WP7, out of WP8's scope to fix in the workflow file itself, but
+# fixable here by making each target self-contained rather than assuming
+# the workflow already installed anything. `.PHONY` targets only execute
+# once per `make` invocation even when several downstream targets share
+# `install` as a prerequisite (confirmed empirically: `make ci` runs
+# `install` exactly once, not once per dependent target).
+# KNOWN, ACCEPTED RESIDUAL (Codex review, Phase 4 Round 2): the dedup above
+# only holds WITHIN one `make` invocation. The reusable workflow's "Run
+# make lint"/"Run make typecheck"/"Run make test" steps are three SEPARATE
+# `run: make <target>` steps, each its own `make` process - so `install`
+# actually reruns once per step in that path (3x), not once total. Every
+# rerun is idempotent (pip/npm skip already-satisfied requirements) - a
+# real wall-clock cost, not a correctness issue. Not fixed here: doing so
+# would mean either the workflow chaining `make install lint typecheck
+# test` as one step (a workflow-file change, out of WP8's scope) or this
+# Makefile caching install state across invocations (meaningful complexity
+# for a template file, not worth it for a cost that's slower-but-correct).
+#
+# mypy is BLOCKING (no swallow) when a mypy config is present - matches the
+# native `mypy .` step's own `has_mypy_config` gate exactly (mypy.ini,
+# .mypy.ini, or `[tool.mypy]` in pyproject.toml); with no config, mypy
+# doesn't run at all, same as the native path (no config = nothing
+# meaningful to enforce, not a gap).
+#
+# bandit / pip-audit are ADVISORY by default, promotable to BLOCKING using
+# the exact same file conventions WP5 wired into the reusable workflow, so a
+# repo's Makefile-driven scan is promotable the same way the native path is:
+#   - bandit: ships a generated baseline at .bandit-baseline.json
+#     (generate with `bandit -r . -f json -o .bandit-baseline.json`),
+#     consumed via -b/--baseline. Deliberately NOT keyed off `.bandit`/
+#     `bandit.yaml` - those are bandit CLI config (excludes, thresholds),
+#     not a baseline report, and passing one to `-b` fails outright.
+#   - pip-audit: ships a `.pip-audit-ignore` file (one vulnerability ID per
+#     line, e.g. `PYSEC-2023-74` or `GHSA-...`; blank lines and
+#     `#`-comments ignored), each surviving line passed as its own
+#     `--ignore-vuln <ID>`. pip-audit has no config-file allowlist
+#     mechanism of its own - this is the reusable workflow's own
+#     convention, mirrored here.
+# Both scanners separate "found something real" (advisory warning, exit 0)
+# from "the scanner itself failed to run" (hard failure) - same crash-vs-
+# finding split as the native steps, so a crashed/offline tool can't be
+# mistaken for a clean advisory pass.
+#
+# Tool versions are pinned to the exact versions the native workflow pins
+# (reusable-pr-quality.yml's "pip install tools" step) - not left to float
+# at latest. The advisory/blocking logic above depends on specific exit
+# codes and output text from these tools (bandit's 0/1/2 split, pip-audit's
+# "Found N known vulnerabilit(y|ies)" line); an unpinned future release
+# changing either could silently break the crash-vs-finding distinction
+# (Codex review, Phase 4).
+#
+# Pinned tools install BEFORE requirements.txt (real GitHub Codex review
+# finding on PR #14, caught after Phase 4 wrapped): the native workflow
+# installs its tool pins first (reusable-pr-quality.yml:650-654) and project
+# requirements after (:656-661), so a repo's own pin in requirements.txt
+# (e.g. `pytest<9` for a plugin that doesn't yet support pytest 9) takes
+# precedence over this template's pins, not the other way around. Installing
+# requirements.txt first, as an earlier version of this file did, would let
+# this template's pins silently overwrite a repo's deliberate constraint.
+
 install:
 	python -m pip install --upgrade pip
-	pip install -r requirements.txt || true
-	pip install ruff pytest mypy bandit pip-audit
+	pip install ruff==0.16.2 pytest==9.1.1 mypy==2.3.0 bandit==1.9.4 pip-audit==2.10.1
+	if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-lint:
+lint: install
 	ruff check .
 
-typecheck:
-	mypy . || true
+# BLOCKING when a mypy config is present - see header comment above for the
+# exact gate (mirrors the native step's `has_mypy_config` check, machine-
+# checked here too, not just documented).
+typecheck: install
+	@if [ -f mypy.ini ] || [ -f .mypy.ini ] || grep -q '^\[tool\.mypy\]' pyproject.toml 2>/dev/null; then \
+		mypy .; \
+	else \
+		echo "typecheck: no mypy config found (mypy.ini/.mypy.ini/[tool.mypy] in pyproject.toml) - skipping, same as the native workflow's own has_mypy_config gate"; \
+	fi
 
-test:
-	pytest -q
+# BLOCKING. Exit 5 is pytest's "no tests were collected" - a repo with no
+# tests yet must not fail its first PR for having nothing to run, but a
+# genuinely FAILING suite must still fail this target. Matches the reusable
+# workflow's own pytest step's exact tolerance (only exit 5, nothing else).
+test: install
+	pytest -q || { c=$$?; [ $$c -eq 5 ] && echo "pytest collected no tests (tolerated, exit 5)" || exit $$c; }
 
-security:
-	bandit -r . -x tests
-	pip-audit || true
+# ADVISORY by default. BLOCKING WHEN .bandit-baseline.json exists (see
+# header comment above for how to generate one) - machine-checked below,
+# not just documented here.
+bandit: install
+	@if [ -f .bandit-baseline.json ]; then \
+		echo "bandit: .bandit-baseline.json found - running BLOCKING (baseline) mode"; \
+		bandit -r . -x tests,test,node_modules,.venv,venv -b .bandit-baseline.json; \
+	else \
+		set +e; \
+		bandit -r . -x tests,test,node_modules,.venv,venv; \
+		code=$$?; \
+		set -e; \
+		case "$$code" in \
+			0) echo "bandit: no issues identified." ;; \
+			1) echo "WARNING: bandit reported findings (advisory - not blocking; add .bandit-baseline.json to promote)" ;; \
+			*) echo "ERROR: bandit failed to run (exit $$code) - not a clean/findings result"; exit $$code ;; \
+		esac; \
+	fi
+
+# ADVISORY by default. BLOCKING WHEN .pip-audit-ignore exists (see header
+# comment above for the file format) - machine-checked below, not just
+# documented here. Ignore IDs are collected as real positional arguments
+# (`set --` / `"$$@"`), not a concatenated string (Codex review, Phase 4:
+# a plain string is subject to word-splitting/glob expansion by the shell;
+# positional args aren't, matching the native workflow's own bash-array
+# approach without requiring bash).
+pip-audit: install
+	@if [ -f .pip-audit-ignore ]; then \
+		echo "pip-audit: .pip-audit-ignore found - running BLOCKING (ignore-list) mode"; \
+		set --; \
+		while IFS= read -r line || [ -n "$$line" ]; do \
+			line="$${line%%#*}"; \
+			line="$$(printf '%s' "$$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$$//')"; \
+			[ -z "$$line" ] && continue; \
+			set -- "$$@" --ignore-vuln "$$line"; \
+		done < .pip-audit-ignore; \
+		pip-audit --strict "$$@"; \
+	else \
+		set +e; \
+		output=$$(pip-audit --strict 2>&1); \
+		code=$$?; \
+		set -e; \
+		echo "$$output"; \
+		if [ "$$code" -eq 0 ]; then \
+			exit 0; \
+		elif echo "$$output" | grep -qE '^Found [0-9]+ known vulnerabilit'; then \
+			echo "WARNING: pip-audit reported findings (advisory - not blocking; add .pip-audit-ignore to promote)"; \
+		else \
+			echo "ERROR: pip-audit failed to run (exit $$code) - not a genuine vulnerability report"; \
+			exit "$$code"; \
+		fi; \
+	fi
+
+security: bandit pip-audit
 
 ci: install lint typecheck test security
