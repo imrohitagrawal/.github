@@ -116,11 +116,14 @@ on:
 # section 5 of the governing plan (audit-and-redesign-fancy-cascade.md):
 # "self-test + first-party lint (new, WP1) ... Blocking condition: Always"
 # - a path-filtered trigger would silently contradict that. Runs on every
-# PR and every push to main instead; the fixture-scenario jobs are small
-# and fast (minimal, dependency-free fixtures - see
-# .github/self-test-fixtures/), so the cost of running unconditionally is
-# low and the alternative (a required check that can hang forever) is not
-# an acceptable trade either way.
+# PR and every push to main instead; the fixture-scenario jobs are
+# minimal, dependency-free fixtures (see .github/self-test-fixtures/), not
+# a real build - real per-run cost hasn't been measured against this
+# org's actual PR volume (round-2 review nitpick: an earlier version of
+# this comment asserted "the cost ... is low" as settled fact without a
+# number behind it), but the alternative - a required check that can hang
+# forever for any PR that doesn't touch .github/workflows/** - is not an
+# acceptable trade regardless of what that cost turns out to be.
 
 permissions:
   contents: read
@@ -177,11 +180,18 @@ jobs:
   # fixture design: node-lint-violation/package.json declares ONLY a
   # "lint" script (no typecheck/test/build scripts for `--if-present` to
   # even find), has zero dependencies (npm ci / npm audit both verified
-  # locally to succeed cleanly against it), and has no semgrep config (that
-  # step's `if:` doesn't even fire) - so of every step the reusable
-  # workflow could run against this fixture, "npm lint" is the only one
-  # that plausibly fails, verified by having actually run every other step
-  # against this exact fixture locally (see the WP1 commit message). That
+  # locally to succeed cleanly against it), and nothing precedes "npm
+  # lint" in the reusable workflow's Node path (npm ci is the only earlier
+  # step and it succeeds) - so of every step the reusable workflow could
+  # run against this fixture, "npm lint" is the only one that plausibly
+  # fails, verified by having actually run every other step against this
+  # exact fixture locally (see the WP1 commit message). (Semgrep is
+  # correctly out of scope here for an unrelated reason: its `if:` checks
+  # for a semgrep config at the REPO ROOT, not per fixture directory - it
+  # doesn't run for any of this file's six scenario jobs, not something
+  # specific to this fixture's own design; round-2 review fix, an earlier
+  # version of this comment miscredited that to node-lint-violation
+  # itself.) That
   # is fixture-design evidence, not a step-level guarantee - a genuinely
   # unrelated future breakage (e.g. actions/checkout itself failing) would
   # still be misread by this assertion as "the lint gate is working". A
@@ -209,12 +219,33 @@ jobs:
 
   # Same known limitation and same fixture-design mitigation as
   # assert-negative-fixture-blocks above: python-test-failure/requirements.txt
-  # is empty (pip install succeeds trivially), has no mypy.ini
-  # (has_mypy_config is false, so mypy doesn't run at all for it), and its
-  # only .py file lives under tests/ (bandit's own -x excludes it, so
-  # bandit scans nothing and can't fail), leaving pytest as the only step
-  # that plausibly fails - verified by actually running every other step
-  # against this exact fixture locally (see the WP1 commit message).
+  # declares no runtime dependencies (comment-only, see the file itself -
+  # pip install succeeds trivially), has no mypy.ini (has_mypy_config is
+  # false for this python-directory specifically, so mypy doesn't run at
+  # all for it), and its only .py file lives under tests/ (bandit's own -x
+  # excludes it, so bandit scans nothing and can't fail) - leaving pytest
+  # as the only step that plausibly fails.
+  #
+  # ROUND-2 FIX, real regression caught by both Claude review lenses AND
+  # Codex independently: this is not just documentation - ruff runs
+  # BEFORE pytest in the reusable workflow (reusable-pr-quality.yml,
+  # "ruff check" then "pytest", no continue-on-error, no `if: always()`),
+  # so ruff failing first would make GitHub Actions' implicit `success()`
+  # skip pytest entirely - the job would still correctly show "failure"
+  # overall, but for ruff's reason, not pytest's, giving this fixture ZERO
+  # actual coverage of the pytest-swallow bug it exists to guard, despite
+  # an earlier version of this exact comment claiming "verified by
+  # actually running every other step". The original
+  # tests/test_deliberate_failure.py used a literal `assert 1 == 2`, which
+  # ruff's default PLR0133 rule ("two constants compared in a comparison")
+  # flags - confirmed by running the reusable workflow's exact pinned
+  # `ruff==0.16.2 check .` against the fixture as it stood before this fix
+  # and getting a real PLR0133 finding, exit 1. Fixed in
+  # tests/test_deliberate_failure.py itself (not here) by computing the
+  # left-hand side at runtime via a function call rather than a second
+  # literal - re-verified after the fix: `ruff check .` now exits 0 (zero
+  # findings) and `pytest -q` still exits 1 (the real assertion still
+  # fails) against the same fixture directory.
   assert-python-negative-fixture-blocks:
     name: assert python-test-failure actually blocked
     needs: [python-test-failure]

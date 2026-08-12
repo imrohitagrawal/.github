@@ -81,8 +81,12 @@ on:
 # the merge button never unblocks. Matches the governing plan's section 5
 # ("self-test + first-party lint (new, WP1) ... Blocking condition:
 # Always"). Runs on every PR/push to main instead; this job is a single
-# docker run + one npx call, cheap enough that running it unconditionally
-# isn't a real cost.
+# docker run + one npx call - two commands, not a build - though actual
+# per-run cost hasn't been measured against this org's real PR volume
+# (round-2 review nitpick: don't assert a number that was never checked).
+# Either way the alternative (a required check that can hang forever for
+# a PR that never touches the paths it used to filter on) isn't
+# acceptable regardless of what that cost turns out to be.
 
 permissions:
   contents: read

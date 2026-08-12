@@ -2,11 +2,11 @@
   "name": "self-test-monorepo-frontend",
   "private": true,
   "version": "1.0.0",
-  "description": "WP1 self-test fixture: monorepo scenario, Node half. Called via the reusable workflow's node-directory: .github/self-test-fixtures/monorepo/frontend input (WP6), proving the per-stack directory input actually works, not the root-detect default. lint/typecheck run real syntax/parse checks (node --check / requiring package.json), not print-only stubs, per round-1 review feedback.",
+  "description": "WP1 self-test fixture: monorepo scenario, Node half. Called via the reusable workflow's node-directory: .github/self-test-fixtures/monorepo/frontend input (WP6), proving the per-stack directory input actually works, not the root-detect default. lint/typecheck/build each run a real check against real content, not print-only stubs - round-1 review fixed lint/typecheck; round-2 review found build was left as the same kind of stub and fixed it too.",
   "scripts": {
     "lint": "node --check smoke.test.js",
     "typecheck": "node -e \"require('./package.json')\"",
     "test": "node --test",
-    "build": "node -e \"console.log('fixture build: ok')\""
+    "build": "node -e \"require('./smoke.test.js'); console.log('fixture build: ok')\""
   }
 }
