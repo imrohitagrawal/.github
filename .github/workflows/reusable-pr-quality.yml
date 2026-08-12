@@ -496,6 +496,37 @@ jobs:
           else
             NODE_PACKAGE_MANAGER="npm"
           fi
+          # SECURITY FIX (review finding, CRITICAL x2): PM_FIELD comes from the
+          # PR's own package.json - attacker-controlled content on every fork PR
+          # (templates/caller-pr-quality.yml triggers on plain pull_request, not
+          # pull_request_target). Before this allowlist, an unvalidated
+          # NODE_PACKAGE_MANAGER was (a) re-interpolated via a GitHub Actions
+          # expression directly into `case "..." in` at 5 run: sites below -
+          # GitHub substitutes that expression syntax into the script TEXT
+          # before bash ever parses it (NOTE: literally writing that syntax in
+          # this comment, even to describe it, would itself be substituted and
+          # break YAML parsing - deliberately not spelled out here, found the
+          # hard way while drafting this exact comment), so a `"` in the
+          # value broke out of the quoted case argument for arbitrary shell
+          # injection (reproduced: a crafted packageManager field achieved real
+          # command execution on the runner) - and (b) echoed unsanitized into
+          # $GITHUB_OUTPUT, where an embedded newline (packageManager fields are
+          # read via `jq -r`, which decodes JSON's own \n escapes to real
+          # newlines) let a crafted value forge EXTRA key=value lines - such as
+          # trust_makefile_test_for_node=true or has_package_json=false - that
+          # silently disable checks (reproduced: a crafted value flipped three
+          # trust_makefile_*_for_node outputs to 'true' and has_package_json to
+          # 'false', exactly the "check quietly finds nothing, job still reports
+          # green" failure class this file exists to prevent). Restricting to a
+          # fixed allowlist here closes BOTH: the value can never again contain
+          # a `"`, a newline, or anything the 5 case statements don't already
+          # explicitly branch on. Falls back to npm (today's universal default)
+          # rather than failing the job outright, matching this step's existing
+          # fail-open-to-npm posture for any other unrecognized signal.
+          case "$NODE_PACKAGE_MANAGER" in
+          npm | pnpm | yarn) ;;
+          *) NODE_PACKAGE_MANAGER="npm" ;;
+          esac
           echo "node_package_manager=$NODE_PACKAGE_MANAGER" >> "$GITHUB_OUTPUT"
           echo "has_python=$([ -f "$PYTHON_DIR/pyproject.toml" ] || [ -f "$PYTHON_DIR/requirements.txt" ] || [ -f "$PYTHON_DIR/setup.py" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           # Written as an if/else, not a chain: `A || B || C && grep` binds as
@@ -680,11 +711,22 @@ jobs:
       # Every existing npm-only consumer is unaffected: node_package_manager
       # defaults to npm when no pnpm-lock.yaml/yarn.lock/packageManager field is
       # present, so the `*)` branch below is byte-for-byte what ran before.
+      # SECURITY (review finding): dispatches via env: + a shell variable, not
+      # ${{ steps.detect.outputs.node_package_manager }} interpolated directly
+      # into the script - GitHub substitutes ${{ }} into the run: TEXT before
+      # bash parses it, so any unescaped value there is effectively script
+      # injection, whereas an env: value is passed as a real environment
+      # variable and never re-parsed as shell syntax. Defense-in-depth on top
+      # of "Detect project layout"'s own allowlist validation (this output can
+      # today only ever be npm/pnpm/yarn) - belt and suspenders for a value
+      # this file derives from repo content on every external contributor's PR.
       - name: Install Node dependencies
         if: steps.detect.outputs.has_package_json == 'true'
         working-directory: ${{ inputs.node-directory }}
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
         run: |
-          case "${{ steps.detect.outputs.node_package_manager }}" in
+          case "$NODE_PACKAGE_MANAGER" in
           pnpm) pnpm install --frozen-lockfile ;;
           yarn) yarn install --immutable ;;
           *) npm ci ;;
@@ -702,14 +744,18 @@ jobs:
       # verified here, so a single, manager-agnostic check standing in front of
       # all three avoids trusting an unverified flag on either of the newly
       # added managers.
+      # SECURITY (review finding): env: indirection, same reasoning as
+      # "Install Node dependencies" above.
       - name: Node lint
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
           steps.detect.outputs.trust_makefile_lint_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
         run: |
           if jq -e '.scripts.lint' package.json > /dev/null 2>&1; then
-            case "${{ steps.detect.outputs.node_package_manager }}" in
+            case "$NODE_PACKAGE_MANAGER" in
             pnpm) pnpm run lint ;;
             yarn) yarn run lint ;;
             *) npm run lint --if-present ;;
@@ -717,14 +763,18 @@ jobs:
           fi
 
       # H2/H7: same mechanism as Node lint above, for `typecheck:`.
+      # SECURITY (review finding): env: indirection, same reasoning as
+      # "Install Node dependencies" above.
       - name: Node typecheck
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
           steps.detect.outputs.trust_makefile_typecheck_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
         run: |
           if jq -e '.scripts.typecheck' package.json > /dev/null 2>&1; then
-            case "${{ steps.detect.outputs.node_package_manager }}" in
+            case "$NODE_PACKAGE_MANAGER" in
             pnpm) pnpm run typecheck ;;
             yarn) yarn run typecheck ;;
             *) npm run typecheck --if-present ;;
@@ -734,26 +784,34 @@ jobs:
       # H2/H7: same mechanism as Node lint above, for `test:`. citevyn's own
       # `frontend/` case (root Makefile's `test:` target never mentions
       # `frontend`) stays untrusted, so this still runs - no coverage regression.
+      # SECURITY (review finding): env: indirection, same reasoning as
+      # "Install Node dependencies" above.
       - name: Node test
         if: >-
           steps.detect.outputs.has_package_json == 'true' &&
           steps.detect.outputs.trust_makefile_test_for_node == 'false'
         working-directory: ${{ inputs.node-directory }}
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
         run: |
           if jq -e '.scripts.test' package.json > /dev/null 2>&1; then
-            case "${{ steps.detect.outputs.node_package_manager }}" in
+            case "$NODE_PACKAGE_MANAGER" in
             pnpm) pnpm run test ;;
             yarn) yarn run test ;;
             *) npm test --if-present ;;
             esac
           fi
 
+      # SECURITY (review finding): env: indirection, same reasoning as
+      # "Install Node dependencies" above.
       - name: Node build
         if: steps.detect.outputs.has_package_json == 'true'
         working-directory: ${{ inputs.node-directory }}
+        env:
+          NODE_PACKAGE_MANAGER: ${{ steps.detect.outputs.node_package_manager }}
         run: |
           if jq -e '.scripts.build' package.json > /dev/null 2>&1; then
-            case "${{ steps.detect.outputs.node_package_manager }}" in
+            case "$NODE_PACKAGE_MANAGER" in
             pnpm) pnpm run build ;;
             yarn) yarn run build ;;
             *) npm run build --if-present ;;
