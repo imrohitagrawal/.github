@@ -148,3 +148,16 @@ jobs:
           npx --yes markdownlint-cli@0.49.1 \
             --config .markdownlint.jsonc \
             docs/*.md README.md templates/AGENTS.md AGENTS.md
+
+      # H6 (review finding): the reusable-workflow self-reference pin and the
+      # duplicated Python/Node CI tool-version pins are hand-copied across
+      # templates/caller-pr-quality.yml, scripts/retrofit-quality-gate.sh, and
+      # the two Makefile templates, with no mechanical guarantee they agree -
+      # exactly the class of drift that already caused PR #19 (this repo's
+      # own caller left at a stale @v4 pin). Scoped to this repo only -
+      # repo-template is checked via the existing manual bump-checklist
+      # comment in templates/caller-pr-quality.yml, not an automated
+      # cross-repo network call (see scripts/check-pin-consistency.sh's own
+      # header for why).
+      - name: Pin consistency check
+        run: scripts/check-pin-consistency.sh

@@ -27,6 +27,11 @@ jobs:
     # repo-template's own caller workflow at the same time, so this file
     # (the one docs/repo-onboarding.md tells people to copy by hand) doesn't
     # silently drift behind the others the way it did from v4 to v6.
+    # self-lint's "Pin consistency check" step (scripts/check-pin-
+    # consistency.sh) mechanically verifies this file agrees with
+    # scripts/retrofit-quality-gate.sh on every PR -- but it cannot reach
+    # repo-template, a separate repo, so that one copy still has to be
+    # checked by hand, every bump, not just when this comment reminds you.
     #
     # For a monorepo, add `python-directory`/`node-directory` inputs here
     # (see docs/repo-onboarding.md) -- both default to '.', the repo root.
