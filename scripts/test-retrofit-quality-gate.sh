@@ -339,14 +339,31 @@ if [ -f "$repo/.github/workflows/pr-quality.yml" ]; then
 else
 	fail "caller workflow was not generated -- can't check pin substitution"
 fi
-# PINNED_SHA should resolve to the real v6 commit in this repo's own history
-# (catches "silently drift behind the others" -- the script's own comment's
-# stated worry -- not just internal self-consistency).
-if git -C "$REPO_ROOT" rev-parse -q --verify "v6^{commit}" >/dev/null 2>&1; then
-	V6_SHA="$(git -C "$REPO_ROOT" rev-parse "v6^{commit}")"
-	assert_eq "PINNED_SHA matches tag v6's actual commit in this repo's history" "$V6_SHA" "$PINNED_SHA"
+# PINNED_SHA should resolve to the real commit behind PINNED_TAG in this
+# repo's own history (catches "silently drift behind the others" -- the
+# script's own comment's stated worry -- not just internal self-consistency).
+#
+# The tag comes from PINNED_TAG, not a literal. It used to be hardcoded `v6`,
+# which meant the very first tag bump made this assertion fail for the one
+# reason it must not: the pins were correct and the test was stale. Caught by
+# cutting v7. A hardcoded tag also silently stops testing anything the moment
+# it is bumped, which is the failure mode this whole suite exists to prevent.
+if git -C "$REPO_ROOT" rev-parse -q --verify "${PINNED_TAG}^{commit}" >/dev/null 2>&1; then
+	TAG_SHA="$(git -C "$REPO_ROOT" rev-parse "${PINNED_TAG}^{commit}")"
+	assert_eq "PINNED_SHA matches tag ${PINNED_TAG}'s actual commit in this repo's history" "$TAG_SHA" "$PINNED_SHA"
 else
-	echo "  SKIP: tag v6 not resolvable in this checkout (shallow clone?) -- skipping the tag cross-check"
+	# Review finding: this branch used to be reached unconditionally, so
+	# setting PINNED_TAG to a tag that does not exist made the whole
+	# cross-check VANISH - the suite still exited 0, one assertion lighter,
+	# with no other signal. That is the "check that cannot fail" class this
+	# repo keeps getting bitten by. A shallow clone is a real reason to skip;
+	# a full clone missing the tag means the tag was never cut, or
+	# PINNED_TAG is wrong, and both deserve a red build.
+	if [ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+		echo "  SKIP: tag ${PINNED_TAG} not resolvable in a SHALLOW clone -- skipping the tag cross-check"
+	else
+		fail "PINNED_TAG is '${PINNED_TAG}' but no such tag exists in this full clone -- the tag was never cut, or PINNED_TAG is wrong"
+	fi
 fi
 
 # ============================================================================
