@@ -995,7 +995,7 @@ jobs:
   # optional push/PR). Runs the real functional test suite
   # (scripts/test-retrofit-quality-gate.sh) against throwaway scratch repos
   # under $RUNNER_TEMP, never this checkout itself. fetch-depth: 0 below so
-  # the suite's T11 case can resolve tag v6 against this repo's own history
+  # the suite's T11 case can resolve the tag named by PINNED_TAG against this repo's own history
   # (catching "PINNED_SHA silently drifted behind the real tag", not just
   # internal self-consistency) - this is also the regression test for H3's
   # doubled-version-comment fix.

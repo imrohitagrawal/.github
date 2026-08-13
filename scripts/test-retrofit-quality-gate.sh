@@ -352,7 +352,18 @@ if git -C "$REPO_ROOT" rev-parse -q --verify "${PINNED_TAG}^{commit}" >/dev/null
 	TAG_SHA="$(git -C "$REPO_ROOT" rev-parse "${PINNED_TAG}^{commit}")"
 	assert_eq "PINNED_SHA matches tag ${PINNED_TAG}'s actual commit in this repo's history" "$TAG_SHA" "$PINNED_SHA"
 else
-	echo "  SKIP: tag ${PINNED_TAG} not resolvable in this checkout (shallow clone, or the tag is not cut yet) -- skipping the tag cross-check"
+	# Review finding: this branch used to be reached unconditionally, so
+	# setting PINNED_TAG to a tag that does not exist made the whole
+	# cross-check VANISH - the suite still exited 0, one assertion lighter,
+	# with no other signal. That is the "check that cannot fail" class this
+	# repo keeps getting bitten by. A shallow clone is a real reason to skip;
+	# a full clone missing the tag means the tag was never cut, or
+	# PINNED_TAG is wrong, and both deserve a red build.
+	if [ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+		echo "  SKIP: tag ${PINNED_TAG} not resolvable in a SHALLOW clone -- skipping the tag cross-check"
+	else
+		fail "PINNED_TAG is '${PINNED_TAG}' but no such tag exists in this full clone -- the tag was never cut, or PINNED_TAG is wrong"
+	fi
 fi
 
 # ============================================================================
