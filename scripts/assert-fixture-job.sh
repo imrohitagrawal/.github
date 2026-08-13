@@ -70,17 +70,59 @@ fi
 # previous one, so pinning the attempt keeps "which job did I just wait on"
 # unambiguous. per_page=100 + --paginate because this workflow already has
 # more jobs than one default page holds.
-JOB_ID="$(TARGET_JOB="$TARGET_JOB" gh api --paginate \
-	"repos/${GITHUB_REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
-	--jq '.jobs[] | select(.name == env.TARGET_JOB) | .id' | head -n 1)"
+#
+# ISSUE #23 (M6): this call used to be bare. Under `set -euo pipefail` a
+# transient 502/403 killed the script with gh's raw exit code and no
+# `::error::` annotation at all - so API flake was presented to whoever
+# opened the run exactly like a gate regression, on a check that blocks
+# merges. It now retries, and separates the two outcomes that need
+# different responses: the API call FAILING (infra, retry, and say so) from
+# it succeeding but listing no such job (a real, permanent naming mismatch -
+# fail immediately, retrying cannot help).
+#
+# The output is captured whole and split afterwards rather than piped into
+# `head -n 1`, which also removes the SIGPIPE-under-pipefail hazard a review
+# raised against the previous form.
+LIST_ERR="$(mktemp)"
+trap 'rm -f "$LIST_ERR"' EXIT
+JOB_ID=""
+LIST_OK=false
+LIST_ATTEMPTS=4
+for attempt in $(seq 1 "$LIST_ATTEMPTS"); do
+	set +e
+	LIST_OUT="$(TARGET_JOB="$TARGET_JOB" gh api --paginate \
+		"repos/${GITHUB_REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+		--jq '.jobs[] | select(.name == env.TARGET_JOB) | .id' 2>"$LIST_ERR")"
+	LIST_EXIT=$?
+	set -e
+	if [ "$LIST_EXIT" -eq 0 ]; then
+		LIST_OK=true
+		JOB_ID="$(printf '%s\n' "$LIST_OUT" | head -n 1)"
+		break
+	fi
+	if [ "$attempt" -lt "$LIST_ATTEMPTS" ]; then
+		echo "Jobs listing failed (gh exit ${LIST_EXIT}, attempt ${attempt}/${LIST_ATTEMPTS}); retrying in 10s. Last error: $(head -n 1 "$LIST_ERR")"
+		sleep 10
+	fi
+done
+
+if [ "$LIST_OK" != true ]; then
+	# Infrastructure, not a fixture verdict - so no FAILURE_HINT, same
+	# reasoning as the log-download failure below.
+	echo "----- last gh error -----"
+	head -n 10 "$LIST_ERR"
+	echo "-------------------------"
+	echo "::error::assert-fixture-job.sh: could not list jobs for run ${RUN_ID} attempt ${RUN_ATTEMPT} after ${LIST_ATTEMPTS} attempts (last gh exit ${LIST_EXIT}). This says nothing about whether the fixture behaved correctly."
+	exit 1
+fi
 
 if [ -z "$JOB_ID" ]; then
-	fail "assert-fixture-job.sh: no job named '$TARGET_JOB' found in run ${RUN_ID} attempt ${RUN_ATTEMPT}. If that job was renamed in self-test.yml, this assert job's TARGET_JOB must be renamed with it."
+	fail "assert-fixture-job.sh: the jobs listing for run ${RUN_ID} attempt ${RUN_ATTEMPT} succeeded but contains no job named '$TARGET_JOB'. If that job was renamed in self-test.yml, this assert job's TARGET_JOB must be renamed with it."
 fi
 
 RAW_LOG="$(mktemp)"
 LOG_FILE="$(mktemp)"
-trap 'rm -f "$RAW_LOG" "$LOG_FILE"' EXIT
+trap 'rm -f "$LIST_ERR" "$RAW_LOG" "$LOG_FILE"' EXIT
 
 # curl, not `gh api`, for THIS request specifically - and not a style choice.
 # Job logs are plain text containing the runner's own ANSI colour codes, and

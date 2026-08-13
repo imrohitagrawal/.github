@@ -592,7 +592,32 @@ jobs:
           else
             echo "has_mypy_config=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "uses_uv=$([ -f Makefile ] && grep -qE '(^|[^a-zA-Z])uv([^a-zA-Z]|$)' Makefile && echo true || ([ -f "$PYTHON_DIR/pyproject.toml" ] && [ -f "$PYTHON_DIR/uv.lock" ] && echo true || echo false))" >> "$GITHUB_OUTPUT"
+          # BEGIN uv-detection-helpers
+          # Extracted verbatim and table-tested by scripts/test-uv-detection.sh
+          # (run by self-lint.yml), same contract as the makefile-trust block
+          # above: self-contained, depending only on its one argument and a
+          # Makefile in the current directory.
+          #
+          # These two were inline one-liners until round 5. Lifting them into
+          # functions is behaviour-preserving - the expressions below are
+          # byte-identical to what they replaced, `||`/`&&` binding included -
+          # and it is the only way to test the case CI structurally cannot
+          # reach: uses_uv true via the root-Makefile grep with NO python
+          # manifest anywhere, where has_uv_cache_target must be false or
+          # setup-uv hard-fails on a zero-match glob. A fixture for that would
+          # need this repo's own root Makefile to mention `uv`, which turns uv
+          # detection on for every self-test job at once.
+          compute_uses_uv() {
+            # $1 = python directory.
+            [ -f Makefile ] && grep -qE '(^|[^a-zA-Z])uv([^a-zA-Z]|$)' Makefile && echo true || ([ -f "$1/pyproject.toml" ] && [ -f "$1/uv.lock" ] && echo true || echo false)
+          }
+          compute_has_uv_cache_target() {
+            # $1 = python directory. True when at least one file exists for
+            # setup-uv's cache-dependency-glob to match.
+            [ -f "$1/uv.lock" ] || [ -f "$1/pyproject.toml" ] || ls "$1"/requirements*.txt >/dev/null 2>&1 && echo true || echo false
+          }
+          # END uv-detection-helpers
+          echo "uses_uv=$(compute_uses_uv "$PYTHON_DIR")" >> "$GITHUB_OUTPUT"
           # H8 review fix (HIGH, confirmed): uses_uv can be true via the bare
           # Makefile-grep path above with NONE of uv.lock/pyproject.toml/
           # requirements*.txt existing in python-directory (e.g. a Makefile
@@ -610,7 +635,7 @@ jobs:
           # growing (self-lint.yml's suppression is message-text-based, not
           # line-scoped, so a new occurrence would otherwise go unnoticed).
           {
-            echo "has_uv_cache_target=$([ -f "$PYTHON_DIR/uv.lock" ] || [ -f "$PYTHON_DIR/pyproject.toml" ] || ls "$PYTHON_DIR"/requirements*.txt >/dev/null 2>&1 && echo true || echo false)"
+            echo "has_uv_cache_target=$(compute_has_uv_cache_target "$PYTHON_DIR")"
             echo "uses_node=$([ -f "$NODE_DIR/.nvmrc" ] || [ -f "$NODE_DIR/.node-version" ] || grep -qE '(^|[^a-zA-Z])(nvm|node)([^a-zA-Z]|$)' Makefile 2>/dev/null && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 

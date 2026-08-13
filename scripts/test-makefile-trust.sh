@@ -36,9 +36,16 @@
 #   - narrow the boundary class to `[^A-Za-z0-9_.]` -> T20 fails
 #   - delete the root Makefile's `-` prefix, delete the directory name from
 #     its `lint:` recipe comment, or retarget that name at a path INSIDE the
-#     fixture directory                           -> T24 fails (T25 does not,
+#     fixture directory                           -> T25 fails (T26 does not,
 #     and an earlier version of this line wrongly named both - the third
-#     asserted-not-observed claim this round, caught by review)
+#     asserted-not-observed claim of round 4, caught by review)
+#   - sabotage extract_makefile_recipe to return a fixed non-empty recipe
+#     -> T24 fails, and T23 stays GREEN. That contrast is the whole point of
+#     issue #23's L4: T23 was NAMED for the missing-target case but
+#     short-circuits on the has_makefile_<check> flag before ever calling
+#     extract_makefile_recipe, so it could not fail for that reason. (The
+#     blunt sabotage reds 19 cases in total; T23 not being one of them is
+#     the observation that matters.)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -128,15 +135,21 @@ assert_trust() {
 	fi
 }
 
-# assert_absent_target <case-name> - a target that does not exist at all must
-# never be trusted, regardless of what else the Makefile contains.
-assert_absent_target() {
+# assert_flag_gate <case-name> <has-flag-value>
+#
+# ISSUE #23 (L4): this was called assert_absent_target and its case was named
+# "target absent entirely", but with has_makefile_test=false it returns at the
+# FIRST gate and never calls extract_makefile_recipe at all - sabotaging that
+# function left the case green. It tests the has_makefile_<check> flag gate,
+# which is worth testing, so it is renamed to say so, and the genuinely-absent
+# target it claimed to cover is now T24 below.
+assert_flag_gate() {
 	CASES=$((CASES + 1))
 	printf 'lint:\n\tcd backend && ruff check .\n' >"$SCRATCH/Makefile"
 	local actual
 	actual="$(
 		cd "$SCRATCH" || exit 1
-		HAS_MAKEFILE_LINT=true HAS_MAKEFILE_TYPECHECK=false HAS_MAKEFILE_TEST=false \
+		HAS_MAKEFILE_LINT=true HAS_MAKEFILE_TYPECHECK=false HAS_MAKEFILE_TEST="$2" \
 			compute_makefile_trust test backend
 	)"
 	if [ "$actual" = false ]; then
@@ -177,7 +190,14 @@ assert_trust "T19 dot matches itself"             test api.old true 'cd api.old 
 assert_trust "T20 dash is part of the word"       test backend false 'cd backend-legacy && pytest'
 assert_trust "T21 nested path matches"            test src/backend true 'cd src/backend && pytest'
 assert_trust "T22 unrelated recipe, non-root"     test backend false 'pytest -q'
-assert_absent_target "T23 target absent entirely"
+assert_flag_gate "T23 has_makefile_test=false short-circuits" false
+# T24 is the case T23 was misnamed for: the flag says the target exists,
+# so the short-circuit does NOT fire and extract_makefile_recipe really
+# runs - against a Makefile with no `test:` target at all. It must return
+# an empty recipe, which is_trivial_makefile_recipe then classifies as
+# trivial, giving trust=false. Sabotaging extract_makefile_recipe turns
+# THIS red, which is what L4 said T23 could not do.
+assert_flag_gate "T24 flag true but target genuinely absent" true
 
 echo
 echo "--- the CI fixture's coupling to the REAL root Makefile still holds ---"
@@ -191,7 +211,7 @@ echo "--- the CI fixture's coupling to the REAL root Makefile still holds ---"
 # proof silently evaporates with nothing going red. Nothing pinned that, so
 # these two cases do - against the real file, not a fixture.
 #
-# T24 + T25 together mean exactly "old regex -> trusted, new regex ->
+# T25 + T26 together mean exactly "old regex -> trusted, new regex ->
 # untrusted", which is what makes that fixture worth running at all.
 FIXTURE_DIR=".github/self-test-fixtures/makefile-trust-dash-negative"
 
@@ -202,13 +222,13 @@ is_trivial_at_prefix_only() {
 	! grep -vqE '^[[:space:]]*(@?[[:space:]]*(#.*)?$|@?[[:space:]]*(echo|true|:|exit[[:space:]]+0)([[:space:]].*)?$)'
 }
 
-# Review finding on the first version of T24: it hand-rolled the second half
+# Review finding on the first version of this case (then numbered T24): it hand-rolled the second half
 # of the check as `grep -qF "$FIXTURE_DIR"`, which is plain containment and
 # NOT what compute_makefile_trust does - that uses a boundary-aware match. So
 # retargeting the comment at, say, "<dir>/requirements.txt" left T24 green
 # (the substring is still there) while the real function correctly stopped
 # matching, and the fixture silently stopped discriminating: exactly the decay
-# T24 exists to prevent. Fixed by running the REAL compute_makefile_trust with
+# T25 exists to prevent. Fixed by running the REAL compute_makefile_trust with
 # only is_trivial_makefile_recipe swapped for the legacy one - so every other
 # part of the decision, boundary matching included, is the shipping code.
 CASES=$((CASES + 1))
@@ -223,9 +243,9 @@ legacy_trust="$(
 		compute_makefile_trust lint "$FIXTURE_DIR"
 )"
 if [ "$legacy_trust" = true ]; then
-	printf 'ok   %-52s trust=%s\n' "T24 root lint: TRUSTED under the pre-fix regex" "$legacy_trust"
+	printf 'ok   %-52s trust=%s\n' "T25 root lint: TRUSTED under the pre-fix regex" "$legacy_trust"
 else
-	printf 'FAIL %-52s expected trust=true, got trust=%s\n' "T24 root lint: TRUSTED under the pre-fix regex" "$legacy_trust"
+	printf 'FAIL %-52s expected trust=true, got trust=%s\n' "T25 root lint: TRUSTED under the pre-fix regex" "$legacy_trust"
 	printf '     %s\n' "-- the root Makefile's lint: recipe must keep BOTH a Make prefix char that only the NEW regex strips AND a boundary-matched mention of '$FIXTURE_DIR', or makefile-trust-dash-negative stops proving anything. Recipe is now: $(printf '%s' "$root_lint_recipe" | tr '\n' ';')"
 	FAILURES=$((FAILURES + 1))
 fi
@@ -234,9 +254,9 @@ CASES=$((CASES + 1))
 root_lint_trust="$(cd "$REPO_ROOT" && HAS_MAKEFILE_LINT=true HAS_MAKEFILE_TYPECHECK=false HAS_MAKEFILE_TEST=false \
 	compute_makefile_trust lint "$FIXTURE_DIR")"
 if [ "$root_lint_trust" = false ]; then
-	printf 'ok   %-52s trust=%s\n' "T25 root lint: UNTRUSTED for the fixture today" "$root_lint_trust"
+	printf 'ok   %-52s trust=%s\n' "T26 root lint: UNTRUSTED for the fixture today" "$root_lint_trust"
 else
-	printf 'FAIL %-52s expected trust=false, got trust=%s\n' "T25 root lint: UNTRUSTED for the fixture today" "$root_lint_trust"
+	printf 'FAIL %-52s expected trust=false, got trust=%s\n' "T26 root lint: UNTRUSTED for the fixture today" "$root_lint_trust"
 	FAILURES=$((FAILURES + 1))
 fi
 

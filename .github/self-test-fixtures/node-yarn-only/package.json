@@ -1,0 +1,12 @@
+{
+  "name": "self-test-node-yarn-only",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "yarn@1.22.22",
+  "description": "Round-5 fixture (issue #23): a real yarn-only repo, so the reusable workflow's OWN native yarn path executes in CI at least once. Until this, yarn was the only package manager whose dispatch had never run through the gate itself -- T14 in scripts/test-retrofit-quality-gate.sh covers the Makefile template's yarn install, but nothing covered `Install Node dependencies`'s yarn arm, which is the arm that shipped a silently-ignored --immutable flag (P1, fixed in #21). packageManager pins yarn CLASSIC deliberately: Corepack picks its own major when only a lockfile is present, and this fixture needs to exercise the classic branch of the runtime version check specifically, since that is the branch the bug lived in.",
+  "scripts": {
+    "lint": "node -e \"process.exit(0)\"",
+    "typecheck": "node -e \"process.exit(0)\"",
+    "test": "node -e \"process.exit(0)\""
+  }
+}

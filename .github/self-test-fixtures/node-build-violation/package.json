@@ -1,0 +1,9 @@
+{
+  "name": "self-test-node-build-violation",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Round-5 fixture (issue #23): closes the npm-build swallow-regression residual recorded since C1. Declares ONLY a `build` script, which deliberately exits 1 -- no lint/typecheck/test scripts exist, so the reusable workflow's jq existence checks skip those steps and `npm run build` is the only step that can plausibly fail. The residual was recorded as hard because `--if-present` made a build-only failure awkward to construct; the jq existence gate the workflow now uses makes it straightforward. Expected to FAIL, with an inverted assert job.",
+  "scripts": {
+    "build": "node -e \"console.error('fixture: deliberate build failure'); process.exit(1)\""
+  }
+}

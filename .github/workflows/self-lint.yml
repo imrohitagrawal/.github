@@ -187,6 +187,16 @@ jobs:
       - name: Makefile-trust helper tests
         run: scripts/test-makefile-trust.sh
 
+      # ISSUE #23: same extract-from-the-real-workflow pattern, for the uv
+      # detection. Its one case that matters - uses_uv true via the
+      # root-Makefile grep with no python manifest, where enable-cache must
+      # resolve false or setup-uv hard-fails on a zero-match glob - is
+      # unreachable from a self-test fixture, because making it true needs
+      # THIS repo's root Makefile to mention uv, which would switch uv
+      # detection on for every self-test job at once.
+      - name: uv detection tests
+        run: scripts/test-uv-detection.sh
+
       # H6 (review finding): the reusable-workflow self-reference pin and the
       # duplicated Python/Node CI tool-version pins are hand-copied across
       # templates/caller-pr-quality.yml, scripts/retrofit-quality-gate.sh, and
