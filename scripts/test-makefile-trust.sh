@@ -39,13 +39,13 @@
 #     fixture directory                           -> T25 fails (T26 does not,
 #     and an earlier version of this line wrongly named both - the third
 #     asserted-not-observed claim of round 4, caught by review)
-#   - sabotage extract_makefile_recipe to return a fixed non-empty recipe
+#   - sabotage extract_makefile_recipe to return ANY fixed non-empty recipe
 #     -> T24 fails, and T23 stays GREEN. That contrast is the whole point of
 #     issue #23's L4: T23 was NAMED for the missing-target case but
 #     short-circuits on the has_makefile_<check> flag before ever calling
 #     extract_makefile_recipe, so it could not fail for that reason. (The
-#     blunt sabotage reds 19 cases in total; T23 not being one of them is
-#     the observation that matters.)
+#     T24 runs at directory '.' precisely so the word ANY holds - see its
+#     own comment. T23 not being red is the observation that matters.)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -150,7 +150,7 @@ assert_flag_gate() {
 	actual="$(
 		cd "$SCRATCH" || exit 1
 		HAS_MAKEFILE_LINT=true HAS_MAKEFILE_TYPECHECK=false HAS_MAKEFILE_TEST="$2" \
-			compute_makefile_trust test backend
+			compute_makefile_trust test "$3"
 	)"
 	if [ "$actual" = false ]; then
 		printf 'ok   %-52s trust=%s\n' "$1" "$actual"
@@ -190,14 +190,20 @@ assert_trust "T19 dot matches itself"             test api.old true 'cd api.old 
 assert_trust "T20 dash is part of the word"       test backend false 'cd backend-legacy && pytest'
 assert_trust "T21 nested path matches"            test src/backend true 'cd src/backend && pytest'
 assert_trust "T22 unrelated recipe, non-root"     test backend false 'pytest -q'
-assert_flag_gate "T23 has_makefile_test=false short-circuits" false
+assert_flag_gate "T23 has_makefile_test=false short-circuits" false backend
 # T24 is the case T23 was misnamed for: the flag says the target exists,
 # so the short-circuit does NOT fire and extract_makefile_recipe really
 # runs - against a Makefile with no `test:` target at all. It must return
 # an empty recipe, which is_trivial_makefile_recipe then classifies as
 # trivial, giving trust=false. Sabotaging extract_makefile_recipe turns
 # THIS red, which is what L4 said T23 could not do.
-assert_flag_gate "T24 flag true but target genuinely absent" true
+# Directory '.' on purpose (review finding): with a non-root directory, a
+# sabotaged extract_makefile_recipe returning a recipe that does NOT mention
+# that directory still yields trust=false via the directory-mention gate, so
+# T24 stayed green for most sabotages and did not pin the empty-recipe path
+# it claims to. At '.', compute_makefile_trust short-circuits to true for ANY
+# non-trivial recipe, so any non-empty sabotage bites.
+assert_flag_gate "T24 flag true but target genuinely absent" true .
 
 echo
 echo "--- the CI fixture's coupling to the REAL root Makefile still holds ---"

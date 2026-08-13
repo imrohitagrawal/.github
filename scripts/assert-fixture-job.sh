@@ -80,9 +80,14 @@ fi
 # it succeeding but listing no such job (a real, permanent naming mismatch -
 # fail immediately, retrying cannot help).
 #
-# The output is captured whole and split afterwards rather than piped into
-# `head -n 1`, which also removes the SIGPIPE-under-pipefail hazard a review
-# raised against the previous form.
+# The output is captured whole and split afterwards rather than piped
+# directly out of `gh`. Note precisely what that does and does not fix (a
+# review corrected an earlier, over-stated version of this note): it stops
+# `gh` itself from being the SIGPIPE victim, but the `printf | head -n 1`
+# below is still a pipeline under `pipefail`, so the hazard is RELOCATED, not
+# removed. It is unreachable in practice - it needs the listing to return
+# enough duplicate ids under one display name to fill a pipe buffer, and job
+# display names are unique here - but "removed" was the wrong word.
 LIST_ERR="$(mktemp)"
 trap 'rm -f "$LIST_ERR"' EXIT
 JOB_ID=""
@@ -117,7 +122,16 @@ if [ "$LIST_OK" != true ]; then
 fi
 
 if [ -z "$JOB_ID" ]; then
-	fail "assert-fixture-job.sh: the jobs listing for run ${RUN_ID} attempt ${RUN_ATTEMPT} succeeded but contains no job named '$TARGET_JOB'. If that job was renamed in self-test.yml, this assert job's TARGET_JOB must be renamed with it."
+	# NOT routed through fail(), for the same reason the download failure
+	# below is not (review finding - this branch used to be, contradicting
+	# the rule this script states for itself twice): no log bytes were read,
+	# so nothing about the fixture's behaviour was observed. Printing
+	# FAILURE_HINT here would put a specific, confident and entirely false
+	# diagnosis on a merge-blocking check - e.g. "WP5's pip-audit ignore-list
+	# blocking promotion did not block on a genuine finding" - when the real
+	# cause is a job that got renamed without its assert being renamed too.
+	echo "::error::assert-fixture-job.sh: the jobs listing for run ${RUN_ID} attempt ${RUN_ATTEMPT} succeeded but contains no job named '$TARGET_JOB'. If that job was renamed in self-test.yml, this assert job's TARGET_JOB must be renamed with it. This says nothing about whether the fixture behaved correctly."
+	exit 1
 fi
 
 RAW_LOG="$(mktemp)"

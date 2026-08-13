@@ -28,7 +28,10 @@ name: Self-test (reusable-pr-quality.yml)
 # scenario+assert pairs added in round 4 (makefile-trust-dash-negative,
 # python-pip-audit-advisory, python-uv-cache - see each job's own comment)
 # and one more assert job added by round 4's own review, covering the
-# previously-unasserted root-makefile-and-semgrep scenario.
+# previously-unasserted root-makefile-and-semgrep scenario, plus two more
+# scenario+assert pairs from issue #23 (node-yarn-only, the first coverage
+# of the gate's own native yarn arm; and node-build-violation, closing the
+# npm-build swallow residual recorded since C1).
 # See each job's own comment for what it proves and why:
 #   - node-only, node-pnpm-only (H1: a real pnpm-only repo - packageManager
 #     field + pnpm-lock.yaml, no package-lock.json - proving
@@ -138,7 +141,8 @@ name: Self-test (reusable-pr-quality.yml)
 # present - and, where a wrong-reason pass is the specific hazard, requires
 # another marker to be ABSENT. Every deliberately-failing fixture has one, as
 # do the should-pass fixtures whose entire value is that a specific step RAN:
-# python-pip-audit-advisory, python-uv-cache, root-makefile-and-semgrep.
+# python-pip-audit-advisory, python-uv-cache, root-makefile-and-semgrep, and
+# node-yarn-only.
 #
 # RESIDUAL (narrowed, not eliminated) - five should-pass scenarios are still
 # job-result-only, and the exemption list is spelled out rather than implied,
@@ -869,12 +873,14 @@ jobs:
   # resolved input closes it (verified present in the real log:
   # "  enable-cache: true", inside the step's own `with:` group).
   #
-  # STILL UNCOVERED, deliberately: the guard's NEGATIVE side - uses_uv true
-  # via the root-Makefile grep with no python manifest anywhere, where
-  # enable-cache must resolve to false or setup-uv hard-fails on a
-  # zero-match glob. That needs a fixture whose job makes the ROOT Makefile
-  # mention uv, which would turn uv detection on for every other job in this
-  # file at once. Backlogged, not silently skipped.
+  # The guard's NEGATIVE side - uses_uv true via the root-Makefile grep with
+  # no python manifest anywhere, where enable-cache must resolve to false or
+  # setup-uv hard-fails on a zero-match glob - is still unreachable from any
+  # fixture here (it would need the ROOT Makefile to mention uv, switching uv
+  # detection on for every job in this file at once). It is no longer
+  # uncovered, though: scripts/test-uv-detection.sh (U01-U03, run by
+  # self-lint on every PR) tests it directly against the same functions,
+  # extracted from the workflow.
   assert-uv-cache-step-ran:
     name: assert python-uv-cache installed uv
     needs: [python-uv-cache]
@@ -903,9 +909,23 @@ jobs:
           FAILURE_HINT: "Either uses_uv did not evaluate true for a python-directory containing both pyproject.toml and uv.lock (so setup-uv never ran), or has_uv_cache_target did not evaluate true (so caching was never enabled and the zero-match-glob guard is still unexercised). Check whether 'Run astral-sh/setup-uv@' appears in that job's log at all: present means the second case, absent means the first."
         run: scripts/assert-fixture-job.sh
 
-  # ISSUE #23: the marker is yarn's own install banner. Yarn Classic and Berry
-  # both print "yarn install v<version>", so this proves the yarn arm of
-  # "Install Node dependencies" really ran without pinning a major.
+  # ISSUE #23: the marker is Yarn CLASSIC's install banner, and it is
+  # deliberately tied to this fixture's `packageManager: yarn@1.22.22`.
+  #
+  # An earlier version of this comment claimed Classic and Berry both print
+  # "yarn install v<version>" so the assert worked "without pinning a major".
+  # That is false - measured against real binaries: classic 1.22.22 prints
+  # `yarn install v1.22.22`, while Berry (2.x/3.x/4.x) uses the YN-code
+  # reporter and prints `> YN0000: - Yarn <version>` with ZERO occurrences of
+  # that string. Bumping this fixture to yarn@4 would leave the gate working
+  # and turn THIS job red, printing a hint that blames the dispatch - the
+  # very "unrelated cause presented as a gate regression" class M6 in this
+  # same PR exists to remove.
+  #
+  # Classic is the right major to pin anyway: the silently-ignored
+  # `--immutable` bug lived in the classic branch of the runtime version
+  # check. If this fixture is ever moved to Berry, this pattern must move
+  # with it (`YN0000` plus the version line).
   assert-yarn-install-ran:
     name: assert node-yarn-only installed via yarn
     needs: [node-yarn-only]
@@ -931,7 +951,7 @@ jobs:
           ACTUAL_RESULT: ${{ needs.node-yarn-only.result }}
           EXPECT_RESULT: success
           EXPECT_PATTERN: '^[^ ]+ yarn install v[0-9]'
-          FAILURE_HINT: "node_package_manager did not resolve to yarn for a repo with a packageManager field of yarn@1.22.22 and a yarn.lock, so the gate's yarn dispatch is still unexercised - the arm that shipped a silently-ignored --immutable flag."
+          FAILURE_HINT: "node_package_manager did not resolve to yarn for a repo with a packageManager field of yarn@1.22.22 and a yarn.lock, so the gate's yarn dispatch is unexercised. NOTE: this assert proves only that the yarn arm RAN - it does not pin which install flag was used (the fixture has no dependencies, so no integrity flag has anything to check). If this fixture was moved to Yarn Berry, expect this to fail on the banner text alone: Berry does not print `yarn install v<version>`."
         run: scripts/assert-fixture-job.sh
 
   assert-node-build-violation-blocks:

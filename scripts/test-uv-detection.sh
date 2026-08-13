@@ -18,12 +18,20 @@
 # So it is tested here instead, against the real functions extracted from the
 # workflow - never a copy, which would drift.
 #
-# WHICH CHANGE TURNS THIS RED: drop the `[ -f "$1/uv.lock" ] ||` /
-# `[ -f "$1/pyproject.toml" ] ||` guards from compute_has_uv_cache_target so
-# it always returns true, and U01 fails - which is precisely the shape that
-# hard-fails the setup-uv step for a repo whose Makefile mentions uv before
-# any manifest exists. Remove the word-boundary guard from compute_uses_uv's
-# grep and U07 fails.
+# WHICH CHANGE TURNS THIS RED - run, not reasoned about. An earlier version of
+# this comment said "drop the two `[ -f ... ] ||` guards from
+# compute_has_uv_cache_target so it always returns true, and U01 fails". Both
+# halves were wrong: those are OR-arms, so dropping them makes the function
+# return true LESS often, not always, and U01 stays GREEN (that mutation reds
+# U05, U09, U10, U11 and U13 instead). Corrected by running each one:
+#   - replace compute_has_uv_cache_target's body with `echo true`
+#       -> U01, U02, U03, U07, U08 fail. This is the real guard: exactly the
+#          shape that hard-fails setup-uv for a repo whose Makefile mentions
+#          uv before any manifest exists, which is why U01 is the case this
+#          whole file exists for.
+#   - drop the two `[ -f ... ] ||` arms -> U05, U09, U10, U11, U13 fail.
+#   - remove the word-boundary guard from compute_uses_uv's grep
+#       -> U07 and U08 fail.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

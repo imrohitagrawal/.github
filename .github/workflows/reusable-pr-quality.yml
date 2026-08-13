@@ -600,7 +600,8 @@ jobs:
           #
           # These two were inline one-liners until round 5. Lifting them into
           # functions is behaviour-preserving - the expressions below are
-          # byte-identical to what they replaced, `||`/`&&` binding included -
+          # identical to what they replaced apart from the parameter name
+          # ($PYTHON_DIR became $1), `||`/`&&` binding included -
           # and it is the only way to test the case CI structurally cannot
           # reach: uses_uv true via the root-Makefile grep with NO python
           # manifest anywhere, where has_uv_cache_target must be false or
