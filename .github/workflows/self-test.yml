@@ -16,7 +16,7 @@ name: Self-test (reusable-pr-quality.yml)
 # wouldn't exist yet for an in-flight PR and wouldn't validate what's
 # actually changing.
 #
-# 32 jobs: the original ten (seven workflow_call scenario jobs, two assert
+# 36 jobs: the original ten (seven workflow_call scenario jobs, two assert
 # jobs inverting the two deliberately-failing scenarios' results, and the
 # final aggregate job) plus, since the review that added C1/H4/H1 below,
 # eight more (six deliberately-failing scenario+assert pairs - bandit-
@@ -28,7 +28,10 @@ name: Self-test (reusable-pr-quality.yml)
 # scenario+assert pairs added in round 4 (makefile-trust-dash-negative,
 # python-pip-audit-advisory, python-uv-cache - see each job's own comment)
 # and one more assert job added by round 4's own review, covering the
-# previously-unasserted root-makefile-and-semgrep scenario.
+# previously-unasserted root-makefile-and-semgrep scenario, plus two more
+# scenario+assert pairs from issue #23 (node-yarn-only, the first coverage
+# of the gate's own native yarn arm; and node-build-violation, closing the
+# npm-build swallow residual recorded since C1).
 # See each job's own comment for what it proves and why:
 #   - node-only, node-pnpm-only (H1: a real pnpm-only repo - packageManager
 #     field + pnpm-lock.yaml, no package-lock.json - proving
@@ -138,7 +141,8 @@ name: Self-test (reusable-pr-quality.yml)
 # present - and, where a wrong-reason pass is the specific hazard, requires
 # another marker to be ABSENT. Every deliberately-failing fixture has one, as
 # do the should-pass fixtures whose entire value is that a specific step RAN:
-# python-pip-audit-advisory, python-uv-cache, root-makefile-and-semgrep.
+# python-pip-audit-advisory, python-uv-cache, root-makefile-and-semgrep, and
+# node-yarn-only.
 #
 # RESIDUAL (narrowed, not eliminated) - five should-pass scenarios are still
 # job-result-only, and the exemption list is spelled out rather than implied,
@@ -320,6 +324,29 @@ jobs:
     uses: ./.github/workflows/reusable-pr-quality.yml
     with:
       python-directory: .github/self-test-fixtures/python-pip-audit-advisory
+
+  # ISSUE #23: the reusable workflow's OWN native yarn path had never
+  # executed. T14 in scripts/test-retrofit-quality-gate.sh covers the Makefile
+  # template's yarn install, but nothing covered "Install Node dependencies"'s
+  # yarn arm - the arm that shipped a silently-ignored `--immutable` for its
+  # whole life (P1, fixed in #21). `packageManager` pins yarn CLASSIC on
+  # purpose: Corepack picks its own major when only a lockfile is present, and
+  # the bug lived in the classic branch of the runtime version check.
+  # Expected to PASS.
+  node-yarn-only:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      node-directory: .github/self-test-fixtures/node-yarn-only
+
+  # ISSUE #23: closes the npm-build swallow-regression residual recorded since
+  # C1 ("--if-present makes constructing a build-only failure awkward"). The
+  # workflow now gates each script on a jq existence check rather than
+  # `--if-present` alone, which makes it straightforward: declare ONLY a
+  # `build` script and let it exit 1. Expected to FAIL.
+  node-build-violation:
+    uses: ./.github/workflows/reusable-pr-quality.yml
+    with:
+      node-directory: .github/self-test-fixtures/node-build-violation
 
   # ROUND-4 (LOW): uv detection (`uses_uv`/`has_uv_cache_target`) and the
   # setup-uv zero-match-glob hard-fail guard had never run in CI - no fixture
@@ -846,12 +873,14 @@ jobs:
   # resolved input closes it (verified present in the real log:
   # "  enable-cache: true", inside the step's own `with:` group).
   #
-  # STILL UNCOVERED, deliberately: the guard's NEGATIVE side - uses_uv true
-  # via the root-Makefile grep with no python manifest anywhere, where
-  # enable-cache must resolve to false or setup-uv hard-fails on a
-  # zero-match glob. That needs a fixture whose job makes the ROOT Makefile
-  # mention uv, which would turn uv detection on for every other job in this
-  # file at once. Backlogged, not silently skipped.
+  # The guard's NEGATIVE side - uses_uv true via the root-Makefile grep with
+  # no python manifest anywhere, where enable-cache must resolve to false or
+  # setup-uv hard-fails on a zero-match glob - is still unreachable from any
+  # fixture here (it would need the ROOT Makefile to mention uv, switching uv
+  # detection on for every job in this file at once). It is no longer
+  # uncovered, though: scripts/test-uv-detection.sh (U01-U03, run by
+  # self-lint on every PR) tests it directly against the same functions,
+  # extracted from the workflow.
   assert-uv-cache-step-ran:
     name: assert python-uv-cache installed uv
     needs: [python-uv-cache]
@@ -878,6 +907,79 @@ jobs:
           EXPECT_RESULT: success
           EXPECT_PATTERN: '^[^ ]+   enable-cache: true$'
           FAILURE_HINT: "Either uses_uv did not evaluate true for a python-directory containing both pyproject.toml and uv.lock (so setup-uv never ran), or has_uv_cache_target did not evaluate true (so caching was never enabled and the zero-match-glob guard is still unexercised). Check whether 'Run astral-sh/setup-uv@' appears in that job's log at all: present means the second case, absent means the first."
+        run: scripts/assert-fixture-job.sh
+
+  # ISSUE #23: the marker is Yarn CLASSIC's install banner, and it is
+  # deliberately tied to this fixture's `packageManager: yarn@1.22.22`.
+  #
+  # An earlier version of this comment claimed Classic and Berry both print
+  # "yarn install v<version>" so the assert worked "without pinning a major".
+  # That is false - measured against real binaries: classic 1.22.22 prints
+  # `yarn install v1.22.22`, while Berry (2.x/3.x/4.x) uses the YN-code
+  # reporter and prints `> YN0000: - Yarn <version>` with ZERO occurrences of
+  # that string. Bumping this fixture to yarn@4 would leave the gate working
+  # and turn THIS job red, printing a hint that blames the dispatch - the
+  # very "unrelated cause presented as a gate regression" class M6 in this
+  # same PR exists to remove.
+  #
+  # Classic is the right major to pin anyway: the silently-ignored
+  # `--immutable` bug lived in the classic branch of the runtime version
+  # check. If this fixture is ever moved to Berry, this pattern must move
+  # with it (`YN0000` plus the version line).
+  assert-yarn-install-ran:
+    name: assert node-yarn-only installed via yarn
+    needs: [node-yarn-only]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the yarn arm of the native install step ran
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: node-yarn-only / quality-gate
+          ACTUAL_RESULT: ${{ needs.node-yarn-only.result }}
+          EXPECT_RESULT: success
+          EXPECT_PATTERN: '^[^ ]+ yarn install v[0-9]'
+          FAILURE_HINT: "node_package_manager did not resolve to yarn for a repo with a packageManager field of yarn@1.22.22 and a yarn.lock, so the gate's yarn dispatch is unexercised. NOTE: this assert proves only that the yarn arm RAN - it does not pin which install flag was used (the fixture has no dependencies, so no integrity flag has anything to check). If this fixture was moved to Yarn Berry, expect this to fail on the banner text alone: Berry does not print `yarn install v<version>`."
+        run: scripts/assert-fixture-job.sh
+
+  assert-node-build-violation-blocks:
+    name: assert node-build-violation actually blocked
+    needs: [node-build-violation]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the deliberately-broken fixture failed the gate, via build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: node-build-violation / quality-gate
+          ACTUAL_RESULT: ${{ needs.node-build-violation.result }}
+          EXPECT_RESULT: failure
+          EXPECT_PATTERN: '^[^ ]+ > self-test-node-build-violation@[0-9.]+ build$'
+          FAILURE_HINT: "npm build is not actually blocking - the swallow-regression class recorded as an accepted residual since C1 has reopened."
         run: scripts/assert-fixture-job.sh
 
   # H4 (review finding): scripts/retrofit-quality-gate.sh had zero test
@@ -928,6 +1030,8 @@ jobs:
       - assert-makefile-trust-dash-negative-blocks
       - assert-uv-cache-step-ran
       - assert-semgrep-actually-ran
+      - assert-yarn-install-ran
+      - assert-node-build-violation-blocks
       - retrofit-script-tests
     if: always()
     runs-on: ubuntu-latest
@@ -956,6 +1060,8 @@ jobs:
           DASH_TRUST_ASSERT: ${{ needs.assert-makefile-trust-dash-negative-blocks.result }}
           UV_CACHE_ASSERT: ${{ needs.assert-uv-cache-step-ran.result }}
           SEMGREP_ASSERT: ${{ needs.assert-semgrep-actually-ran.result }}
+          YARN_ASSERT: ${{ needs.assert-yarn-install-ran.result }}
+          NODE_BUILD_ASSERT: ${{ needs.assert-node-build-violation-blocks.result }}
           RETROFIT_SCRIPT_TESTS: ${{ needs.retrofit-script-tests.result }}
         run: |
           echo "node-only: $NODE_ONLY"
@@ -977,13 +1083,16 @@ jobs:
           echo "assert-makefile-trust-dash-negative-blocks: $DASH_TRUST_ASSERT"
           echo "assert-uv-cache-step-ran: $UV_CACHE_ASSERT"
           echo "assert-semgrep-actually-ran: $SEMGREP_ASSERT"
+          echo "assert-yarn-install-ran: $YARN_ASSERT"
+          echo "assert-node-build-violation-blocks: $NODE_BUILD_ASSERT"
           echo "retrofit-script-tests: $RETROFIT_SCRIPT_TESTS"
           FAILED=0
           for r in "$NODE_ONLY" "$NODE_PNPM_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$ROOT_MAKEFILE_SEMGREP" "$MAKEFILE_TRUST_POSITIVE" "$PYTHON_DEV_GROUP" \
             "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$BANDIT_BLOCKING_ASSERT" \
             "$NPM_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_ADVISORY_ASSERT" \
             "$NODE_TYPECHECK_ASSERT" "$PYTHON_MYPY_ASSERT" "$BAD_DIRECTORY_ASSERT" \
-            "$DASH_TRUST_ASSERT" "$UV_CACHE_ASSERT" "$SEMGREP_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
+            "$DASH_TRUST_ASSERT" "$UV_CACHE_ASSERT" "$SEMGREP_ASSERT" "$YARN_ASSERT" \
+            "$NODE_BUILD_ASSERT" "$RETROFIT_SCRIPT_TESTS"; do
             if [ "$r" != "success" ]; then
               FAILED=1
             fi

@@ -70,17 +70,73 @@ fi
 # previous one, so pinning the attempt keeps "which job did I just wait on"
 # unambiguous. per_page=100 + --paginate because this workflow already has
 # more jobs than one default page holds.
-JOB_ID="$(TARGET_JOB="$TARGET_JOB" gh api --paginate \
-	"repos/${GITHUB_REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
-	--jq '.jobs[] | select(.name == env.TARGET_JOB) | .id' | head -n 1)"
+#
+# ISSUE #23 (M6): this call used to be bare. Under `set -euo pipefail` a
+# transient 502/403 killed the script with gh's raw exit code and no
+# `::error::` annotation at all - so API flake was presented to whoever
+# opened the run exactly like a gate regression, on a check that blocks
+# merges. It now retries, and separates the two outcomes that need
+# different responses: the API call FAILING (infra, retry, and say so) from
+# it succeeding but listing no such job (a real, permanent naming mismatch -
+# fail immediately, retrying cannot help).
+#
+# The output is captured whole and split afterwards rather than piped
+# directly out of `gh`. Note precisely what that does and does not fix (a
+# review corrected an earlier, over-stated version of this note): it stops
+# `gh` itself from being the SIGPIPE victim, but the `printf | head -n 1`
+# below is still a pipeline under `pipefail`, so the hazard is RELOCATED, not
+# removed. It is unreachable in practice - it needs the listing to return
+# enough duplicate ids under one display name to fill a pipe buffer, and job
+# display names are unique here - but "removed" was the wrong word.
+LIST_ERR="$(mktemp)"
+trap 'rm -f "$LIST_ERR"' EXIT
+JOB_ID=""
+LIST_OK=false
+LIST_ATTEMPTS=4
+for attempt in $(seq 1 "$LIST_ATTEMPTS"); do
+	set +e
+	LIST_OUT="$(TARGET_JOB="$TARGET_JOB" gh api --paginate \
+		"repos/${GITHUB_REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+		--jq '.jobs[] | select(.name == env.TARGET_JOB) | .id' 2>"$LIST_ERR")"
+	LIST_EXIT=$?
+	set -e
+	if [ "$LIST_EXIT" -eq 0 ]; then
+		LIST_OK=true
+		JOB_ID="$(printf '%s\n' "$LIST_OUT" | head -n 1)"
+		break
+	fi
+	if [ "$attempt" -lt "$LIST_ATTEMPTS" ]; then
+		echo "Jobs listing failed (gh exit ${LIST_EXIT}, attempt ${attempt}/${LIST_ATTEMPTS}); retrying in 10s. Last error: $(head -n 1 "$LIST_ERR")"
+		sleep 10
+	fi
+done
+
+if [ "$LIST_OK" != true ]; then
+	# Infrastructure, not a fixture verdict - so no FAILURE_HINT, same
+	# reasoning as the log-download failure below.
+	echo "----- last gh error -----"
+	head -n 10 "$LIST_ERR"
+	echo "-------------------------"
+	echo "::error::assert-fixture-job.sh: could not list jobs for run ${RUN_ID} attempt ${RUN_ATTEMPT} after ${LIST_ATTEMPTS} attempts (last gh exit ${LIST_EXIT}). This says nothing about whether the fixture behaved correctly."
+	exit 1
+fi
 
 if [ -z "$JOB_ID" ]; then
-	fail "assert-fixture-job.sh: no job named '$TARGET_JOB' found in run ${RUN_ID} attempt ${RUN_ATTEMPT}. If that job was renamed in self-test.yml, this assert job's TARGET_JOB must be renamed with it."
+	# NOT routed through fail(), for the same reason the download failure
+	# below is not (review finding - this branch used to be, contradicting
+	# the rule this script states for itself twice): no log bytes were read,
+	# so nothing about the fixture's behaviour was observed. Printing
+	# FAILURE_HINT here would put a specific, confident and entirely false
+	# diagnosis on a merge-blocking check - e.g. "WP5's pip-audit ignore-list
+	# blocking promotion did not block on a genuine finding" - when the real
+	# cause is a job that got renamed without its assert being renamed too.
+	echo "::error::assert-fixture-job.sh: the jobs listing for run ${RUN_ID} attempt ${RUN_ATTEMPT} succeeded but contains no job named '$TARGET_JOB'. If that job was renamed in self-test.yml, this assert job's TARGET_JOB must be renamed with it. This says nothing about whether the fixture behaved correctly."
+	exit 1
 fi
 
 RAW_LOG="$(mktemp)"
 LOG_FILE="$(mktemp)"
-trap 'rm -f "$RAW_LOG" "$LOG_FILE"' EXIT
+trap 'rm -f "$LIST_ERR" "$RAW_LOG" "$LOG_FILE"' EXIT
 
 # curl, not `gh api`, for THIS request specifically - and not a style choice.
 # Job logs are plain text containing the runner's own ANSI colour codes, and
