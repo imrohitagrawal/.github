@@ -799,8 +799,15 @@ jobs:
   # body (which contains only the `semgrep scan --error --config ...`
   # command).
   #
+  # BOTH nouns are optionally plural, and getting that wrong cost a red build:
+  # the pattern read `... on [0-9]+ files` (plural hardcoded) while semgrep
+  # prints "Ran 1 rule on 1 file" - SINGULAR - whenever exactly one file is in
+  # scope. Every earlier run happened to scan 4 or 13 files, so it passed; the
+  # first PR that touched exactly one yaml file turned the required check red
+  # with nothing wrong. Caught by real CI on PR #25, not by review.
+  #
   # M IS DELIBERATELY UNCONSTRAINED, and the first version of this assertion
-  # got that wrong. It required `[1-9][0-9]*` files - "a step that runs but
+  # got that wrong too. It required `[1-9][0-9]*` files - "a step that runs but
   # scans nothing must be a failure" - which is false, because this step
   # passes `--baseline-commit`: the scan is DIFF-SCOPED. Measured, after two
   # review lenses disagreed about it:
@@ -855,7 +862,7 @@ jobs:
           TARGET_JOB: root-makefile-and-semgrep / quality-gate
           ACTUAL_RESULT: ${{ needs.root-makefile-and-semgrep.result }}
           EXPECT_RESULT: success
-          EXPECT_PATTERN: '^[^ ]+ Ran [0-9]+ rules? on [0-9]+ files'
+          EXPECT_PATTERN: '^[^ ]+ Ran [0-9]+ rules? on [0-9]+ files?'
           FAILURE_HINT: "The Semgrep step did not run to completion. Its `if:` requires a semgrep config at the REPO ROOT (semgrep.yml / .semgrep.yml / .semgrep/ / semgrep/) - a green job with no scan-summary line means the gate's only cross-language security scan is silently skipped for every consumer that ships one. Note a scan of ZERO files is normal and expected: the step passes --baseline-commit, so it only scans yaml the PR actually changed."
         run: scripts/assert-fixture-job.sh
 
