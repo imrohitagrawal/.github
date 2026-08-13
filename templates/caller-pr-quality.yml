@@ -19,7 +19,7 @@ jobs:
     # versioning policy (see docs/repo-onboarding.md and the redesign plan's
     # section 4) -- the same SHA-pin treatment applied to third-party actions
     # inside the reusable workflow, applied one level up to the reusable
-    # workflow reference itself. The `# v6` comment is for human readability
+    # workflow reference itself. The `# v7` comment is for human readability
     # only; it is not consumed by GitHub. To bump: resolve the new tag's
     # commit (`git -C <clone of imrohitagrawal/.github> rev-parse vN^{commit}`)
     # and replace both the SHA and the comment together -- and check
@@ -35,4 +35,4 @@ jobs:
     #
     # For a monorepo, add `python-directory`/`node-directory` inputs here
     # (see docs/repo-onboarding.md) -- both default to '.', the repo root.
-    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@6bd9eec68b0fa7db8b60de89ee541666893febaa # v6
+    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@c58ba53059c2a7f7c67f0b8051886f445c220010 # v7
