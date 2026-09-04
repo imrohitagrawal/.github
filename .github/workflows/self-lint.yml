@@ -197,6 +197,18 @@ jobs:
       - name: uv detection tests
         run: scripts/test-uv-detection.sh
 
+      # ISSUE #26: same extract-from-the-real-workflow pattern, for the two
+      # ADVISORY scanner steps' failure-to-run path. Unreachable from a
+      # self-test fixture in both directions: making `npm audit` fail to run
+      # needs an unreachable registry, while `npm ci` in the same job needs a
+      # reachable one - and a fixture whose only dependency is a `file:` path
+      # does not reproduce it either, because npm short-circuits and never
+      # contacts the registry. That gap is why an inverted severity
+      # (advisory on a real CVE, blocking when the scanner could not run)
+      # shipped and then blocked three unrelated PRs on a consumer repo.
+      - name: advisory crash-path tests
+        run: scripts/test-advisory-crash-path.sh
+
       # H6 (review finding): the reusable-workflow self-reference pin and the
       # duplicated Python/Node CI tool-version pins are hand-copied across
       # templates/caller-pr-quality.yml, scripts/retrofit-quality-gate.sh, and
