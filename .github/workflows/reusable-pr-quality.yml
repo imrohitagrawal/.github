@@ -994,6 +994,54 @@ jobs:
           steps.detect.outputs.node_package_manager == 'npm'
         working-directory: ${{ inputs.node-directory }}
         run: |
+          # BEGIN advisory-crash-verdict
+          # Everything between this marker and END advisory-crash-verdict is
+          # extracted verbatim and executed by scripts/test-advisory-crash-path.sh
+          # (run by self-lint.yml). Duplicated verbatim into the pip-audit
+          # advisory step below because shell functions do not persist across
+          # steps; the test extracts THIS copy and a consistency check asserts
+          # the two are byte-identical, so they cannot drift.
+          #
+          # WHY THIS EXISTS (issue #26). These two steps are ADVISORY: a real
+          # high-severity finding prints ::warning:: and exits 0, deliberately,
+          # so an unfixable transitive advisory cannot block every unrelated PR.
+          # Until this function they nonetheless exited NON-ZERO when the scanner
+          # failed to RUN - so "I could not look" was treated as strictly more
+          # severe than "I found a high-severity CVE". registry.npmjs.org
+          # returning 503 on /-/npm/v1/security/audits/quick blocked three
+          # unrelated PRs on imrohitagrawal/citevyn (runs 33813062396,
+          # 33817268463, 33858284222, 2026-09-03/04), each burning ~7 min before
+          # failing; every one went green on an unchanged re-run.
+          #
+          # The ORIGINAL rationale for hard-failing is preserved and is correct:
+          # a dead tool must not be indistinguishable from a clean run (the
+          # pre-WP5 `|| echo` made them identical). But indistinguishable and
+          # non-blocking are different properties. The fix for invisibility is
+          # visibility, not an exit code: this writes to $GITHUB_STEP_SUMMARY,
+          # which persists on the run page, where a red X only invites a re-run
+          # and is then forgotten. The BLOCKING variants (bandit baseline,
+          # pip-audit ignore-list) are deliberately NOT changed - crash-fails is
+          # coherent there, because they block on findings too.
+          #
+          # Retry is deliberately NOT the fix: npm's own fetch-retries=2 /
+          # fetch-timeout=300000 were already in play in all three runs above,
+          # which is why each took ~7 minutes. The outage outlasted the retry
+          # window, so more retries would only burn more runner time.
+          advisory_scanner_crashed() {
+            # $1 tool name, $2 the tool's exit code, $3 its captured output
+            printf '%s\n' "$3"
+            echo "::warning::$1 could not run (exit $2) - advisory coverage LOST for this run, not a finding. Not blocking: this step cannot block on a real advisory either (issue #26)."
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "### :warning: $1 did not run"
+                echo ""
+                echo "Exit code \`$2\`. This is an **advisory** scanner, so the job is not failed -"
+                echo "but **no $1 coverage was obtained for this run**. If this persists across"
+                echo "re-runs it is a broken scanner, not a transient outage, and wants investigating."
+              } >>"$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          # END advisory-crash-verdict
           set +e
           AUDIT_JSON=$(npm audit --audit-level=high --json)
           AUDIT_EXIT=$?
@@ -1002,13 +1050,13 @@ jobs:
             echo "npm audit: no high+ severity advisories."
             exit 0
           fi
+          # Discriminator UNCHANGED: npm audit --json carries a "vulnerabilities"
+          # key on a genuine report, and only an "error" key when the run failed.
           if echo "$AUDIT_JSON" | jq -e 'has("vulnerabilities")' > /dev/null 2>&1; then
             echo "$AUDIT_JSON" | jq -r '.metadata.vulnerabilities | to_entries[] | "\(.key): \(.value)"'
             echo "::warning::npm audit found high+ advisories (advisory step, not blocking)"
           else
-            echo "$AUDIT_JSON"
-            echo "::error::npm audit failed to run (registry/network error, not a finding) - exit $AUDIT_EXIT"
-            exit "$AUDIT_EXIT"
+            advisory_scanner_crashed "npm audit" "$AUDIT_EXIT" "$AUDIT_JSON"
           fi
 
       # H1: pnpm/yarn counterpart of the notice above - this step's own JSON
@@ -1336,6 +1384,54 @@ jobs:
         if: steps.detect.outputs.has_python == 'true' && steps.detect.outputs.has_pip_audit_ignore == 'false'
         working-directory: ${{ inputs.python-directory }}
         run: |
+          # BEGIN advisory-crash-verdict
+          # Everything between this marker and END advisory-crash-verdict is
+          # extracted verbatim and executed by scripts/test-advisory-crash-path.sh
+          # (run by self-lint.yml). Duplicated verbatim into the pip-audit
+          # advisory step below because shell functions do not persist across
+          # steps; the test extracts THIS copy and a consistency check asserts
+          # the two are byte-identical, so they cannot drift.
+          #
+          # WHY THIS EXISTS (issue #26). These two steps are ADVISORY: a real
+          # high-severity finding prints ::warning:: and exits 0, deliberately,
+          # so an unfixable transitive advisory cannot block every unrelated PR.
+          # Until this function they nonetheless exited NON-ZERO when the scanner
+          # failed to RUN - so "I could not look" was treated as strictly more
+          # severe than "I found a high-severity CVE". registry.npmjs.org
+          # returning 503 on /-/npm/v1/security/audits/quick blocked three
+          # unrelated PRs on imrohitagrawal/citevyn (runs 33813062396,
+          # 33817268463, 33858284222, 2026-09-03/04), each burning ~7 min before
+          # failing; every one went green on an unchanged re-run.
+          #
+          # The ORIGINAL rationale for hard-failing is preserved and is correct:
+          # a dead tool must not be indistinguishable from a clean run (the
+          # pre-WP5 `|| echo` made them identical). But indistinguishable and
+          # non-blocking are different properties. The fix for invisibility is
+          # visibility, not an exit code: this writes to $GITHUB_STEP_SUMMARY,
+          # which persists on the run page, where a red X only invites a re-run
+          # and is then forgotten. The BLOCKING variants (bandit baseline,
+          # pip-audit ignore-list) are deliberately NOT changed - crash-fails is
+          # coherent there, because they block on findings too.
+          #
+          # Retry is deliberately NOT the fix: npm's own fetch-retries=2 /
+          # fetch-timeout=300000 were already in play in all three runs above,
+          # which is why each took ~7 minutes. The outage outlasted the retry
+          # window, so more retries would only burn more runner time.
+          advisory_scanner_crashed() {
+            # $1 tool name, $2 the tool's exit code, $3 its captured output
+            printf '%s\n' "$3"
+            echo "::warning::$1 could not run (exit $2) - advisory coverage LOST for this run, not a finding. Not blocking: this step cannot block on a real advisory either (issue #26)."
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "### :warning: $1 did not run"
+                echo ""
+                echo "Exit code \`$2\`. This is an **advisory** scanner, so the job is not failed -"
+                echo "but **no $1 coverage was obtained for this run**. If this persists across"
+                echo "re-runs it is a broken scanner, not a transient outage, and wants investigating."
+              } >>"$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          # END advisory-crash-verdict
           # Round-2 Codex review: the snapshot itself must be generated OUTSIDE
           # `set +e` - otherwise a `pip freeze` failure (or an empty/partial file)
           # silently produces a clean-looking audit of nothing, not a crash. Only
@@ -1356,8 +1452,7 @@ jobs:
             echo "::warning::pip-audit reported findings (advisory step, not blocking)"
             exit 0
           fi
-          echo "::error::pip-audit failed to run (exit $PIP_AUDIT_EXIT) - not a genuine vulnerability report"
-          exit "$PIP_AUDIT_EXIT"
+          advisory_scanner_crashed "pip-audit" "$PIP_AUDIT_EXIT" "$OUTPUT"
 
       # BLOCKING WHEN python-directory ships `.pip-audit-ignore` (see "Detect project
       # layout" above and the ADVISORY step's comment for the file format and why
