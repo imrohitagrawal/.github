@@ -197,6 +197,23 @@ jobs:
       - name: uv detection tests
         run: scripts/test-uv-detection.sh
 
+      # The public-content guard (scripts/public_content_guard.py) runs on a
+      # developer's machine as a Claude Code hook, not in any workflow, so this
+      # is the only place its behaviour is checked. gitleaks comes from the
+      # release tarball, verified against the published checksum; the suite
+      # FAILS on CI if gitleaks is missing, so it cannot pass by never running.
+      - name: Install gitleaks 8.30.1 (checksum-verified)
+        run: |
+          set -euo pipefail
+          tarball=gitleaks_8.30.1_linux_x64.tar.gz
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$tarball"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Public-content guard tests
+        run: scripts/test-public-content-guard.sh
+
       # H6 (review finding): the reusable-workflow self-reference pin and the
       # duplicated Python/Node CI tool-version pins are hand-copied across
       # templates/caller-pr-quality.yml, scripts/retrofit-quality-gate.sh, and

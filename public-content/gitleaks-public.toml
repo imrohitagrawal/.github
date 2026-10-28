@@ -1,0 +1,54 @@
+# Public-content rules for gitleaks: things that should not be published from a PUBLIC repo
+# even though they are not credentials. Used by scripts/public_content_guard.py (the agent
+# hook), in a second pass beside gitleaks' default secret rules. See docs/public-content-guard.md.
+#
+# This file is public. Terms that must stay private (private project names and the like)
+# are NOT here: the guard reads them from a private file on the owner's machine and adds
+# them as rule `private-term` at run time, so the list itself is never published.
+
+title = "public-content"
+
+# NOT layered on the default rules: their global allowlist silently drops any match
+# containing /home/ (measured, gitleaks 8.30.1). The guard runs the default secret rules
+# as a separate pass.
+
+[[rules]]
+id = "home-folder-path"
+description = "A path inside a person's home folder (names the person and the machine)"
+regex = '''(?:/Users/|/home/)[A-Za-z0-9][A-Za-z0-9._-]*/|[A-Za-z]:\\Users\\[A-Za-z0-9][A-Za-z0-9._-]*\\'''
+keywords = ["/users/", "/home/", "\\users\\"]
+
+  [[rules.allowlists]]
+  description = "shared, CI and container home folders that name no person"
+  regexTarget = "match"
+  regexes = [
+    '''(?i)^/(?:home/(?:runner|node|linuxbrew|vscode|codespace|ubuntu|ec2-user|user)|Users/Shared)/''',
+  ]
+
+[[rules]]
+id = "home-folder-path-encoded"
+description = "A home folder path in Claude Code's encoded form (e.g. a projects folder name)"
+regex = '''-Users-[A-Za-z0-9][A-Za-z0-9._]*-[A-Za-z0-9]'''
+keywords = ["-users-"]
+
+[[rules]]
+id = "personal-email"
+description = "An email address (not an example, test or no-reply address)"
+regex = '''\b[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b'''
+keywords = ["@"]
+
+  [[rules.allowlists]]
+  description = "example, test and no-reply domains (anchored: the match is the whole address; RE2 has no lookahead)"
+  regexTarget = "match"
+  regexes = [
+    '''(?i)@(?:[A-Za-z0-9-]+\.)*example\.(?:com|org|net)$''',
+    '''(?i)@(?:[A-Za-z0-9-]+\.)*(?:test|invalid|localhost|example)$''',
+    '''(?i)@users\.noreply\.github\.com$''',
+    '''(?i)^(?:no-?reply|noreply\+[^@]*|git|dependabot\[bot\])@''',
+  ]
+
+[[rules]]
+id = "agent-transcript"
+description = "A Claude Code session transcript file name (its folder is caught by home-folder-path-encoded)"
+regex = '''[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl'''
+keywords = [".jsonl"]
