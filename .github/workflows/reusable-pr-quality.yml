@@ -400,6 +400,9 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/public-content-bin" gitleaks
           PATH="$RUNNER_TEMP/public-content-bin:$PATH" python3 -I "$scanner/public-content/scan.py" ci \
             --repo "$GITHUB_WORKSPACE" --base "$BASE_SHA" --head "$HEAD_SHA"
+          # self-test.yml's assert-public-content-scan-ran requires this line in a
+          # fixture job's log: it proves the scan ran to completion on a pull request.
+          echo "public-content guard: scanned this pull request: clean"
 
       # ---------- Cross-language security patterns ----------
       # NOT "always run": the `if` requires the repo to ship its own semgrep config -

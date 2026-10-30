@@ -838,6 +838,43 @@ jobs:
   # reusable workflow's documented root-scoped detection, not something this
   # file can fix, and is written into the round-4 backlog rather than
   # silently absorbed.
+  # The public-content scan runs only on pull requests from a public repository
+  # (a push to main skips it by design), so this assertion runs only on pull
+  # requests. It proves the reusable workflow dispatched the scan and that the
+  # scan ran to completion in the python-only fixture job: removing the step,
+  # or breaking its `if:`, turns the required self-test check red. That the scan
+  # blocks on prohibited content is proven by scripts/test-public-content-*.sh
+  # (self-lint.yml), which run the same scanner against planted content; a
+  # fixture cannot plant content here, because the step scans this pull
+  # request's own title, body and commits.
+  assert-public-content-scan-ran:
+    name: assert python-only ran the public-content scan
+    needs: [python-only]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the public-content scan ran to completion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: python-only / quality-gate
+          ACTUAL_RESULT: ${{ needs.python-only.result }}
+          EXPECT_RESULT: success
+          EXPECT_PATTERN: '^[^ ]+ public-content guard: scanned this pull request: clean$'
+          FAILURE_HINT: "The public-content scan did not run to completion in the python-only fixture job. Its steps in reusable-pr-quality.yml run only on pull_request events from a public repository; a green job without this line means the guard was skipped for every public caller."
+        run: scripts/assert-fixture-job.sh
+
   assert-semgrep-actually-ran:
     name: assert root-makefile-and-semgrep really ran semgrep
     needs: [root-makefile-and-semgrep]
@@ -1039,6 +1076,7 @@ jobs:
       - assert-semgrep-actually-ran
       - assert-yarn-install-ran
       - assert-node-build-violation-blocks
+      - assert-public-content-scan-ran
       - retrofit-script-tests
     if: always()
     runs-on: ubuntu-latest
@@ -1070,6 +1108,8 @@ jobs:
           YARN_ASSERT: ${{ needs.assert-yarn-install-ran.result }}
           NODE_BUILD_ASSERT: ${{ needs.assert-node-build-violation-blocks.result }}
           RETROFIT_SCRIPT_TESTS: ${{ needs.retrofit-script-tests.result }}
+          PUBLIC_CONTENT_ASSERT: ${{ needs.assert-public-content-scan-ran.result }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "node-only: $NODE_ONLY"
           echo "node-pnpm-only: $NODE_PNPM_ONLY"
@@ -1093,7 +1133,15 @@ jobs:
           echo "assert-yarn-install-ran: $YARN_ASSERT"
           echo "assert-node-build-violation-blocks: $NODE_BUILD_ASSERT"
           echo "retrofit-script-tests: $RETROFIT_SCRIPT_TESTS"
+          echo "assert-public-content-scan-ran: $PUBLIC_CONTENT_ASSERT ($EVENT_NAME)"
           FAILED=0
+          # The public-content assertion runs only on pull requests; anywhere else
+          # it is skipped, and only then is "skipped" a pass.
+          if [ "$EVENT_NAME" = pull_request ]; then
+            [ "$PUBLIC_CONTENT_ASSERT" = success ] || FAILED=1
+          else
+            [ "$PUBLIC_CONTENT_ASSERT" = skipped ] || FAILED=1
+          fi
           for r in "$NODE_ONLY" "$NODE_PNPM_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$ROOT_MAKEFILE_SEMGREP" "$MAKEFILE_TRUST_POSITIVE" "$PYTHON_DEV_GROUP" \
             "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$BANDIT_BLOCKING_ASSERT" \
             "$NPM_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_ADVISORY_ASSERT" \
