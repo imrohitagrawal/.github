@@ -871,7 +871,9 @@ jobs:
           TARGET_JOB: python-only / quality-gate
           ACTUAL_RESULT: ${{ needs.python-only.result }}
           EXPECT_RESULT: success
-          EXPECT_PATTERN: '^[^ ]+ public-content guard: scanned this pull request: clean$'
+          # Anchored to the runner's timestamp: the step's env block prints the PR
+          # body's later lines raw, without one, so body text cannot stand in.
+          EXPECT_PATTERN: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z public-content guard: scanned this pull request: clean$'
           FAILURE_HINT: "The public-content scan did not run to completion in the python-only fixture job. Its steps in reusable-pr-quality.yml run only on pull_request events from a public repository; a green job without this line means the guard was skipped for every public caller."
         run: scripts/assert-fixture-job.sh
 
