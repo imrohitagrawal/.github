@@ -1,0 +1,7 @@
+#!/bin/sh
+# git pre-push hook for the public-content guard: blocks a push to a PUBLIC repository
+# when what it publishes holds a secret, a home-folder path, an email address, a transcript
+# name, an agent id or a private term. All logic lives in public-content/scan.py; see
+# docs/public-content-guard.md. Any failure (no python3, no gitleaks) blocks the push.
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) || exit 2
+exec python3 "$here/../public-content/scan.py" pre-push "$@"

@@ -124,6 +124,11 @@ jobs:
       # to the two pre-existing files it was actually verified against;
       # this repo's own two new workflow files are scanned with zero
       # suppressions.
+      # The third -ignore: actionlint 1.7.12 (this pinned image) does not yet know
+      # the job.workflow_repository / job.workflow_sha contexts that the
+      # public-content step uses to check out the scanner from this workflow's own
+      # commit. They are documented GitHub contexts; the regex names exactly those
+      # two properties, so any other unknown property is still reported.
       - name: "actionlint (+ shellcheck): reusable-pr-quality.yml, caller-pr-quality.yml"
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
@@ -131,6 +136,7 @@ jobs:
             -color \
             -ignore 'SC2015' \
             -ignore 'SC2129' \
+            -ignore 'property "workflow_(repository|sha)" is not defined' \
             .github/workflows/reusable-pr-quality.yml \
             templates/caller-pr-quality.yml
 
@@ -166,11 +172,13 @@ jobs:
       # over-claim this round is cleaning up elsewhere. The shell expands the
       # glob at the repo root before docker sees it, and the resulting
       # relative paths are correct inside the mount.
-      - name: "shellcheck: scripts/*.sh"
+      # hooks/pre-push is the guard's git hook: a shell file outside scripts/,
+      # so it is named here explicitly.
+      - name: "shellcheck: scripts/*.sh, hooks/pre-push"
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
             koalaman/shellcheck@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d \
-            scripts/*.sh
+            scripts/*.sh hooks/pre-push
 
       # ROUND-4 (HIGH): unit tests for reusable-pr-quality.yml's
       # Makefile-trust helpers, extracted from that workflow file itself so
@@ -196,6 +204,42 @@ jobs:
       # detection on for every self-test job at once.
       - name: uv detection tests
         run: scripts/test-uv-detection.sh
+
+      # The public-content guard (public-content/scan.py, hooks/pre-push, the
+      # installer) runs mostly on a developer's machine, so these suites are where
+      # its behaviour is checked. gitleaks comes from the release tarball, verified
+      # against the published checksum; the suites FAIL when gitleaks is missing,
+      # so they cannot pass by never running.
+      - name: Install gitleaks 8.30.1 (checksum-verified)
+        run: |
+          set -euo pipefail
+          tarball=gitleaks_8.30.1_linux_x64.tar.gz
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$tarball"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
+
+      - name: Public-content guard tests
+        run: scripts/test-public-content-guard.sh
+
+      - name: Public-content guard tests (added-content rule)
+        run: scripts/test-public-content-added-lines.sh
+
+      - name: Public-content guard tests (file formats)
+        run: scripts/test-public-content-formats.sh
+
+      - name: Public-content guard tests (zip local headers)
+        run: scripts/test-public-content-zip-headers.sh
+
+      - name: Public-content guard tests (archives from common tools)
+        run: scripts/test-public-content-real-tools.sh
+
+      - name: Public-content guard tests (tar header records)
+        run: scripts/test-public-content-tar-records.sh
+
+      - name: Public-content guard tests (block messages)
+        run: scripts/test-public-content-messages.sh
 
       # H6 (review finding): the reusable-workflow self-reference pin and the
       # duplicated Python/Node CI tool-version pins are hand-copied across
