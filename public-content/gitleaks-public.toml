@@ -1,0 +1,96 @@
+# Public-content rules for gitleaks: things that should not be published from a PUBLIC repo
+# even though gitleaks' default rules do not treat them as credentials. Used by
+# public-content/scan.py (the git pre-push hook and the CI step), in a second pass beside
+# gitleaks' default secret rules. See docs/public-content-guard.md.
+#
+# This file is public. Terms that must stay private (private project names and the like)
+# are NOT here: the guard reads them at run time from a private list outside the repository
+# and matches them itself (reported as `private-term`), so the list is never published.
+#
+# Regexes are RE2 (gitleaks' engine): no look-behind or look-ahead. The guard also compiles
+# them with Python's `re` to mask places in its report, so keep them valid in both.
+
+title = "public-content"
+
+# NOT layered on the default rules: their global allowlist silently drops any match
+# containing /home/ (measured, gitleaks 8.30.1). The guard runs the default secret rules
+# as a separate pass.
+
+[[rules]]
+id = "home-folder-path"
+description = "A path inside a person's home folder, with or without a slash after the name; Windows paths also with doubled backslashes, as JSON writes them"
+
+# Matched wherever it appears, also inside a file:// URL. A name may start with a letter, a
+# digit, `_` or any non-ASCII character; `$USER`, `<name>` and `~` forms are not names. Windows
+# `users` in any case. A known false alarm, accepted: a URL or relative path that happens to
+# contain a `home` folder followed by a word (a site's about page under `home`).
+regex = '''(?:/Users/|/home/)(?:[A-Za-z0-9_]|[^\x00-\x7f])(?:[A-Za-z0-9._-]|[^\x00-\x7f])*/?|[A-Za-z]:\\{1,2}(?i:users)\\{1,2}(?:[A-Za-z0-9_]|[^\x00-\x7f])(?:[A-Za-z0-9._-]|[^\x00-\x7f])*(?:\\{1,2})?'''
+keywords = ["/users/", "/home/", "\\users\\"]
+
+  [[rules.allowlists]]
+  description = "shared, CI and container home folders, and placeholder names, that name no person"
+  regexes = [
+    '''(?i)^/(?:home/(?:runner|node|linuxbrew|vscode|codespace|ubuntu|ec2-user|user|app|appuser|nonroot|pwuser|jovyan|username|yourname|your-username|your_username)|Users/(?:Shared|runner|username|yourname|your-username|your_username))(?:/|$)''',
+    '''(?i)^[A-Za-z]:\\{1,2}Users\\{1,2}(?:Public|Default)(?:\\|$)''',
+  ]
+
+[[rules]]
+id = "home-folder-path-encoded"
+description = "A macOS home folder path in Claude Code's encoded form (a projects folder name)"
+regex = '''-Users-[A-Za-z0-9][A-Za-z0-9._]*-[A-Za-z0-9]'''
+keywords = ["-users-"]
+
+# An email address. The address is capture group 1 (secretGroup), so the allowlist below
+# sees just the address. The text before it may not be `://` (or `//`): that is the user
+# part of a URL (`https://key@sentry.example/1`), not an address.
+[[rules]]
+id = "personal-email"
+description = "An email address (not an example, test, no-reply or GitHub service address)"
+regex = '''(?:^/?|[^A-Za-z0-9._%+/-]|[^:/]/)([A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b'''
+secretGroup = 1
+keywords = ["@"]
+
+  [[rules.allowlists]]
+  description = "example, test and no-reply domains, GitHub's own service addresses, image names like logo@2x.png"
+  regexes = [
+    '''(?i)@(?:[A-Za-z0-9-]+\.)*example\.(?:com|org|net)$''',
+    '''(?i)@(?:[A-Za-z0-9-]+\.)*(?:test|invalid|localhost|example)$''',
+    '''(?i)@users\.noreply\.github\.com$''',
+    '''(?i)^(?:support|noreply|no-reply|actions)@github\.com$''',
+    '''(?i)^noreply@anthropic\.com$''',
+    '''(?i)^git@(?:github\.com|gitlab\.com|bitbucket\.org)$''',
+    '''(?i)@\d+(?:\.\d+)?x\.(?:png|jpe?g|webp|gif|svg|avif)$''',
+  ]
+
+[[rules]]
+id = "agent-transcript"
+description = "A Claude Code session transcript file name (its folder is caught by home-folder-path-encoded)"
+regex = '''[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl'''
+keywords = [".jsonl"]
+
+[[rules]]
+id = "agent-tool-id"
+description = "A Claude tool-call id (toolu_ or srvtoolu_ and a long id); the bare prefix passes"
+regex = '''\b(?:srv)?toolu_[A-Za-z0-9]{20,}'''
+keywords = ["toolu_"]
+
+# An id right after the word transcript or session: "session <uuid>", "transcript `<8 hex>`",
+# "session_id=<hex>", all-digit ids included. A bare word ("the session_id column") or a
+# 7-character commit id with no such word passes.
+[[rules]]
+id = "agent-conversation-id"
+description = "A session or transcript id written next to the word session or transcript"
+regex = '''(?i)\b(?:transcript|session)(?:[ _-]?id)?[ \t]*[:=#]?[ \t]*[`'"]?[0-9a-f]{8}(?:(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]*)\b'''
+keywords = ["transcript", "session"]
+
+[[rules]]
+id = "agent-session-link"
+description = "A link to a Claude Code session (claude.ai alone passes)"
+regex = '''(?i)\bclaude\.ai/code/sessions?[/_-]?[A-Za-z0-9_-]{6,}'''
+keywords = ["claude.ai/code/session"]
+
+[[rules]]
+id = "openrouter-api-key"
+description = "An OpenRouter API key (gitleaks' default rules do not know them)"
+regex = '''\bsk-or-v1-[0-9a-f]{64}\b'''
+keywords = ["sk-or-v1-"]

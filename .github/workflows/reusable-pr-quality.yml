@@ -26,6 +26,9 @@ name: PR Quality Gate (reusable)
 #     audit-ci config - see WP5 below)
 #   - Cross-language: gitleaks (secrets, always), semgrep OSS (only if the repo
 #     ships its own semgrep config - see the step)
+#   - Public repositories, pull_request events only: the public-content scan
+#     (public-content/scan.py from this workflow's own commit, with gitleaks
+#     8.30.1) - see the step
 #
 # WP6 (per-stack directory inputs): `python-directory`/`node-directory` let a
 # monorepo (Python in one subdirectory, Node in another - e.g. citevyn's
@@ -318,6 +321,88 @@ jobs:
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------- Public repositories only: public-content scan ----------
+      # Blocks a PR on a PUBLIC caller whose title, body or new commits (messages,
+      # author and committer addresses, file contents, file names) hold a
+      # home-folder path, an email address, a transcript name, an agent id or a
+      # secret. It backs up the git pre-push hook
+      # (docs/public-content-guard.md), which also checks private terms but runs
+      # only where it is installed. Blocking from day one, with no exemption for
+      # text that is already public: every file the PR adds or changes is checked
+      # whole, so an old match in an edited file fails too. No private terms here:
+      # they are private, so CI has none.
+      #
+      # The scanner must come from the SAME commit as this reusable workflow, not
+      # from the caller's tree (which the PR controls) and not from a branch tip.
+      # job.workflow_repository / job.workflow_sha name the file that defines this
+      # job (GitHub's contexts reference; not on GitHub Enterprise Server). It is
+      # checked out beside the caller's tree and moved to RUNNER_TEMP at once, so
+      # no later step (lint, tests, make ci) ever sees it.
+      #
+      # The PR title and body reach the scanner ONLY through env vars and are read
+      # by Python as data; they are never interpolated into the script, so text
+      # like $(...) in a PR body is inert.
+      #
+      # If either context were empty, actions/checkout would fall back to the
+      # caller's own repository and ref, so the PR would supply its own scanner.
+      # This step stops the job first. scripts/test-public-content-guard.sh runs
+      # the marked function directly.
+      - name: Check the public-content scanner's repository and commit
+        if: github.event_name == 'pull_request' && github.event.repository.private == false
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          # BEGIN public-content-ref-check
+          check_public_content_ref() { # $1 = repository (owner/name), $2 = commit sha
+            if ! printf '%s\n' "$1" | grep -Eqx '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'; then
+              echo "::error::job.workflow_repository is empty or not owner/name; refusing to check out the scanner" >&2
+              return 1
+            fi
+            if ! printf '%s\n' "$2" | grep -Eqx '[0-9a-f]{40}'; then
+              echo "::error::job.workflow_sha is empty or not a 40-character commit sha; refusing to check out the scanner" >&2
+              return 1
+            fi
+          }
+          # END public-content-ref-check
+          check_public_content_ref "$WORKFLOW_REPOSITORY" "$WORKFLOW_SHA"
+
+      - name: Check out the public-content scanner (this workflow's own commit)
+        if: github.event_name == 'pull_request' && github.event.repository.private == false
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .public-content-scanner
+          persist-credentials: false
+
+      # gitleaks comes from the release tarball, verified against the published
+      # checksum (gitleaks_8.30.1_checksums.txt), the same way self-lint.yml
+      # installs it for the guard's own tests.
+      - name: Public-content scan (PR title, body and new commits)
+        if: github.event_name == 'pull_request' && github.event.repository.private == false
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/public-content-scanner"
+          rm -rf "$scanner"
+          mv "$GITHUB_WORKSPACE/.public-content-scanner" "$scanner"
+          tarball=gitleaks_8.30.1_linux_x64.tar.gz
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$tarball"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/public-content-bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/public-content-bin" gitleaks
+          PATH="$RUNNER_TEMP/public-content-bin:$PATH" python3 -I "$scanner/public-content/scan.py" ci \
+            --repo "$GITHUB_WORKSPACE" --base "$BASE_SHA" --head "$HEAD_SHA"
+          # self-test.yml's assert-public-content-scan-ran requires this line in a
+          # fixture job's log: it proves the scan ran to completion on a pull request.
+          echo "public-content guard: scanned this pull request: clean"
 
       # ---------- Cross-language security patterns ----------
       # NOT "always run": the `if` requires the repo to ship its own semgrep config -

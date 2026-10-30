@@ -1,0 +1,9 @@
+# Email addresses that are public on purpose. The public-content guard never reports these,
+# in any case and in any place (file content, commit messages, author and committer lines).
+# One address per line; `#` starts a comment. Every other address is still reported.
+#
+# Adding an address here publishes the decision that it may appear in every repository this
+# guard covers. The CI step prints a warning on any pull request that changes this file.
+
+rohit.ra.agrawal@gmail.com
+rohit@stackclimb.com

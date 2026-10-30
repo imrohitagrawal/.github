@@ -10,6 +10,7 @@ Global GitHub defaults, reusable CI gates, and Codex review guidance for `@imroh
 - **Reusable GitHub Actions workflows** — see `.github/workflows/`.
 - **Templates** that every target repo can copy: `AGENTS.md` (Codex review guidance), `CODEOWNERS`, dependabot config, language Makefiles.
 - **Documentation** for onboarding, branch protection, and Codex review setup.
+- **Public-content guard** — a git pre-push hook and a CI step that stop secrets, home-folder paths, email addresses, transcript names, agent ids and private terms (pushes only) from being pushed to, or proposed in a pull request on, a public repository. Text already public is no reason to pass. `gh` and GitHub MCP calls are not covered yet. See [`docs/public-content-guard.md`](docs/public-content-guard.md).
 
 ## What this repository does NOT do
 
@@ -81,6 +82,7 @@ Two things shrink the manual part considerably (WP10):
   dependabot.yml                 # WP2: dependabot config for this repo's own github-actions ecosystem
 scripts/
   retrofit-quality-gate.sh       # WP10: automates onboarding steps 1-6 for an EXISTING repo
+  install-public-content-guard.sh  # Installs the public-content guard for a user account
 templates/
   AGENTS.md                      # Codex review guidance
   CODEOWNERS
@@ -92,6 +94,12 @@ docs/
   repo-onboarding.md
   codex-pr-review.md
   branch-protection.md
+  public-content-guard.md
+hooks/
+  pre-push                       # Public-content guard: git pre-push hook
+public-content/
+  scan.py                        # Public-content guard: the scanner
+  gitleaks-public.toml           # Public-content rules
 AGENTS.md                        # WP1: this repo's own Codex review guidance (adapted from templates/AGENTS.md)
 README.md
 CONTRIBUTING.md
