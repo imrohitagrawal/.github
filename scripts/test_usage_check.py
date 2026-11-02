@@ -118,6 +118,15 @@ class Counting(unittest.TestCase):
         self.assertEqual(code, uc.USAGE)
 
 
+class ReportShapes(unittest.TestCase):
+    def test_the_documented_casing_and_qualified_names_also_count(self):
+        """Red if only the live report's exact casing, or bare repository names, are understood."""
+        self.assertEqual(run([row(60, product="Actions", unit="minutes")])[0], uc.USAGE)
+        self.assertEqual(run([row(1000, repo="someone/pub-a", product="Actions", unit="minutes"), row(1)])[0], uc.OK)
+        self.assertEqual(run([row(60, repo="someone/repo-a")])[0], uc.USAGE)
+        self.assertEqual(run([row(1000, sku="Actions storage", unit="gigabyteHours"), row(1)])[0], uc.OK)
+
+
 class Unreadable(unittest.TestCase):
     def assertUnreadable(self, **kw):
         self.assertEqual(run(**kw)[0], uc.UNREADABLE)
@@ -140,7 +149,7 @@ class Unreadable(unittest.TestCase):
 
     def test_renamed_unit(self):
         """Red if a renamed unit is skipped silently."""
-        self.assertUnreadable(items=[row(9999, unit="minutes")])
+        self.assertUnreadable(items=[row(9999, unit="seconds")])
 
     def test_unknown_sku_family(self):
         """Red if a new runner family is counted as Linux."""
@@ -283,7 +292,7 @@ class Pinned(unittest.TestCase):
     def test_odd_minutes_rows_beside_a_good_row_are_refused(self):
         """Red if minutes under an unfamiliar product or name vanish while the good row keeps it ok."""
         for odd in (
-            row(300, product="Actions", sku="Compute - MACOS"),
+            row(300, sku="Compute - MACOS"),
             row(300, product="actions-hosted", sku="actions macos 3-core"),
             row(5000, product="hosted-runners", sku="Linux 2-core"),
             row(9999, product="Actions2"),

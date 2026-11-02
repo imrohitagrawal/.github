@@ -159,15 +159,17 @@ def read_rows(body, public, now):
             raise Unreadable
         if number(row.get("netAmount")) > 0:
             charged = True
-        if row.get("product") != "actions":
+        # The live report and GitHub's documented example differ in casing and in repository names.
+        unit = str(row.get("unitType")).lower()
+        if str(row.get("product")).lower() != "actions":
             names = f"{row.get('product')} {row.get('sku')}".lower()
-            if str(row.get("unitType")).lower() == "minutes" or "actions" in names:  # new names must not vanish
+            if unit == "minutes" or "actions" in names:  # new names must not vanish
                 raise Unreadable
             continue
-        if row.get("unitType") == "GigabyteHours":
+        if unit == "gigabytehours":
             continue
         seen = True
-        if row.get("unitType") != "Minutes" or not isinstance(row.get("repositoryName"), str):
+        if unit != "minutes" or not isinstance(row.get("repositoryName"), str):
             raise Unreadable
         minutes = number(row.get("quantity")) * factor_for(row.get("sku"))
         day = row.get("date")
@@ -177,7 +179,7 @@ def read_rows(body, public, now):
             day = dt.date.fromisoformat(day[:10])
         except ValueError:
             raise Unreadable from None
-        if row["repositoryName"] in public:
+        if row["repositoryName"].rsplit("/", 1)[-1] in public:
             continue
         total += minutes
         if day < now.date():
