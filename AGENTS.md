@@ -24,11 +24,19 @@ into required branch protection):
 - `.github/workflows/self-lint.yml` — `actionlint` (with bundled
   `shellcheck` on every embedded `run:` block) on
   `reusable-pr-quality.yml`/`templates/caller-pr-quality.yml` and this
-  repo's own two self-test/self-lint workflows, plus `markdownlint` on
+  repo's own self-test/self-lint/usage-check workflows, plus `markdownlint` on
   `docs/*.md`, `README.md`, `templates/AGENTS.md`, and this file
   (`AGENTS.md` at the repo root - round-2 review fix, real Codex finding:
   an earlier version of this list omitted this file even though
   self-lint.yml's own command already covers it).
+
+`.github/workflows/usage-check.yml` is separate from the gate and no consumer
+calls it: a daily, read-only look at this account's Actions usage. Its log is
+public, so it prints one line and keeps every threshold in secrets; a red run
+is how it reaches the owner, by GitHub's failed-run email. One red run on
+the 1st of each month is deliberate; do not fix or disable it. What a red run
+means and what to do is in the owner's private notes: search them for
+`usage-check`.
 
 A change to this repo is really a change to what every consumer repo trusts —
 review it with that in mind, not as an isolated docs/CI tweak.

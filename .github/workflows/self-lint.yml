@@ -146,7 +146,8 @@ jobs:
             rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
             -color \
             .github/workflows/self-test.yml \
-            .github/workflows/self-lint.yml
+            .github/workflows/self-lint.yml \
+            .github/workflows/usage-check.yml
 
       # Pinned CLI version, same pattern as audit-ci in reusable-pr-quality.yml.
       - name: markdownlint
@@ -204,6 +205,10 @@ jobs:
       # detection on for every self-test job at once.
       - name: uv detection tests
         run: scripts/test-uv-detection.sh
+
+      # Standard library only, no network: every call to GitHub is injected.
+      - name: Usage check tests
+        run: python3 scripts/test_usage_check.py
 
       # The public-content guard (public-content/scan.py, hooks/pre-push, the
       # installer) runs mostly on a developer's machine, so these suites are where
