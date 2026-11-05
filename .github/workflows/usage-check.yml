@@ -1,0 +1,31 @@
+name: usage-check
+
+# A daily look at this account's Actions usage. The script prints one line; it holds no figures.
+# No pull_request trigger, so the token is never given to a change proposed from outside.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Go red after a good read, to test that the failed-run email arrives
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check
+        env:
+          USAGE_CHECK_TOKEN: ${{ secrets.USAGE_CHECK_TOKEN }}
+          USAGE_CHECK_TARGET: ${{ secrets.USAGE_CHECK_TARGET }}
+          USAGE_CHECK_LIMITS: ${{ secrets.USAGE_CHECK_LIMITS }}
+          USAGE_CHECK_FORCE: ${{ inputs.force && '1' || secrets.USAGE_CHECK_FORCE }}
+        run: /usr/bin/python3 -I scripts/usage_check.py
