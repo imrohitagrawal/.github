@@ -126,6 +126,12 @@ class ReportShapes(unittest.TestCase):
         self.assertEqual(run([row(60, repo="someone/repo-a")])[0], uc.USAGE)
         self.assertEqual(run([row(1000, sku="Actions storage", unit="gigabyteHours"), row(1)])[0], uc.OK)
 
+    def test_only_this_owners_exact_name_is_public(self):
+        """Red if a name is judged public by its last segment, without the owner or the exact form."""
+        for name in ("stranger/pub-a", "a/someone/pub-a", "/pub-a", "someone/pub-a/", "someone/pub-b"):
+            with self.subTest(name=name):
+                self.assertEqual(run([row(1000, repo=name), row(1)])[0], uc.USAGE)
+
 
 class Unreadable(unittest.TestCase):
     def assertUnreadable(self, **kw):

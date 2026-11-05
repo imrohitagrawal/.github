@@ -126,7 +126,7 @@ def read_public_names(owner, token, fetch):
             if not (isinstance(repo, dict) and isinstance(repo.get("name"), str)):
                 raise Unreadable
             if repo.get("private") is False:
-                names.add(repo["name"])
+                names.update((repo["name"], f"{owner}/{repo['name']}"))  # the report may use either form
         if len(body) < PAGE_SIZE:
             if not names:
                 raise Unreadable
@@ -159,7 +159,7 @@ def read_rows(body, public, now):
             raise Unreadable
         if number(row.get("netAmount")) > 0:
             charged = True
-        # The live report and GitHub's documented example differ in casing and in repository names.
+        # The live report and GitHub's documented example differ in casing.
         unit = str(row.get("unitType")).lower()
         if str(row.get("product")).lower() != "actions":
             names = f"{row.get('product')} {row.get('sku')}".lower()
@@ -179,7 +179,7 @@ def read_rows(body, public, now):
             day = dt.date.fromisoformat(day[:10])
         except ValueError:
             raise Unreadable from None
-        if row["repositoryName"].rsplit("/", 1)[-1] in public:
+        if row["repositoryName"] in public:
             continue
         total += minutes
         if day < now.date():
