@@ -573,6 +573,52 @@ else:
     else:
         bad("pr-quality: the scan step passes --event-path \"$GITHUB_EVENT_PATH\"", "not found")
 
+# The scanner is checked out from the workflow's own repository and commit, and only after the
+# step that refuses an empty one: if either context were empty, actions/checkout would fall back
+# to the caller's own tree, which would then supply its own scanner.
+TOLERATE = re.compile(r"\|\|\s*(?:true|:)(?![\w-])|;\s*(?:true|:)\s*$|\bset\s+[-+]?\w*\+e|\bset\s+\+\w*e|\|\|\s*exit\s+0\b")
+if isinstance(wf, dict):
+    for j in JOBS:
+        steps = steps_of(jobs.get(j))
+        scanner = [n for n, st in enumerate(steps) if isinstance(st, dict)
+                   and str(st.get("uses", "")).startswith("actions/checkout@")
+                   and isinstance(st.get("with"), dict) and st["with"].get("path") == ".public-content-scanner"]
+        checks = [n for n, st in enumerate(steps) if isinstance(st, dict)
+                  and re.search(r'(?m)^\s*check_public_content_ref "\$WORKFLOW_REPOSITORY" "\$WORKFLOW_SHA"\s*$', str(st.get("run", "")))
+                  and (st.get("env") or {}).get("WORKFLOW_REPOSITORY") == "${{ job.workflow_repository }}"
+                  and (st.get("env") or {}).get("WORKFLOW_SHA") == "${{ job.workflow_sha }}"]
+        # Red when: the ref check is removed, stops being called, or moves after the scanner checkout.
+        if len(scanner) == 1 and checks and min(checks) < scanner[0]:
+            ok("shape: job %s runs the ref check before the scanner checkout" % j)
+        else:
+            bad("shape: job %s runs the ref check before the scanner checkout" % j,
+                "scanner checkouts at %r, ref checks at %r" % (scanner, checks))
+        w = steps[scanner[0]]["with"] if len(scanner) == 1 else {}
+        # Red when: the scanner checkout's repository or ref is changed (or dropped, which falls back to the caller's tree).
+        if w.get("repository") == "${{ job.workflow_repository }}" and w.get("ref") == "${{ job.workflow_sha }}":
+            ok("shape: job %s checks the scanner out from job.workflow_repository at job.workflow_sha" % j)
+        else:
+            bad("shape: job %s checks the scanner out from job.workflow_repository at job.workflow_sha" % j,
+                "repository=%r ref=%r" % (w.get("repository"), w.get("ref")))
+        tolerant = [ln.strip() for st in steps if is_scan(st)
+                    for ln in str(st.get("run", "")).split("\n") if TOLERATE.search(_strip_comment(ln))]
+        # Red when: a scan step tolerates a failure (`|| true`, `|| :`, `; true`, `set +e`, `|| exit 0`).
+        if tolerant:
+            bad("shape: job %s's scan step never tolerates a failure" % j, tolerant[0])
+        else:
+            ok("shape: job %s's scan step never tolerates a failure" % j)
+
+# The clean line is printed by scan.py after a real scan only: a workflow that echoes it would
+# print "clean" after a private repository's "not a public repository" notice too.
+for label, path in (("reusable", REUSABLE), ("pr-quality", PRQ)):
+    echoed = [ln for ln in path.read_text(encoding="utf-8").splitlines()
+              if re.search(r"\becho\b.*scanned this pull request", ln)]
+    # Red when: a workflow echoes the pull request clean line itself instead of leaving it to scan.py.
+    if echoed:
+        bad("%s: no step echoes the pull request clean line" % label, echoed[0].strip())
+    else:
+        ok("%s: no step echoes the pull request clean line" % label)
+
 print()
 print("%d passed, %d failed, 0 skipped" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

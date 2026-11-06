@@ -873,7 +873,7 @@ jobs:
           EXPECT_RESULT: success
           # Anchored to the runner's timestamp: the step's env block prints the PR
           # body's later lines raw, without one, so body text cannot stand in.
-          EXPECT_PATTERN: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z public-content guard: scanned this pull request: clean$'
+          EXPECT_PATTERN: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z public-content guard: scanned this pull request: clean for the public rules \(private terms are not checked in CI\)$'
           FAILURE_HINT: "The public-content scan did not run to completion in the python-only fixture job. Its steps in reusable-pr-quality.yml run only on pull_request events from a public repository; a green job without this line means the guard was skipped for every public caller."
         run: scripts/assert-fixture-job.sh
 
@@ -921,7 +921,7 @@ jobs:
           EXPECT_RESULT: success
           # Anchored to the runner's timestamp, so the echoed script text of the
           # step cannot stand in for the line it prints.
-          EXPECT_PATTERN: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z public-content guard: scanned this pull request: clean$'
+          EXPECT_PATTERN: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z public-content guard: scanned this pull request: clean for the public rules \(private terms are not checked in CI\)$'
           FAILURE_HINT: "reusable-public-content.yml did not scan this pull request to completion in its public-content job. A green job without this line means the pull_request branch never ran."
         run: scripts/assert-fixture-job.sh
 

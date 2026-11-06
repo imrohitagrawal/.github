@@ -206,14 +206,13 @@ def load_terms() -> Terms:
 
 
 _PUBLIC_CACHE: list[re.Pattern[str]] | None = None
-_PUBLIC_IDS: set[str] | None = None
 
 
 def _public_regexes() -> list[re.Pattern[str]]:
     """The public rules' regexes, for masking places (over-masking is harmless). Compiled with
     ASCII meanings for \\b and \\w, as gitleaks' engine reads them. A regex Python cannot
     compile is a ScanError: masking must not quietly do nothing."""
-    global _PUBLIC_CACHE, _PUBLIC_IDS
+    global _PUBLIC_CACHE
     if _PUBLIC_CACHE is None:
         text = PUBLIC_RULES.read_text(encoding="utf-8")
         regs = []
@@ -223,13 +222,7 @@ def _public_regexes() -> list[re.Pattern[str]]:
             except re.error:
                 raise ScanError("a public rule's regex cannot be used to mask the report") from None
         _PUBLIC_CACHE = regs
-        _PUBLIC_IDS = set(re.findall(r'(?m)^id\s*=\s*"([^"]+)"', text))
     return _PUBLIC_CACHE
-
-
-def _public_ids() -> set[str]:
-    _public_regexes()
-    return set(_PUBLIC_IDS or ()) | {"private-term"}
 
 
 def allowed_addresses() -> set[str]:
@@ -733,7 +726,8 @@ class Scanner:
     once more behind RETRY_PREFIX (so no format can be sniffed); if that fails too, ScanError.
 
     Every path shown in a place is scanned too, whether or not that name is new in this
-    change: a path a secret rule matches is never shown, and other matches are masked."""
+    change: a path that a public rule or a secret rule matches is never shown (a fixed
+    placeholder stands in for it); a private term in a shown path is masked."""
 
     def __init__(self, terms: Terms) -> None:
         self.terms = terms
@@ -803,17 +797,17 @@ class Scanner:
         if shown:
             self.add("", "\n".join(p.replace("\n", "\\n") for p in shown) + "\n", names=shown, kind="display")
         raw = self.findings()
-        public = _public_ids()
         withheld: set[str] = set()
         for rule, idx, line, text in raw:
             chunk = self.chunks[idx]
             names = chunk["names"]
             if not isinstance(names, list) or not 0 < line <= len(names):
                 continue
-            # A path is never shown when a secret rule matches it (the masks cannot mask a
-            # secret), nor when masking leaves the matched text in it.
+            # Allowlist: a path is shown only when no public rule and no secret rule matches
+            # it. A private term (masked as <private>) is the one match a shown path may hold,
+            # and only when masking removes it.
             name = names[line - 1]
-            if rule not in public or not text or text in self.terms.mask(name):
+            if rule != "private-term" or not text or text in self.terms.mask(name):
                 withheld.add(name)
         if self.unreadable:
             where = []
@@ -1586,9 +1580,11 @@ def cmd_ci(repo: str, base: str | None, head: str | None, event_path: str | None
         print(f"::warning title=public-content guard::this pull request changes {listed}, the addresses "
               "that are public on purpose; check that every address in it is meant to be public", file=sys.stderr)
     if not found:
+        print("public-content guard: scanned this pull request: clean for the public rules (private terms are not checked in CI)")
         return 0
     _report("this pull request would publish content that must not be public", found)
-    print("Fix: edit the PR title or body, or amend or rebase the commits, then push again. "
+    print("Fix: edit the PR title or body, then delete the old version from the edit history; or amend or "
+          "rebase the commits, then push again. "
           "If this is a false positive, open an issue in the guard's repository (describe it; do not "
           "paste the matched text).", file=sys.stderr)
     return 1
@@ -1612,8 +1608,19 @@ EVENT_MAP: dict[str, tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]]] =
     "discussion_comment": (("created", "edited"), "comment", (("body", "comment.body"),)),
     "release": (("published", "edited"), "release", (("name", "name"), ("body", "body"), ("tag_name", "tag_name"))),
 }
-_LINK = "<link>"  # where a place's html_url goes, filled in once the findings are known
-NOT_HANDLED = "is not handled by the public-content guard; nothing was scanned and nothing is known to have leaked"
+# payload object key -> (its fixed label, the numeric field that names it). A place prints only
+# these labels and that integer, never html_url or any other payload string: any of them may
+# hold the matched text (a token in the repository path, a tag name in a release URL).
+EVENT_OBJECTS: dict[str, tuple[str, str]] = {
+    "pull_request": ("pull request", "number"),
+    "issue": ("issue", "number"),
+    "discussion": ("discussion", "number"),
+    "comment": ("comment", "id"),
+    "review": ("review", "id"),
+    "release": ("release", "id"),
+}
+NOT_HANDLED = ("is not handled by the public-content guard; nothing was scanned and nothing is known to have "
+               "leaked. Update the caller or the event map; check the text by hand meanwhile")
 
 
 def _word(value: object) -> str:
@@ -1659,10 +1666,20 @@ def _field_text(obj: dict[str, object], field: str, label: str) -> str:
     return value
 
 
+def _object_label(key: str, obj: dict[str, object]) -> str:
+    """The fixed label and number of an event's object (see EVENT_OBJECTS): "issue #7",
+    "comment 1001", or "issue (no number)" when the payload holds no integer there."""
+    label, field = EVENT_OBJECTS[key]
+    n = obj.get(field)
+    if not isinstance(n, int) or isinstance(n, bool):
+        return "%s (no %s)" % (label, field)
+    return "%s #%d" % (label, n) if field == "number" else "%s %d" % (label, n)
+
+
 def cmd_event(name: str, path: str) -> int:
     """Scan the fixed fields EVENT_MAP lists for event NAME in the event file at PATH. A place
-    is the event, the object's html_url and the field label. A release whose tag_name has a
-    finding is named by its id instead (its html_url holds the tag name)."""
+    is the event name, the object's fixed label and number (see EVENT_OBJECTS) and the field
+    label: nothing in it comes from the payload's text."""
     data = load_event(path)
     if not public_event(data):
         return 0
@@ -1680,28 +1697,23 @@ def cmd_event(name: str, path: str) -> int:
     terms = load_terms()
     if terms.warning:
         print(terms.warning, file=sys.stderr)
+    link = _object_label(key, obj)
     with Scanner(terms) as sc:
         for label, text in texts:
-            sc.add("%s %s %s" % (name, _LINK, label), text)
+            sc.add("%s %s %s" % (name, link, label), text)
         found = sc.run()
-    url, oid = obj.get("html_url"), obj.get("id")
-    oid_shown = str(oid) if isinstance(oid, int) and not isinstance(oid, bool) else "(no id)"
-    withhold = name == "release" and any("%s tag_name" % _LINK in item for item in found)
-    if withhold or not isinstance(url, str) or not re.fullmatch(r"https://\S+", url):
-        link = oid_shown if name == "release" else "%s %s" % (key, oid_shown)
-    else:
-        link = terms.mask(url)
     for label, text in texts:
         for w in speech_warnings("%s %s %s" % (name, link, label), text):
             print(w, file=sys.stderr)
     if not found:
-        print(f"public-content guard: scanned the {name} event: clean")
+        print(f"public-content guard: scanned the {name} event: clean for the public rules (private terms are not checked in CI)")
         return 0
-    _report(f"this {name} event published content that must not be public",
-            [item.replace(_LINK, link) for item in found])
-    print("Fix: the text is already public. Delete it, or edit it and delete the old version from the edit "
-          "history; rotate any secret it holds. Do not edit the guard or re-run this check to get a green "
-          "result. See docs/public-content-guard.md, \"When a text event goes red\".", file=sys.stderr)
+    _report(f"this {name} event published content that must not be public", found)
+    print("Fix: the text is already public. If you wrote it, delete it, or edit it and delete the old version "
+          "from the edit history; rotate any secret it holds. If someone else wrote it, do not edit or delete it: "
+          "report the rule, place and run link to the repository owner. Do not edit the guard or re-run this "
+          "check to get a green result. See docs/public-content-guard.md, \"When a text event goes red\".",
+          file=sys.stderr)
     return 1
 
 
@@ -1829,25 +1841,37 @@ def cmd_push(repo: str, before: str | None, after: str | None, ref: str | None, 
         if ref.startswith("refs/tags/"):
             for sha, body in _tag_chain(repo, after, types):
                 _add_object_text(sc, "tag object %s" % sha[:12], body)
-        sc.add("ref", ref + "\n", lines=False)
+        sc.add("the ref name", ref + "\n", lines=False)
         found = sc.run()
     if not found:
-        print("public-content guard: scanned this push: clean")
+        print("public-content guard: scanned this push: clean for the public rules (private terms are not checked in CI)")
         return 0
     _report("this push published content that must not be public", found)
     print("Fix: the content is already public. Rewrite or delete the commits, tag or branch, rotate any "
           "secret, and treat the content as published. Do not edit the guard or re-run this check to get "
-          "a green result. See docs/public-content-guard.md.", file=sys.stderr)
+          "a green result. See docs/public-content-guard.md, \"When a push goes red\".", file=sys.stderr)
     return 1
 
 
 # --------------------------------------------------------------------------- CLI
 
 
+def _annotation(text: str) -> str:
+    """TEXT escaped as a workflow command's message (% and line breaks)."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def _report(what: str, found: list[str]) -> None:
+    """Each finding ("RULE at PLACE", the place built from fixed labels, numbers and checked
+    names, never the match) on stderr; under GitHub Actions also one ::error line per finding
+    on stdout, so the run's summary names the rule and place, not only an exit code."""
     print(f"public-content guard: {what} (matched text hidden):", file=sys.stderr)
     for item in found:
         print("  - " + item, file=sys.stderr)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        for item in found:
+            rule, _, place = item.partition(" at ")
+            print("::error title=public-content guard::" + _annotation("%s in %s" % (rule, place)), flush=True)
 
 
 def cmd_text(label: str, data: bytes) -> int:

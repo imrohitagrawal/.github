@@ -15,7 +15,8 @@
 #
 # Exit 0 clean (or not a public repository: a notice, nothing scanned), 1 findings, 2 could not
 # check (including an event or action the guard does not handle). A finding names the event,
-# the field and the object's html_url, never the matched text.
+# the field and the object's fixed label and number (issue #7, comment 1001), never the
+# object's html_url or any other payload string, and never the matched text.
 #
 # The fixtures in public-content/tests/events/ are TEMPLATES: each mapped field holds a
 # placeholder `@@FIELD@@`. This suite renders them at run time with the planted value in one
@@ -122,16 +123,16 @@ expect_said() {
 }
 
 echo "== every mapped field of every handled event"
-# event | fields (space separated) | html_url of the object the fields belong to
-CASES="pull_request|title body|https://github.com/acme/pub/pull/12
-issues|title body|https://github.com/acme/pub/issues/7
-issue_comment|comment.body|https://github.com/acme/pub/issues/7#issuecomment-1001
-pull_request_review|review.body|https://github.com/acme/pub/pull/12#pullrequestreview-2002
-pull_request_review_comment|comment.body|https://github.com/acme/pub/pull/12#discussion_r3003
-commit_comment|comment.body|https://github.com/acme/pub/commit/3333333333333333333333333333333333333333#commitcomment-4004
-discussion|title body|https://github.com/acme/pub/discussions/5
-discussion_comment|comment.body|https://github.com/acme/pub/discussions/5#discussioncomment-6006
-release|name body tag_name|https://github.com/acme/pub/releases/tag/v1.2.3"
+# event | fields (space separated) | label and number of the object the fields belong to
+CASES="pull_request|title body|pull request #12
+issues|title body|issue #7
+issue_comment|comment.body|comment 1001
+pull_request_review|review.body|review 2002
+pull_request_review_comment|comment.body|comment 3003
+commit_comment|comment.body|comment 4004
+discussion|title body|discussion #5
+discussion_comment|comment.body|comment 6006
+release|name body tag_name|release 8008"
 while IFS='|' read -r event fields url; do
   [ -f "$EVENTS/$event.json" ] || { bad "events: fixture $event.json exists" "missing"; continue; }
   for field in $fields; do
@@ -147,7 +148,7 @@ while IFS='|' read -r event fields url; do
     fi
     render "$EVENTS/$event.json" "$out" "$field" "see $HOMEP for details"
     ev "$event" "$out"
-    # Red when: this field is dropped from the event map, or the finding stops naming event, field and url.
+    # Red when: this field is dropped from the event map, or the finding stops naming event, field and object.
     expect_finding "events: $event $field with a match is red" "$event" "$field" "$url" "$fields"
   done
   render "$EVENTS/$event.json" "$EV/$event-clean.json" - -
@@ -162,19 +163,19 @@ echo "== an address and a secret-shaped value are found too (not only home paths
 render "$EVENTS/issues.json" "$EV/issues-mail.json" body "write to $MAIL"
 ev issues "$EV/issues-mail.json"
 # Red when: the event mode runs only some of the public rules (personal-email missing).
-expect_finding "events: issues body with an email address is red" issues body https://github.com/acme/pub/issues/7 "title body"
+expect_finding "events: issues body with an email address is red" issues body "issue #7" "title body"
 render "$EVENTS/issue_comment.json" "$EV/comment-key.json" comment.body "key $KEY"
 ev issue_comment "$EV/comment-key.json"
 # Red when: the event mode skips gitleaks' default (secret) rules.
 expect_finding "events: comment body with an access key is red" issue_comment comment.body \
-  "https://github.com/acme/pub/issues/7#issuecomment-1001" comment.body
+  "comment 1001" comment.body
 
 echo "== a draft pull request is scanned"
 render "$EVENTS/pull_request.json" "$EV/pr-draft.json" body "see $HOMEP"
 edit_json "$EV/pr-draft.json" 'd["pull_request"]["draft"]=True'
 ev pull_request "$EV/pr-draft.json"
 # Red when: a draft pull request's text is skipped.
-expect_finding "events: a draft pull request body is scanned" pull_request body https://github.com/acme/pub/pull/12 "title body"
+expect_finding "events: a draft pull request body is scanned" pull_request body "pull request #12" "title body"
 
 echo "== unknown events and actions fail closed"
 ev watch "$EVENTS/unhandled-watch.json"
@@ -226,7 +227,7 @@ render "$EVENTS/issues.json" "$EV/issues-title-nullbody.json" title "see $HOMEP"
 edit_json "$EV/issues-title-nullbody.json" 'd["issue"]["body"]=None'
 ev issues "$EV/issues-title-nullbody.json"
 # Red when: a null field stops the other fields from being scanned (partner of the two above).
-expect_finding "events: the title is still scanned when the body is null" issues title https://github.com/acme/pub/issues/7 "title body"
+expect_finding "events: the title is still scanned when the body is null" issues title "issue #7" "title body"
 
 echo "== input that cannot be read fails closed"
 ev issues "$EV/does-not-exist.json"
@@ -250,7 +251,7 @@ EOF
 ev issue_comment "$EV/comment-large.json"
 # Red when: a long non-ASCII body is truncated, mis-decoded, or its match is printed.
 expect_finding "events: a large non-ASCII comment with a match near the end is red" issue_comment \
-  comment.body "https://github.com/acme/pub/issues/7#issuecomment-1001" comment.body
+  comment.body "comment 1001" comment.body
 if [ "$(cat "$OUT" "$ERR" | wc -c)" -gt 4000 ]; then
   bad "events: the large body is not echoed" "output is $(cat "$OUT" "$ERR" | wc -c) bytes"
 else
@@ -280,6 +281,84 @@ expect_rc "ci --event-path: a match in the event file's body is red" 1 "the PR b
 cie "$CIRED" "$EV/pr-clean.json"
 # Red when: an `edited` event with a clean body runs a text-only scan and turns red commits green.
 expect_rc "ci --event-path: red commits stay red on an edited event with a clean body" 1 home-folder-path
+
+echo "== a place prints only fixed labels and numbers, never a payload string"
+# set_url FILE KEY URL: set the html_url of the payload object KEY (the value never goes
+# through a Python expression).
+set_url() {
+  "$REAL_PY" -I -c 'import json,sys
+p,k,u=sys.argv[1:4]
+d=json.load(open(p,encoding="utf-8"))
+d[k]["html_url"]=u
+json.dump(d,open(p,"w",encoding="utf-8"))' "$@" || die "set_url $1"
+}
+render "$EVENTS/issues.json" "$EV/issues-urltoken.json" body "token $GHPAT"
+set_url "$EV/issues-urltoken.json" issue "https://github.com/acme/$GHPAT/issues/7"
+ev issues "$EV/issues-urltoken.json"
+# Red when: a finding's place prints the object's html_url (here it holds the matched token).
+expect_finding "events: a token in html_url is never printed (the place is the issue number)" issues body "issue #7" "title body"
+render "$EVENTS/issues.json" "$EV/issues-urlquote.json" body "> a quoted line"
+set_url "$EV/issues-urlquote.json" issue "https://github.com/acme/$GHPAT/issues/7"
+ev issues "$EV/issues-urlquote.json"
+# Red when: the quote-line warning names the object by its html_url (which holds a token).
+expect_said "events: a quote-line warning never prints html_url" 0 "may quote someone's words" "issue #7"
+render "$EVENTS/release.json" "$EV/release-tagtoken.json" tag_name "$GHPAT"
+ev release "$EV/release-tagtoken.json"
+# Red when: a release whose tag_name holds a secret prints the tag name or the html_url built from it.
+expect_finding "events: a token in a release tag_name is never printed" release tag_name "release 8008" "name body tag_name"
+render "$EVENTS/release.json" "$EV/release-tagkey.json" tag_name "$KEY"
+ev release "$EV/release-tagkey.json"
+# Red when: a release whose tag_name is a secret prints any part of the tag (the tag or its release link).
+expect_finding "events: an access key as a release tag_name is red" release tag_name "release 8008" "name body tag_name"
+for f in "$EV/release-tagtoken.json:$GHPAT" "$EV/release-tagkey.json:$KEY"; do
+  file="${f%%:*}" tag="${f#*:}"
+  ev release "$file"
+  # Red when: any 8 characters of the tag in a row appear in the output (a link, a tag name, a fragment).
+  if "$REAL_PY" -I -c 'import sys
+tag, text = sys.argv[1], open(sys.argv[2], encoding="utf-8", errors="replace").read() + open(sys.argv[3], encoding="utf-8", errors="replace").read()
+sys.exit(1 if any(tag[i:i + 8] in text for i in range(len(tag) - 7)) else 0)' "$tag" "$OUT" "$ERR"; then
+    ok "events: no part of a secret release tag ($(basename "$file")) is printed"
+  else
+    bad "events: no part of a secret release tag ($(basename "$file")) is printed" "a piece of the tag is in the output"
+  fi
+done
+
+echo "== a finding is also a workflow error line under GitHub Actions"
+render "$EVENTS/issues.json" "$EV/issues-annot.json" body "see $HOMEP"
+(export GITHUB_ACTIONS=true && ev issues "$EV/issues-annot.json")
+# Red when: no ::error line is printed per finding under GitHub Actions, or it prints the match.
+if [ "$(rc)" = 1 ] && grep -q -x -F -e "::error title=public-content guard::home-folder-path in issues issue #7 body:1" "$OUT" &&
+  ! _leaks "$OUT" "$ERR"; then
+  ok "events: GITHUB_ACTIONS=true prints one ::error line per finding"
+else
+  bad "events: GITHUB_ACTIONS=true prints one ::error line per finding" "exit $(rc), stdout '$(head -c 300 "$OUT")'"
+fi
+ev issues "$EV/issues-annot.json"
+# Red when: ::error lines are printed outside GitHub Actions (partner of the case above).
+if [ "$(rc)" = 1 ] && ! grep -q -F -e "::error" "$OUT" "$ERR"; then
+  ok "events: no ::error line outside GitHub Actions"
+else
+  bad "events: no ::error line outside GitHub Actions" "exit $(rc)"
+fi
+
+echo "== the pull request clean line comes from a real scan only"
+CLEANLINE="public-content guard: scanned this pull request: clean for the public rules (private terms are not checked in CI)"
+cie "$CICLEAN" "$EV/pr-clean.json"
+# Red when: ci prints no clean line after a real clean scan (the workflow no longer echoes it).
+if [ "$(rc)" = 0 ] && grep -q -x -F -e "$CLEANLINE" "$OUT"; then
+  ok "ci --event-path: a clean scan prints the clean line"
+else
+  bad "ci --event-path: a clean scan prints the clean line" "exit $(rc), stdout '$(head -c 300 "$OUT")'"
+fi
+render "$EVENTS/pull_request.json" "$EV/pr-private.json" - -
+edit_json "$EV/pr-private.json" 'd["repository"]["private"]=True'
+cie "$CICLEAN" "$EV/pr-private.json"
+# Red when: a private repository's pull request says "clean" after the "not a public repository" notice.
+if [ "$(rc)" = 0 ] && grep -q -F -e "not a public repository" "$ERR" && ! grep -q -F -e "clean" "$OUT" "$ERR"; then
+  ok "ci --event-path: a private repository prints no clean line"
+else
+  bad "ci --event-path: a private repository prints no clean line" "exit $(rc)$(_hint)"
+fi
 
 echo
 echo "${PASS} passed, ${FAIL} failed, ${SKIPPED} skipped"

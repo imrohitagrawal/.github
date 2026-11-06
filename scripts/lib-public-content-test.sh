@@ -52,6 +52,8 @@ CIHOME="/home/runner/work/x"
 SPOOF="$(printf '%s@%s' b users.noreply.github.com.evil.io)"
 NL=$'\n'
 ZERO=0000000000000000000000000000000000000000
+# A GitHub token shape (a secret rule, not a public rule), assembled so this file holds no match.
+GHPAT="gh""p_x7Kq2Lm9Vb4Nc8Rt1Yw6Hd3Fs5Jg0Pa7Ze2Qr4"
 
 # Pieces of home folder names whose full form a report must never print (accented, underscored,
 # backslashed): ".../Jos" of José, ".../zo" of zoë.
@@ -60,7 +62,7 @@ LEAK_ZO="/ho""me/zo"
 # _leaks FILE...: true when any file repeats matched text.
 _leaks() {
   grep -i -q -F -e "/jane" -e "-jane-" -e '\jane' -e "corp-mail" -e "IOSFODNN7" -e "$TERM_A" \
-    -e "$TERM_B" -e "0f1e2d3c" -e "evil.io" -e "_alice" -e "lodie" -e "$LEAK_JOS" -e "$LEAK_ZO" \
+    -e "$TERM_B" -e "0f1e2d3c" -e "evil.io" -e "_alice" -e "lodie" -e "Vb4Nc8Rt1Yw6" -e "$LEAK_JOS" -e "$LEAK_ZO" \
     "$@" 2>/dev/null
 }
 
@@ -74,7 +76,7 @@ export GIT_CONFIG_GLOBAL="$WORK/gitconfig" GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PR
 export XDG_CACHE_HOME="$WORK/cache"
 unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML GH_REPO GH_HOST GH_TOKEN GITHUB_TOKEN \
   GH_ENTERPRISE_TOKEN GIT_DIR GIT_WORK_TREE PR_TITLE PR_BODY GITHUB_BASE_REF GITHUB_HEAD_REF \
-  GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE 2>/dev/null || true
+  GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GITHUB_ACTIONS 2>/dev/null || true
 git config --global user.name "Test Person"
 git config --global user.email test@example.com
 git config --global init.defaultBranch main

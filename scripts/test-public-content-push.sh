@@ -277,6 +277,51 @@ scan ffok "$(tip ffok refs/heads/main~1)" "$(tip ffok refs/heads/main)" ""
 # Red when: an empty ref name skips the ref-name scan silently.
 expect_said "push: an empty ref is refused" 2 "could not check this"
 
+echo "== a place never prints a ref name or file path that holds a match"
+newrepo places
+DEF="$(tip places refs/heads/main)"
+co places
+scan places "$ZERO" "$DEF" "refs/heads/x${U}ers/jane/y" "$DEF"
+# Red when: the ref name is not scanned, or a finding prints it.
+expect_red "push: a home path in a ref name is red and not printed" home-folder-path "the ref name"
+B="$(tip places refs/heads/main)"
+cf places "x${U}ers/jane/a.txt" "fine" "a file at a leaking path"
+cf places "x${U}ers/jane/b.txt" "see $HOMEQ" "a leaking file at a leaking path"
+push places origin main
+co places
+scan places "$B" "$(tip places refs/heads/main)" refs/heads/main
+# Red when: a file path is not scanned, or a finding prints a path that holds a match.
+expect_red "push: a home path in a file path is red and the path is withheld" home-folder-path "withheld"
+
+echo "== two existing branches pushed at once: each is judged by its own before..after"
+newrepo twoold
+{ git -C "$R/twoold" branch A && git -C "$R/twoold" branch B; } || die "branches"
+push twoold origin A B
+OLDTIP="$(tip twoold refs/heads/A)"
+cf twoold s.txt "key $KEY" "L: a leaking commit"
+L2="$(git -C "$R/twoold" rev-parse HEAD)"
+cf twoold c.txt "fine" "C: a clean child of L"
+C2="$(git -C "$R/twoold" rev-parse HEAD)"
+push twoold origin "$C2:refs/heads/A" "$L2:refs/heads/B"
+co twoold
+scan twoold "$OLDTIP" "$C2" refs/heads/A
+# Red when: the scan subtracts every other current ref (B already holds L, so A's push looks clean).
+expect_red "push: branch A (fast-forward to C, a child of the leak) is red" aws-access-token
+scan twoold "$OLDTIP" "$L2" refs/heads/B
+# Red when: the scan subtracts every other current ref (A's tip C contains L, so B's push looks clean).
+expect_red "push: branch B (fast-forward to the leak L) is red" aws-access-token
+
+echo "== a finding is also a workflow error line under GitHub Actions"
+(export GITHUB_ACTIONS=true && _run python3 "$SCAN" push --repo "$R/places.co" --before "$ZERO" \
+  --after "$DEF" --ref "refs/heads/x${U}ers/jane/y" --default-tip "$DEF" </dev/null)
+# Red when: push mode prints no ::error line per finding under GitHub Actions, or it names the ref.
+if [ "$(rc)" = 1 ] && grep -q -x -F -e "::error title=public-content guard::home-folder-path in the ref name" "$OUT" &&
+  ! _leaks "$OUT" "$ERR"; then
+  ok "push: GITHUB_ACTIONS=true prints one ::error line per finding"
+else
+  bad "push: GITHUB_ACTIONS=true prints one ::error line per finding" "exit $(rc), stdout '$(head -c 300 "$OUT")'"
+fi
+
 echo
 echo "${PASS} passed, ${FAIL} failed, ${SKIPPED} skipped"
 [ "$FAIL" -eq 0 ]

@@ -101,9 +101,10 @@ jobs:
           case "$GITHUB_EVENT_NAME" in
             pull_request)
               # Title and body come from the event file; base and head too.
+              # scan.py prints the clean line itself, only after a real scan (a
+              # private repository gets its notice and no clean line).
               python3 -I "$scanner/public-content/scan.py" ci \
                 --repo "$GITHUB_WORKSPACE" --event-path "$GITHUB_EVENT_PATH"
-              echo "public-content guard: scanned this pull request: clean"
               ;;
             push)
               # Every branch and tag as the remote has them after the push.
