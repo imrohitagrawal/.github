@@ -1780,9 +1780,12 @@ def cmd_push(repo: str, before: str | None, after: str | None, ref: str | None, 
     - after all zeros: a delete; it passes only when the ref is gone from the checkout and the
       remote;
     - before present: the commits in `after ^before`;
-    - before all zeros (a new ref), or before not in the checkout (a force push whose old tip
-      could not be fetched; said in a note): the commits in `after ^default-tip`, or all of
-      after's history when after is the default tip of the default branch (a first push);
+    - before all zeros and the ref is the default branch (--default-branch, or the event's
+      repository.default_branch): all of after's history, whatever the checkout's default tip
+      is now (a later push may already have moved it past after, hiding after's commits);
+    - before all zeros (any other new ref), or before not in the checkout (a force push whose
+      old tip could not be fetched; said in a note): the commits in `after ^default-tip`, or
+      all of after's history when after is the default tip of the default branch (a first push);
     - always: the ref name, and for a tag every tag object it points through.
     Refused (ScanError): a shallow repository; a missing or malformed input; an after or
     default-tip object that is not in the checkout."""
@@ -1823,6 +1826,8 @@ def cmd_push(repo: str, before: str | None, after: str | None, ref: str | None, 
         raise ScanError("the default branch's tip is not in this checkout")
     if not _zero(before) and before in types:
         negatives = [before]
+    elif _zero(before) and default_branch is not None and ref == "refs/heads/" + default_branch:
+        negatives = []  # a new default branch: everything in it is published by this push
     else:
         if default_tip is None:
             raise ScanError("the ref's previous object is not in this checkout" if not _zero(before)

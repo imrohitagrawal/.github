@@ -293,6 +293,38 @@ scan places "$B" "$(tip places refs/heads/main)" refs/heads/main
 # Red when: a file path is not scanned, or a finding prints a path that holds a match.
 expect_red "push: a home path in a file path is red and the path is withheld" home-folder-path "withheld"
 
+echo "== a new default branch is scanned in full, even after a later push moved its tip"
+newrepo newdef
+# Rebuild main from nothing: C (a leak), then D (clean, C's child), each pushed on its own.
+git -C "$R/newdef" checkout -q --orphan fresh || die "orphan"
+git -C "$R/newdef" rm -q -rf . || die "rm"
+cf newdef notes.md "see $HOMEP" "C: a leaking commit"
+C="$(git -C "$R/newdef" rev-parse HEAD)"
+cf newdef notes.md "nothing here" "D: clean it up"
+D="$(git -C "$R/newdef" rev-parse HEAD)"
+git --git-dir="$R/newdef.git" update-ref -d refs/heads/main
+push newdef origin "$D:refs/heads/main"
+co newdef
+[ "$(git -C "$R/newdef.co" rev-parse refs/remotes/origin/main)" = "$D" ] || die "origin/main is not D"
+mkevent() { # FILE BEFORE AFTER: a push event of refs/heads/main in a public repository whose default branch is main
+  "$REAL_PY" -I -c 'import json,sys
+p,b,a=sys.argv[1:4]
+json.dump({"ref":"refs/heads/main","before":b,"after":a,
+  "repository":{"full_name":"acme/pub","private":False,"default_branch":"main"}},open(p,"w"))' "$@" || die "event $1"
+}
+mkevent "$WORK/newdef-1.json" "$ZERO" "$C"
+mkevent "$WORK/newdef-2.json" "$C" "$D"
+(_run python3 "$SCAN" push --repo "$R/newdef.co" --event-path "$WORK/newdef-1.json" </dev/null)
+# Red when: a new default branch is scanned against the checkout's later default tip (D hides C).
+expect_red "push: the first event of a new default branch (C, a leak) is red although origin/main is D" home-folder-path
+(_run python3 "$SCAN" push --repo "$R/newdef.co" --event-path "$WORK/newdef-2.json" </dev/null)
+# Red when: the clean cleanup push (C..D) is blocked, or passes without gitleaks running.
+expect_clean "push: the cleanup event (C to D, clean) passes (scanned)"
+(_run python3 "$SCAN" push --repo "$R/newdef.co" --before "$ZERO" --after "$C" --ref refs/heads/main \
+  --default-branch main </dev/null)
+# Red when: --default-branch does not mark the ref as the default branch the way the event does.
+expect_red "push: --default-branch main with before all zeros scans all of after's history" home-folder-path
+
 echo "== two existing branches pushed at once: each is judged by its own before..after"
 newrepo twoold
 { git -C "$R/twoold" branch A && git -C "$R/twoold" branch B; } || die "branches"
