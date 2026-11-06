@@ -885,8 +885,9 @@ gpush "$D" "$D.git" origin main
 expect_pushed "names: a file named ':notes' pushes cleanly" scanned
 GIT_LITERAL_PATHSPECS=1 commit_file "$D" ":dirty" "see $HOMEP" "a dirty file named :dirty"
 gpush "$D" "$D.git" origin main
-# RED WHEN: a ':' name is skipped instead of scanned (partner of the case above).
-expect_blocked "names: a dirty file named ':dirty' is blocked" home-folder-path ":dirty"
+# RED WHEN: a ':' name is skipped instead of scanned (partner of the case above). A ':' is
+# outside the names a report may print, so the place is withheld.
+expect_blocked "names: a dirty file named ':dirty' is blocked" home-folder-path "withheld"
 git -C "$D" reset -q --hard origin/main
 commit_file "$D" "img/logo@""2x.png" "png bytes" "retina image"
 gpush "$D" "$D.git" origin main

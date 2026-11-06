@@ -1,0 +1,14 @@
+{
+  "action": "published",
+  "release": {
+    "id": 8008,
+    "html_url": "https://github.com/acme/pub/releases/tag/@@tag_name@@",
+    "tag_name": "@@tag_name@@",
+    "name": "@@name@@",
+    "body": "@@body@@",
+    "draft": false,
+    "prerelease": false
+  },
+  "repository": {"full_name": "acme/pub", "private": false, "html_url": "https://github.com/acme/pub", "default_branch": "main"},
+  "sender": {"login": "octo-person", "type": "User"}
+}

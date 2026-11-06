@@ -140,6 +140,18 @@ jobs:
             .github/workflows/reusable-pr-quality.yml \
             templates/caller-pr-quality.yml
 
+      # The public-content workflow and its caller template: only the
+      # job.workflow_repository / job.workflow_sha suppression (the same reason as
+      # above); no shellcheck codes are suppressed.
+      - name: "actionlint (+ shellcheck): reusable-public-content.yml, caller-public-content.yml"
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color \
+            -ignore 'property "workflow_(repository|sha)" is not defined' \
+            .github/workflows/reusable-public-content.yml \
+            templates/caller-public-content.yml
+
       - name: "actionlint (+ shellcheck): self-test.yml, self-lint.yml (no suppressions)"
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
@@ -245,6 +257,24 @@ jobs:
 
       - name: Public-content guard tests (block messages)
         run: scripts/test-public-content-messages.sh
+
+      # PR C phase 0: the event-text mode (every text-bearing GitHub event, read from the
+      # event file), the push mode (what a push introduced), and the static shape of the
+      # public-content workflow and its caller template.
+      - name: Public-content guard tests (event text)
+        run: scripts/test-public-content-events.sh
+
+      - name: Public-content guard tests (push events)
+        run: scripts/test-public-content-push.sh
+
+      - name: Public-content workflow shape
+        run: scripts/test-public-content-workflow-shape.sh
+
+      # A name the scanner did not write (a path, a ref, a label, a payload field) reaches its
+      # output only through one renderer: hostile names through every mode, and a static check
+      # of every output call in scan.py.
+      - name: Public-content guard tests (output safety)
+        run: scripts/test-public-content-output-safety.sh
 
       # H6 (review finding): the reusable-workflow self-reference pin and the
       # duplicated Python/Node CI tool-version pins are hand-copied across

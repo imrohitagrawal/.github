@@ -1,0 +1,11 @@
+{
+  "action": "opened",
+  "issue": {
+    "number": 7,
+    "html_url": "https://github.com/acme/pub/issues/7",
+    "title": "@@title@@",
+    "body": "@@body@@"
+  },
+  "repository": {"full_name": "acme/pub", "private": false, "html_url": "https://github.com/acme/pub", "default_branch": "main"},
+  "sender": {"login": "octo-person", "type": "User"}
+}
