@@ -246,6 +246,18 @@ jobs:
       - name: Public-content guard tests (block messages)
         run: scripts/test-public-content-messages.sh
 
+      # PR C phase 0: the event-text mode (every text-bearing GitHub event, read from the
+      # event file), the push mode (what a push introduced), and the static shape of the
+      # public-content workflow and its caller template.
+      - name: Public-content guard tests (event text)
+        run: scripts/test-public-content-events.sh
+
+      - name: Public-content guard tests (push events)
+        run: scripts/test-public-content-push.sh
+
+      - name: Public-content workflow shape
+        run: scripts/test-public-content-workflow-shape.sh
+
       # H6 (review finding): the reusable-workflow self-reference pin and the
       # duplicated Python/Node CI tool-version pins are hand-copied across
       # templates/caller-pr-quality.yml, scripts/retrofit-quality-gate.sh, and

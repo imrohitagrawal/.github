@@ -1,0 +1,17 @@
+{
+  "action": "submitted",
+  "pull_request": {
+    "number": 12,
+    "html_url": "https://github.com/acme/pub/pull/12",
+    "title": "A clean pull request title",
+    "body": "A clean pull request body."
+  },
+  "review": {
+    "id": 2002,
+    "html_url": "https://github.com/acme/pub/pull/12#pullrequestreview-2002",
+    "state": "commented",
+    "body": "@@review.body@@"
+  },
+  "repository": {"full_name": "acme/pub", "private": false, "html_url": "https://github.com/acme/pub", "default_branch": "main"},
+  "sender": {"login": "octo-person", "type": "User"}
+}
