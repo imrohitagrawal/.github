@@ -23,20 +23,25 @@ already public when it is checked. A red run there is an alarm after publication
 | What is published | Layer | When it acts |
 | --- | --- | --- |
 | A push from a machine with the hook installed | pre-push hook | blocks before publication |
-| A pull request's commits (merge into the default branch) | PR check (`quality-gate`, `public-content`) | blocks the merge; the PR's own commits are already public on its branch |
+| A pull request's commits (merge into the default branch) | PR check (`quality-gate`, `public-content`) | blocks the merge when a ruleset requires it; the PR's own commits are already public on its branch |
 | A push of a branch or tag without the hook (another machine, `--no-verify`, the web editor) | `public-content` on `push` | alarm after publication |
 | A pull request's title and body | `public-content` on `pull_request` | alarm after publication (it can stop a merge, not the posting) |
 | Issues, issue and PR comments, reviews, review comments, discussions, discussion comments, releases | `public-content-text` | alarm after publication |
-| Release assets, wiki pages, commit comments, gists | none in CI | not checked here (see [When no run happens](#when-no-run-happens)) |
+| Release assets, wiki pages, commit comments, gists, labels, milestones | none in CI | not checked here (see [When no run happens](#when-no-run-happens)) |
 
 **A green run is not a statement that the content is safe to publish.** It means no secrets,
 home-folder paths, email addresses, transcript names, agent ids or session links were found.
 CI has no private term list, so private project names and other private words are never
-checked in CI.
+checked in CI. Every clean line says so: "clean for the public rules (private terms are not
+checked in CI)". It is printed by the scanner after a real scan only, never after the "not a
+public repository" notice.
 
-`public-content` is the job a ruleset may require. Every `pull_request` action, `edited`
-included, runs its full check (commits, title and body), so editing a PR's text can never
-turn a red commit result green. `public-content-text` is never a required check. Its runs
+`public-content` is the job a ruleset may require; it blocks a merge only when a ruleset
+requires it. A check from a reusable workflow is named `<caller job> / <called job>`, so for a
+caller whose job is named `public-content` (as in the template) the check to require is
+`public-content / public-content`. A caller job with another name shows that name before the
+slash. Every `pull_request` action, `edited` included, runs its full check (commits, title and
+body), so editing a PR's text can never turn a red commit result green. `public-content-text` is never a required check. Its runs
 attach to the latest commit of the default branch, so a red mark on the default branch can come
 from a comment, not from code.
 
@@ -288,17 +293,32 @@ repository passes with the notice "not a public repository: nothing scanned".
     commit id; if that fails, the push is checked as a new ref, and the log says so;
   - a new ref: the commits not in the default branch's tip, or the whole history when the
     pushed ref is the default branch at that tip (a repository's first push);
+  - a new default branch (`before` all zeros on the branch the event names as
+    `repository.default_branch`, or `--default-branch`): its whole history, whatever the
+    checkout's default tip is now. A later push may already have moved that tip past the
+    pushed commit, which would otherwise hide the first push's commits;
   - always: the ref name, and for a tag the tag object (message and tagger), even when no
     commit is new.
   A missing commit or input stops the check (exit 2). Other branches do not count as
   published: two branches pushed at once to the same new commit would hide each other.
 - **Text events** (`public-content-text`): `scan.py event`, which reads the event file and
   checks a fixed list of fields: an issue's or discussion's title and body, a comment's or
-  review's body, a release's name, body and tag name. A report names the event, the object's
-  link and the field, never the text. A finding in a release's tag name shows the release id
-  instead of its link, which holds the tag name. An event or action the list does not hold
-  fails with "is not handled by the public-content guard; nothing was scanned and nothing is
-  known to have leaked".
+  review's body, a release's name, body and tag name. A report names the event, the object by
+  a fixed label and its number (`issue #7`, `pull request #12`, `discussion #5`,
+  `comment 1001`, `review 2002`, `release 8008`) and the field, never the text and never the
+  object's link or any other text from the event: a link can hold the matched text (a token in
+  the repository path, a tag name in a release link). An event or action the list does not
+  hold fails with "is not handled by the public-content guard; nothing was scanned and nothing
+  is known to have leaked. Update the caller or the event map; check the text by hand
+  meanwhile".
+
+Every output names places the same way. A place prints only fixed labels, numbers and commit
+ids, plus a branch, tag or file name only when the scan shows that name holds no match under
+the public rules or gitleaks' rules; otherwise a fixed placeholder stands in for it ("the ref
+name", "a file name (withheld)", "a file whose name is withheld"). Under GitHub Actions each
+finding is also printed as a workflow error line,
+`::error title=public-content guard::<rule> in <place>`, so the run's summary names the rule
+and place, not only "exit code 1". The matched text is never printed.
 
 ### When no run happens
 
@@ -310,11 +330,15 @@ A check that never runs reports nothing, red or green:
 - A repository whose own pull request caller still skips drafts (`if: draft == false`) does not
   check a draft until that repository moves to the new caller.
 - Commit comments have no workflow trigger (GitHub's list of events that trigger workflows has
-  none for them), so no caller can run on one and CI never checks them. Only the scheduled
-  sweep can see them.
-- Release assets and wiki pages are not text events; they are left to the same scheduled sweep.
+  none for them), so no caller can run on one and CI never checks them. Only a scheduled
+  sweep could see them; that sweep is planned and not built yet.
+- Release assets and wiki pages are not text events; they are left to the same scheduled
+  sweep, which is planned and not built yet.
 - Refs pushed after this one do not count as published for it; a later push is checked by its
   own event.
+- A pull request that edits its own caller workflow runs its own version of it, so a required
+  `public-content / public-content` check can pass from a modified caller (see
+  [What is not covered](#what-is-not-covered)).
 
 ## When a text event goes red
 
@@ -323,11 +347,41 @@ The text is already public. Act on it, not on the check.
 - **Your own text, or an agent's**: delete it, or edit it and then delete the old version from
   the edit history (GitHub keeps edits). Rotate any secret it held. Treat the content as
   published: someone may have read or copied it.
-- **Someone else's text**: an agent reports the rule, the place and the run link only, and
-  never edits or deletes it. The owner of the repository decides what to do.
+- **Someone else's text**: if someone else wrote it, do not edit or delete it: report the rule,
+  place and run link to the repository owner. The owner decides what to do.
 - An edit can bring an old match back: when an edit of cleaned text goes red, clean the match
   again.
 - Never edit the guard or its rules, and never re-run the check, to get a green result.
+
+## When a push goes red
+
+The commits, tag or branch are already public. Rewrite or delete them: rewrite the commits
+and force-push the branch, or delete the tag or branch. That is not enough on its own: GitHub
+keeps commits that no ref reaches any more, and anyone who has a commit's id can still open
+it for a time, so treat the content as published. Rotate any secret it held, at once and
+before the rewrite. Never edit the guard or its rules, and never re-run the check, to get a
+green result.
+
+## Adding the caller
+
+The caller template pins the reusable workflow by commit. Until a tag of this repository holds
+`reusable-public-content.yml`, the template's commit is an all-zero placeholder and is not
+ready to copy. Once that tag exists:
+
+1. Copy `templates/caller-public-content.yml` to `.github/workflows/public-content.yml` in the
+   public repository, and replace the placeholder commit with the tag's commit (the template's
+   comment says how).
+2. Add it next to the pull request caller: step 3 of [repo onboarding](repo-onboarding.md)
+   names both callers.
+3. Require the check `public-content / public-content` in the repository's ruleset (the
+   caller's job name, then the called job's name). Never require `public-content-text`.
+
+Cutting the tag and changing rulesets are the repository owner's actions.
+
+## Not in this version
+
+The scheduled sweep (commit comments, release assets, wiki pages), an agent check right after
+it posts text, and a list of failed runs at the end of a session are not in this version.
 
 ## Private terms
 
@@ -398,8 +452,10 @@ ignored.
   printable characters is also read from the archive's own bytes).
 - Text in images (pixels) and the gaps listed under [What is checked](#what-is-checked).
 - The content of embedded repositories (submodules): only their paths are checked.
-- A pull request that edits the repository's own caller workflow: the check that runs is the
-  one in the PR, so such a PR can change or remove it for itself. Review those edits.
+- A pull request that edits the repository's own caller workflow: on `pull_request` GitHub runs
+  the PR's version of the caller, so such a PR can change or remove the check for itself. A
+  required check is matched by name only, so a modified caller that still has a job named
+  `public-content` can satisfy it without scanning anything. Review those edits.
 - Git LFS objects. The LFS client uploads them on its own; only the small pointer files go
   through `git push`.
 - Someone determined to get round it. The hook can be edited or removed by the same user.
