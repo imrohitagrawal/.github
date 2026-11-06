@@ -1598,7 +1598,8 @@ def cmd_ci(repo: str, base: str | None, head: str | None, event_path: str | None
 
 # event name -> (the actions handled, the payload object, its (field, label) pairs). Only these
 # fields are scanned, and a report names them by these fixed labels, never by event text. The
-# actions are the ones templates/caller-public-content.yml triggers on.
+# actions are the ones templates/caller-public-content.yml triggers on. commit_comment has no
+# workflow trigger, so no caller sends it; its entry serves a scan of a saved event file.
 EVENT_MAP: dict[str, tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]]] = {
     "pull_request": (("opened", "synchronize", "reopened", "edited", "ready_for_review"), "pull_request",
                      (("title", "title"), ("body", "body"))),

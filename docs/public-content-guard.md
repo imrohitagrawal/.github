@@ -309,8 +309,10 @@ A check that never runs reports nothing, red or green:
   removes the guard is not checked by it.
 - A repository whose own pull request caller still skips drafts (`if: draft == false`) does not
   check a draft until that repository moves to the new caller.
-- Commit comments trigger no workflow, so they are never checked in CI.
-- Release assets and wiki pages are not text events; they are left to a scheduled sweep.
+- Commit comments have no workflow trigger (GitHub's list of events that trigger workflows has
+  none for them), so no caller can run on one and CI never checks them. Only the scheduled
+  sweep can see them.
+- Release assets and wiki pages are not text events; they are left to the same scheduled sweep.
 - Refs pushed after this one do not count as published for it; a later push is checked by its
   own event.
 

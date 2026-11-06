@@ -4,7 +4,9 @@ name: Public-content guard
 # into a PUBLIC repository as .github/workflows/public-content.yml.
 #
 # The triggers are exactly the events and action types the scanner's event map
-# handles (scripts/test-public-content-workflow-shape.sh checks it). Every
+# handles that GitHub can start a workflow on
+# (scripts/test-public-content-workflow-shape.sh checks it). Commit comments
+# have no workflow trigger, so no caller can list them. Every
 # pull_request action, `edited` included, runs the full scan in the
 # public-content job; the other events run in public-content-text. Push and
 # text events are already public when this runs: a red run is an alarm after
@@ -25,8 +27,6 @@ on:
     types: [submitted, edited]
   pull_request_review_comment:
     types: [created, edited]
-  commit_comment:
-    types: [created]
   discussion:
     types: [created, edited]
   discussion_comment:
