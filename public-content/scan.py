@@ -7,12 +7,23 @@ session transcript names, agent tool and session ids, session links (rules in
 gitleaks-public.toml), and private terms (read at run time from a private list, never
 committed).
 
-Used by hooks/pre-push (what a push publishes) and by the CI step (a PR's title, body and
-commits). CLI modes:
+Used by hooks/pre-push (what a push publishes), by the CI step (a PR's title, body and
+commits) and by reusable-public-content.yml (what a push to GitHub introduced, and the text of
+every text-bearing GitHub event). CLI modes:
 
     scan.py text --label LABEL                       scan stdin
     scan.py pre-push REMOTE URL                      git's pre-push protocol (refs on stdin)
     scan.py ci [--repo DIR] --base REV --head REV    PR_TITLE, PR_BODY and the new content
+               [--event-path FILE]                   (title and body read from the event file
+                                                     instead; --base/--head default to it)
+    scan.py event --name EVENT --path FILE           the fixed text fields of one GitHub event
+    scan.py push [--repo DIR] --before SHA --after SHA --ref REF [--default-tip SHA]
+                 [--default-branch NAME] [--event-path FILE]
+                                                     what a push already made introduced
+
+The event, push and ci --event-path modes read the event file themselves (a step's env block
+is printed in the public log, so event text never goes through env), and pass a repository
+whose event file says it is private with a notice, scanning nothing.
 
 Everything a change publishes is checked whole: each file a new commit adds or changes
 (content and path name, even when the same content exists elsewhere), the path of each
@@ -108,6 +119,11 @@ FIX_PUSH = (
 
 class ScanError(Exception):
     """A check that could not be completed. Every caller blocks on it (fail closed)."""
+
+
+class NotHandled(ScanError):
+    """An event or action the guard has no field map for: exit 2 with its own message, which
+    says that nothing was scanned (not that something leaked)."""
 
 
 def _zero(sha: str) -> bool:
@@ -1510,15 +1526,53 @@ def ci_exclusions(repo: str, head: str) -> list[str]:
     return sorted({ln.strip() for ln in out.splitlines() if re.fullmatch(SHA_RE, ln.strip())})
 
 
-def cmd_ci(repo: str, base: str, head: str) -> int:
+def _pr_from_event(path: str) -> tuple[dict[str, object], str, str] | None:
+    """(pull_request object, title, body) of a pull_request event file; None for a private
+    repository (after its notice). A null title or body is empty; any other non-text value, or
+    no pull_request object, is a ScanError."""
+    data = load_event(path)
+    if not public_event(data):
+        return None
+    pr = data.get("pull_request")
+    if not isinstance(pr, dict):
+        raise ScanError("the event file holds no pull request")
+    title, body = (_field_text(pr, f, "the PR " + f) for f in ("title", "body"))
+    return pr, title, body
+
+
+def _pr_sha(pr: dict[str, object], side: str) -> str:
+    """The base or head sha a pull_request object names; ScanError when it names none."""
+    obj = pr.get(side)
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or not re.fullmatch(SHA_RE, sha):
+        raise ScanError(f"the event file names no {side} commit")
+    return sha
+
+
+def cmd_ci(repo: str, base: str | None, head: str | None, event_path: str | None = None) -> int:
+    """The PR title and body come from the event file when EVENT_PATH is given (and --base and
+    --head default to its shas), else from PR_TITLE and PR_BODY, which must both be set. Every
+    action, `edited` included, runs this whole scan: a text edit never replaces the commit
+    result with a text-only one."""
+    if event_path is not None:
+        found_pr = _pr_from_event(event_path)
+        if found_pr is None:
+            return 0
+        pr, title, body = found_pr
+        base = base if base is not None else _pr_sha(pr, "base")
+        head = head if head is not None else _pr_sha(pr, "head")
+    if base is None or head is None:
+        raise ScanError("--base and --head are needed when no --event-path is given")
     base, head = _commit(repo, "base", base), _commit(repo, "head", head)
     terms = load_terms()
     if terms.warning:
         print(terms.warning, file=sys.stderr)
-    missing = [k for k in ("PR_TITLE", "PR_BODY") if k not in os.environ]
-    if missing:
-        raise ScanError(" and ".join(missing) + " not set, so the PR text could not be checked")
-    texts = (("the PR title", os.environ["PR_TITLE"]), ("the PR body", os.environ["PR_BODY"]))
+    if event_path is None:
+        missing = [k for k in ("PR_TITLE", "PR_BODY") if k not in os.environ]
+        if missing:
+            raise ScanError(" and ".join(missing) + " not set, so the PR text could not be checked")
+        title, body = os.environ["PR_TITLE"], os.environ["PR_BODY"]
+    texts = (("the PR title", title), ("the PR body", body))
     with Scanner(terms) as sc:
         for place, text in texts:
             sc.add(place, text)
@@ -1537,6 +1591,252 @@ def cmd_ci(repo: str, base: str, head: str) -> int:
     print("Fix: edit the PR title or body, or amend or rebase the commits, then push again. "
           "If this is a false positive, open an issue in the guard's repository (describe it; do not "
           "paste the matched text).", file=sys.stderr)
+    return 1
+
+
+# --------------------------------------------------------------------------- GitHub events
+
+# event name -> (the actions handled, the payload object, its (field, label) pairs). Only these
+# fields are scanned, and a report names them by these fixed labels, never by event text. The
+# actions are the ones templates/caller-public-content.yml triggers on.
+EVENT_MAP: dict[str, tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]]] = {
+    "pull_request": (("opened", "synchronize", "reopened", "edited", "ready_for_review"), "pull_request",
+                     (("title", "title"), ("body", "body"))),
+    "issues": (("opened", "edited"), "issue", (("title", "title"), ("body", "body"))),
+    "issue_comment": (("created", "edited"), "comment", (("body", "comment.body"),)),
+    "pull_request_review": (("submitted", "edited"), "review", (("body", "review.body"),)),
+    "pull_request_review_comment": (("created", "edited"), "comment", (("body", "comment.body"),)),
+    "commit_comment": (("created",), "comment", (("body", "comment.body"),)),
+    "discussion": (("created", "edited"), "discussion", (("title", "title"), ("body", "body"))),
+    "discussion_comment": (("created", "edited"), "comment", (("body", "comment.body"),)),
+    "release": (("published", "edited"), "release", (("name", "name"), ("body", "body"), ("tag_name", "tag_name"))),
+}
+_LINK = "<link>"  # where a place's html_url goes, filled in once the findings are known
+NOT_HANDLED = "is not handled by the public-content guard; nothing was scanned and nothing is known to have leaked"
+
+
+def _word(value: object) -> str:
+    """An event or action name for a message: shown only when it is a plain lower-case word."""
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z_]{1,64}", value) else "(unreadable)"
+
+
+def load_event(path: str) -> dict[str, object]:
+    """The parsed event file; ScanError when it cannot be read or is not a JSON object."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ScanError(f"the event file could not be read ({type(exc).__name__})") from None
+    if not isinstance(data, dict):
+        raise ScanError("the event file does not hold an event")
+    return data
+
+
+def public_event(data: dict[str, object]) -> bool:
+    """True when the event's repository is public. A private one prints a notice and gives
+    False (the same rule as the CI step: CI scans public repositories only). An event without
+    a repository, or whose `private` is not true or false, is a ScanError: unknown visibility
+    never passes."""
+    repo = data.get("repository")
+    private = repo.get("private") if isinstance(repo, dict) else None
+    if not isinstance(private, bool):
+        raise ScanError("the event file names no repository, so its visibility is unknown")
+    if private:
+        print("public-content guard: not a public repository: nothing scanned", file=sys.stderr)
+        return False
+    return True
+
+
+def _field_text(obj: dict[str, object], field: str, label: str) -> str:
+    """A text field of an event object: absent or null is empty (GitHub sends null for an
+    empty body); any other non-text value is a ScanError."""
+    value = obj.get(field)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ScanError(f"the {label} field of the event is not text")
+    return value
+
+
+def cmd_event(name: str, path: str) -> int:
+    """Scan the fixed fields EVENT_MAP lists for event NAME in the event file at PATH. A place
+    is the event, the object's html_url and the field label. A release whose tag_name has a
+    finding is named by its id instead (its html_url holds the tag name)."""
+    data = load_event(path)
+    if not public_event(data):
+        return 0
+    spec = EVENT_MAP.get(name)
+    if spec is None:
+        raise NotHandled(f"event {_word(name)} {NOT_HANDLED}")
+    actions, key, fields = spec
+    action = data.get("action")
+    if action not in actions:
+        raise NotHandled(f"event {name} with action {_word(action)} {NOT_HANDLED}")
+    obj = data.get(key)
+    if not isinstance(obj, dict):
+        raise ScanError(f"the {name} event file holds no {key} object")
+    texts = [(label, _field_text(obj, field, label)) for field, label in fields]
+    terms = load_terms()
+    if terms.warning:
+        print(terms.warning, file=sys.stderr)
+    with Scanner(terms) as sc:
+        for label, text in texts:
+            sc.add("%s %s %s" % (name, _LINK, label), text)
+        found = sc.run()
+    url, oid = obj.get("html_url"), obj.get("id")
+    oid_shown = str(oid) if isinstance(oid, int) and not isinstance(oid, bool) else "(no id)"
+    withhold = name == "release" and any("%s tag_name" % _LINK in item for item in found)
+    if withhold or not isinstance(url, str) or not re.fullmatch(r"https://\S+", url):
+        link = oid_shown if name == "release" else "%s %s" % (key, oid_shown)
+    else:
+        link = terms.mask(url)
+    for label, text in texts:
+        for w in speech_warnings("%s %s %s" % (name, link, label), text):
+            print(w, file=sys.stderr)
+    if not found:
+        print(f"public-content guard: scanned the {name} event: clean")
+        return 0
+    _report(f"this {name} event published content that must not be public",
+            [item.replace(_LINK, link) for item in found])
+    print("Fix: the text is already public. Delete it, or edit it and delete the old version from the edit "
+          "history; rotate any secret it holds. Do not edit the guard or re-run this check to get a green "
+          "result. See docs/public-content-guard.md, \"When a text event goes red\".", file=sys.stderr)
+    return 1
+
+
+# --------------------------------------------------------------------------- push events
+
+
+def _checkout_ref(ref: str) -> str:
+    """Where the workflow's checkout keeps a remote ref: a branch under refs/remotes/origin/, a
+    tag under refs/tags/, anything else under its own name."""
+    if ref.startswith("refs/heads/"):
+        return "refs/remotes/origin/" + ref[len("refs/heads/"):]
+    return ref
+
+
+def _deleted(repo: str, ref: str) -> bool:
+    """True when REF is gone both from the checkout (as fetched after the push) and from the
+    remote (`git ls-remote origin`). A remote that cannot be asked is a ScanError."""
+    r = _git(["rev-parse", "--verify", "--quiet", "--end-of-options", _checkout_ref(ref)], repo, check=False)
+    if r.returncode == 0:
+        return False
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    ls = _git(["ls-remote", "origin", ref], repo, check=False, timeout=60, env=env)
+    if ls.returncode != 0:
+        raise ScanError("the remote could not be asked whether the ref was deleted")
+    return not any(ln.partition("\t")[2] == ref for ln in ls.stdout.decode("utf-8", "surrogateescape").splitlines())
+
+
+def _tag_chain(repo: str, sha: str, types: dict[str, str]) -> list[tuple[str, bytes]]:
+    """(sha, body) of each tag object from SHA down to the object it finally tags."""
+    out: list[tuple[str, bytes]] = []
+    while types.get(sha) == "tag" and len(out) < 16:
+        body = _git(["cat-file", "tag", sha], repo).stdout
+        out.append((sha, body))
+        target = _headers(body, b"object")
+        if not target or not re.fullmatch(SHA_RE, target[0]):
+            raise ScanError("a tag object names no object")
+        sha = target[0]
+        types.update(_types(repo, [sha]))
+    return out
+
+
+def _push_inputs(path: str, before: str | None, after: str | None, ref: str | None,
+                 default_branch: str | None) -> tuple[str | None, str | None, str | None, str | None] | None:
+    """before, after, ref and the default branch from a push event file, each flag given
+    winning over the file; None for a private repository (after its notice)."""
+    data = load_event(path)
+    if not public_event(data):
+        return None
+    repo = data.get("repository")
+    vals = []
+    for flag, key in ((before, "before"), (after, "after"), (ref, "ref")):
+        v = data.get(key)
+        vals.append(flag if flag is not None else (v if isinstance(v, str) else None))
+    branch = repo.get("default_branch") if isinstance(repo, dict) else None
+    vals.append(default_branch if default_branch is not None else (branch if isinstance(branch, str) else None))
+    return vals[0], vals[1], vals[2], vals[3]
+
+
+def cmd_push(repo: str, before: str | None, after: str | None, ref: str | None, default_tip: str | None,
+             default_branch: str | None, event_path: str | None) -> int:
+    """What a push that already happened introduced, judged by the history that existed before
+    it (never "every other current ref": two refs pushed at once to one new commit would hide
+    each other):
+    - after all zeros: a delete; it passes only when the ref is gone from the checkout and the
+      remote;
+    - before present: the commits in `after ^before`;
+    - before all zeros (a new ref), or before not in the checkout (a force push whose old tip
+      could not be fetched; said in a note): the commits in `after ^default-tip`, or all of
+      after's history when after is the default tip of the default branch (a first push);
+    - always: the ref name, and for a tag every tag object it points through.
+    Refused (ScanError): a shallow repository; a missing or malformed input; an after or
+    default-tip object that is not in the checkout."""
+    if event_path is not None:
+        got = _push_inputs(event_path, before, after, ref, default_branch)
+        if got is None:
+            return 0
+        before, after, ref, default_branch = got
+    for flag, v in (("before", before), ("after", after)):
+        if not isinstance(v, str) or not re.fullmatch(SHA_RE, v):
+            raise ScanError(f"--{flag} is not an object name")
+    assert before is not None and after is not None
+    if not ref or not ref.startswith("refs/") or re.search(r"[\s\x00-\x1f\x7f]", ref):
+        raise ScanError("--ref is not a full ref name")
+    if default_branch is not None and (not default_branch or default_branch.startswith("-")
+                                       or re.search(r"[\s\x00-\x1f\x7f]", default_branch)):
+        raise ScanError("--default-branch is not a branch name")
+    if default_tip is None and default_branch is not None:
+        r = _git(["rev-parse", "--verify", "--quiet", "--end-of-options",
+                  "refs/remotes/origin/" + default_branch + "^{commit}"], repo, check=False)
+        found_tip = r.stdout.decode().strip()
+        default_tip = found_tip if r.returncode == 0 and re.fullmatch(SHA_RE, found_tip) else None
+    if default_tip is not None and not re.fullmatch(SHA_RE, default_tip):
+        raise ScanError("--default-tip is not an object name")
+    shallow = _git(["rev-parse", "--is-shallow-repository"], repo).stdout.decode().strip()
+    if shallow != "false":
+        raise ScanError("the checkout is a shallow repository, so the commits a push introduced cannot be "
+                        "told apart from older ones")
+    if _zero(after):
+        if not _deleted(repo, ref):
+            raise ScanError("after is all zeros but the ref still exists, so this is not a delete")
+        print("public-content guard: ref deleted: nothing to scan", file=sys.stderr)
+        return 0
+    types = _types(repo, [s for s in (before, after, default_tip) if s and not _zero(s)])
+    if after not in types:
+        raise ScanError("the pushed object is not in this checkout")
+    if default_tip is not None and default_tip not in types:
+        raise ScanError("the default branch's tip is not in this checkout")
+    if not _zero(before) and before in types:
+        negatives = [before]
+    else:
+        if default_tip is None:
+            raise ScanError("the ref's previous object is not in this checkout" if not _zero(before)
+                            else "a new ref needs --default-tip (or --default-branch)")
+        if not _zero(before):
+            print("public-content guard: note: the ref's previous commit is not in the checkout (a force "
+                  "push whose old commits could not be fetched), so this push was checked as a new ref: "
+                  "against the default branch, or its whole history", file=sys.stderr)
+        first = after == default_tip and (default_branch is None or ref == "refs/heads/" + default_branch)
+        negatives = [] if first else [default_tip]
+    terms = load_terms()
+    if terms.warning:
+        print(terms.warning, file=sys.stderr)
+    with Scanner(terms) as sc:
+        add_new_objects(sc, repo, [after], negatives)
+        if ref.startswith("refs/tags/"):
+            for sha, body in _tag_chain(repo, after, types):
+                _add_object_text(sc, "tag object %s" % sha[:12], body)
+        sc.add("ref", ref + "\n", lines=False)
+        found = sc.run()
+    if not found:
+        print("public-content guard: scanned this push: clean")
+        return 0
+    _report("this push published content that must not be public", found)
+    print("Fix: the content is already public. Rewrite or delete the commits, tag or branch, rotate any "
+          "secret, and treat the content as published. Do not edit the guard or re-run this check to get "
+          "a green result. See docs/public-content-guard.md.", file=sys.stderr)
     return 1
 
 
@@ -1577,15 +1877,35 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("url", nargs="?", default="")
     c = sub.add_parser("ci", help="scan a pull request")
     c.add_argument("--repo", default=".")
-    c.add_argument("--base", required=True)
-    c.add_argument("--head", required=True)
+    c.add_argument("--base")
+    c.add_argument("--head")
+    c.add_argument("--event-path")
+    e = sub.add_parser("event", help="scan the text fields of one GitHub event")
+    e.add_argument("--name", required=True)
+    e.add_argument("--path", required=True)
+    u = sub.add_parser("push", help="scan what a push to GitHub introduced")
+    u.add_argument("--repo", default=".")
+    u.add_argument("--before")
+    u.add_argument("--after")
+    u.add_argument("--ref")
+    u.add_argument("--default-tip")
+    u.add_argument("--default-branch")
+    u.add_argument("--event-path")
     args = ap.parse_args(argv)
     try:
         if args.mode == "text":
             return cmd_text(args.label, sys.stdin.buffer.read())
         if args.mode == "pre-push":
             return cmd_pre_push(args.remote, args.url, sys.stdin.read())
-        return cmd_ci(args.repo, args.base, args.head)
+        if args.mode == "event":
+            return cmd_event(args.name, args.path)
+        if args.mode == "push":
+            return cmd_push(args.repo, args.before, args.after, args.ref, args.default_tip,
+                            args.default_branch, args.event_path)
+        return cmd_ci(args.repo, args.base, args.head, args.event_path)
+    except NotHandled as exc:
+        print(f"public-content guard: {exc}.", file=sys.stderr)
+        return 2
     except ScanError as exc:
         print(f"public-content guard: could not check this ({exc}); blocked.", file=sys.stderr)
         if isinstance(exc, UnreadableFile):

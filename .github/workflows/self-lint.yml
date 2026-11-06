@@ -140,6 +140,18 @@ jobs:
             .github/workflows/reusable-pr-quality.yml \
             templates/caller-pr-quality.yml
 
+      # The public-content workflow and its caller template: only the
+      # job.workflow_repository / job.workflow_sha suppression (the same reason as
+      # above); no shellcheck codes are suppressed.
+      - name: "actionlint (+ shellcheck): reusable-public-content.yml, caller-public-content.yml"
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color \
+            -ignore 'property "workflow_(repository|sha)" is not defined' \
+            .github/workflows/reusable-public-content.yml \
+            templates/caller-public-content.yml
+
       - name: "actionlint (+ shellcheck): self-test.yml, self-lint.yml (no suppressions)"
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \

@@ -90,6 +90,43 @@ if [ "$WORKFLOW_AUDIT_CI" != "$MAKEFILE_AUDIT_CI" ]; then
 	fail "audit-ci version pins differ: reusable-pr-quality.yml has '$WORKFLOW_AUDIT_CI', templates/Makefile.node has '$MAKEFILE_AUDIT_CI'"
 fi
 
+# ---------- (c) the public-content guard's copies ----------
+# reusable-public-content.yml copies two things from reusable-pr-quality.yml:
+# the scanner ref check (the marked block, once per job: the
+# public-content-ref-check and public-content-ref-check-text blocks) and the
+# gitleaks release pin (tarball name and sha256). Each copy must equal the
+# original, so a fix to one cannot leave the other behind.
+PRQ=.github/workflows/reusable-pr-quality.yml
+PCW=.github/workflows/reusable-public-content.yml
+# block FILE NAME: the lines between "# BEGIN NAME" and "# END NAME", indentation removed.
+block() {
+	awk -v b="# BEGIN $2" -v e="# END $2" '
+		{ t = $0; sub(/^[ \t]+/, "", t) }
+		t == e { inside = 0 }
+		inside { print t }
+		t == b { inside = 1 }' "$1"
+}
+REF_ORIG="$(block "$PRQ" public-content-ref-check)"
+if [ -z "$REF_ORIG" ]; then
+	fail "$PRQ: no public-content-ref-check block -- has the file's format changed?"
+	exit 2
+fi
+for name in public-content-ref-check public-content-ref-check-text; do
+	if [ "$(block "$PCW" "$name")" != "$REF_ORIG" ]; then
+		fail "$PCW: the $name block is missing or differs from $PRQ's public-content-ref-check block"
+	fi
+done
+# shellcheck disable=SC2016 # the dollar signs are literal: they match the workflow text
+GL_RE='gitleaks_[0-9.]+_linux_x64\.tar\.gz|v[0-9.]+/\$tarball|[0-9a-f]{64}  \$RUNNER_TEMP/\$tarball'
+GL_ORIG="$(grep -oE "$GL_RE" "$PRQ" | sort -u)"
+if [ -z "$GL_ORIG" ]; then
+	fail "$PRQ: could not find the gitleaks tarball pin -- has the file's format changed?"
+	exit 2
+fi
+if [ "$(grep -oE "$GL_RE" "$PCW" | sort -u)" != "$GL_ORIG" ]; then
+	fail "$PCW: the gitleaks tarball version or checksum differs from $PRQ's"
+fi
+
 if [ "$FAIL" -eq 1 ]; then
 	echo "::error::Pin consistency check failed -- see the errors above. This is exactly the class of drift that already caused PR #19 (templates/caller-pr-quality.yml left at a stale @v4 pin). Fix the mismatched file(s) before merging." >&2
 	exit 1

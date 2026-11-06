@@ -340,9 +340,10 @@ jobs:
       # checked out beside the caller's tree and moved to RUNNER_TEMP at once, so
       # no later step (lint, tests, make ci) ever sees it.
       #
-      # The PR title and body reach the scanner ONLY through env vars and are read
-      # by Python as data; they are never interpolated into the script, so text
-      # like $(...) in a PR body is inert.
+      # The PR title and body reach the scanner ONLY through the event file
+      # (GITHUB_EVENT_PATH), which scan.py reads as data. They are never put in
+      # env (a step's env block is printed in the public log) and never
+      # interpolated into the script, so text like $(...) in a PR body is inert.
       #
       # If either context were empty, actions/checkout would fall back to the
       # caller's own repository and ref, so the PR would supply its own scanner.
@@ -384,8 +385,6 @@ jobs:
       - name: Public-content scan (PR title, body and new commits)
         if: github.event_name == 'pull_request' && github.event.repository.private == false
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -399,7 +398,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/public-content-bin"
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/public-content-bin" gitleaks
           PATH="$RUNNER_TEMP/public-content-bin:$PATH" python3 -I "$scanner/public-content/scan.py" ci \
-            --repo "$GITHUB_WORKSPACE" --base "$BASE_SHA" --head "$HEAD_SHA"
+            --repo "$GITHUB_WORKSPACE" --base "$BASE_SHA" --head "$HEAD_SHA" --event-path "$GITHUB_EVENT_PATH"
           # self-test.yml's assert-public-content-scan-ran requires this line in a
           # fixture job's log: it proves the scan ran to completion on a pull request.
           echo "public-content guard: scanned this pull request: clean"

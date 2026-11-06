@@ -1,0 +1,50 @@
+name: Public-content guard
+
+# Caller for the public-content guard (docs/public-content-guard.md). Copy it
+# into a PUBLIC repository as .github/workflows/public-content.yml.
+#
+# The triggers are exactly the events and action types the scanner's event map
+# handles (scripts/test-public-content-workflow-shape.sh checks it). Every
+# pull_request action, `edited` included, runs the full scan in the
+# public-content job; the other events run in public-content-text. Push and
+# text events are already public when this runs: a red run is an alarm after
+# publication, not a block.
+#
+# No branch, path or tag filters, no job `if:` (drafts are scanned too) and no
+# cancel-in-progress concurrency: a filtered, skipped or cancelled run reports
+# nothing, and a required check that reports nothing can read as green.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  push: {}
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  commit_comment:
+    types: [created]
+  discussion:
+    types: [created, edited]
+  discussion_comment:
+    types: [created, edited]
+  release:
+    types: [published, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  public-content:
+    # Pinned by commit SHA, not a mutable tag, the same way
+    # templates/caller-pr-quality.yml pins reusable-pr-quality.yml. The all-zero
+    # SHA is a placeholder: no tag holds reusable-public-content.yml yet, so this
+    # file is not ready to copy until the first such tag is cut. Then replace
+    # the SHA with that tag's commit
+    # (`git -C <clone of imrohitagrawal/.github> rev-parse vN^{commit}`) and the
+    # comment with the tag. A caller left on the placeholder fails to start,
+    # which shows as a failed run, not a green one.
+    uses: imrohitagrawal/.github/.github/workflows/reusable-public-content.yml@0000000000000000000000000000000000000000 # placeholder
