@@ -14,7 +14,9 @@
 #   GITHUB_EVENT_PATH;
 # - it holds the same BEGIN/END public-content-ref-check block as reusable-pr-quality.yml;
 # - templates/caller-public-content.yml triggers on exactly the events and action types the
-#   event map handles, with no filters, and calls the reusable workflow;
+#   event map handles that GitHub can trigger a workflow on (commit_comment is not one), lists
+#   no event outside GitHub's documented workflow triggers, has no filters, and calls the
+#   reusable workflow;
 # - reusable-pr-quality.yml's public-content scan step no longer puts PR_TITLE/PR_BODY in env
 #   and passes --event-path "$GITHUB_EVENT_PATH" to scan.py ci.
 #
@@ -40,8 +42,9 @@ REUSABLE = ROOT / ".github/workflows/reusable-public-content.yml"
 TEMPLATE = ROOT / "templates/caller-public-content.yml"
 PRQ = ROOT / ".github/workflows/reusable-pr-quality.yml"
 
-# The events and action types the event map handles (scan.py event), plus push and the
-# pull_request actions the `public-content` job runs on (every one runs the full scan).
+# The events and action types the event map handles (scan.py event) that are workflow triggers,
+# plus push and the pull_request actions the `public-content` job runs on (every one runs the
+# full scan). commit_comment is not here: GitHub has no workflow trigger for it.
 EXPECTED_ON = {
     "pull_request": ["opened", "synchronize", "reopened", "edited", "ready_for_review"],
     "push": None,
@@ -49,11 +52,16 @@ EXPECTED_ON = {
     "issue_comment": ["created", "edited"],
     "pull_request_review": ["submitted", "edited"],
     "pull_request_review_comment": ["created", "edited"],
-    "commit_comment": ["created"],
     "discussion": ["created", "edited"],
     "discussion_comment": ["created", "edited"],
     "release": ["published", "edited"],
 }
+# GitHub's documented workflow triggers ("Events that trigger workflows") that carry public
+# content this guard scans. A name outside it either is no workflow trigger at all (actionlint
+# rejects commit_comment as an unknown webhook event, and the caller would never start) or is
+# not this guard's job.
+DOCUMENTED_TRIGGERS = {"pull_request", "push", "issues", "issue_comment", "pull_request_review",
+                       "pull_request_review_comment", "discussion", "discussion_comment", "release"}
 JOBS = ["public-content", "public-content-text"]
 # The only expressions an env value may hold: none of them is text a person wrote.
 ENV_OK = {"job.workflow_repository", "job.workflow_sha", "github.event_name", "github.event_path",
@@ -522,6 +530,13 @@ else:
         else:
             bad("template: triggers on exactly the handled events and action types",
                 "missing %r, extra %r, different types %r, %s" % (missing, extra, diff, "; ".join(problems)))
+        undocumented = sorted(set(on or {}) - DOCUMENTED_TRIGGERS)
+        # Red when: the template lists an event that is not a documented workflow trigger for this
+        # guard (commit_comment included: GitHub has no such workflow trigger).
+        if isinstance(on, dict) and on and not undocumented:
+            ok("template: lists only documented workflow triggers")
+        else:
+            bad("template: lists only documented workflow triggers", "not documented %r" % undocumented)
         uses = [str(j.get("uses", "")) for j in (tpl.get("jobs") or {}).values() if isinstance(j, dict)]
         conds = [k for k, j in (tpl.get("jobs") or {}).items() if isinstance(j, dict) and "if" in j]
         # Red when: the template does not call the reusable workflow, or skips it with a job `if:` (drafts included).
