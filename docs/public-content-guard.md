@@ -101,10 +101,12 @@ terms are matched by the scanner itself.
 
 A report names the rule and the place (a file and line, a commit, a ref). A match inside an
 archive names the archive's path followed by "(inside the archive)". It never repeats the
-matched text. Every path shown in a place is checked first: a private term shows as
-`<private>`, other matches as `<redacted>`, and a path that holds a secret, or that the masks
-cannot clean, is withheld. A file the guard cannot read completely blocks the check on its
-own; the other findings are listed once it is fixed.
+matched text. A path is printed only when it is plain (letters, digits, `.`, `_`, `/` and `-`;
+no space, colon, percent sign, line break, other control or non-ASCII character) and its raw
+name, scanned before anything is escaped, matches no rule; a private term in it shows as
+`<private>`. Any other path is withheld, and a fixed placeholder stands in for it. A file the
+guard cannot read completely blocks the check on its own; the other findings are listed once
+it is fixed.
 
 ### Warnings that never block
 
@@ -312,10 +314,14 @@ repository passes with the notice "not a public repository: nothing scanned".
   is known to have leaked. Update the caller or the event map; check the text by hand
   meanwhile".
 
-Every output names places the same way. A place prints only fixed labels, numbers and commit
-ids, plus a branch, tag or file name only when the scan shows that name holds no match under
-the public rules or gitleaks' rules; otherwise a fixed placeholder stands in for it ("the ref
-name", "a file name (withheld)", "a file whose name is withheld"). Under GitHub Actions each
+Every output names places the same way, through one renderer in the scanner. A place prints
+only fixed labels, numbers and validated commit ids, plus a file name or `--label` only when
+it is plain (see "What it blocks" above) and its raw name matches no rule under the
+public rules or gitleaks' rules; otherwise a fixed placeholder stands in for it ("the ref
+name", "a file name (withheld)", "a file whose name is withheld", "the input (label
+withheld)"). Ref names and event payload text are never printed. The same rule covers
+findings, warnings, the unreadable-archive error and the workflow error lines, so a name can
+neither leak a secret nor start a line of its own. Under GitHub Actions each
 finding is also printed as a workflow error line,
 `::error title=public-content guard::<rule> in <place>`, so the run's summary names the rule
 and place, not only "exit code 1". The matched text is never printed.

@@ -1009,7 +1009,8 @@ C1="$(cat "$WORK/range-dirty.c1")"
 _fci "$WORK/range-dirty" "$(git -C "$WORK/range-dirty" rev-list --max-parents=0 HEAD)" "$(git -C "$WORK/range-dirty" rev-parse HEAD)"
 # RED WHEN: the batched parser drops a file or names it wrongly (each of the three must be found
 # at its own path and line, and nothing else).
-expect_rc "diff-tree: the ':' path is found under its name" 1 "home-folder-path at :lead.txt:1"
+# A ':' is outside the names a report may print, so this place is withheld (it is still found).
+expect_rc "diff-tree: the ':' path is found (its name withheld)" 1 "home-folder-path at a file whose name is withheld"
 expect_rc "diff-tree: the path named like a commit sha is found under its name" 1 "home-folder-path at $C1:1"
 expect_rc "diff-tree: the merge resolution is found under its name" 1 "home-folder-path at conf.txt:2"
 n_items="$(grep -c '^  - ' "$ERR")"

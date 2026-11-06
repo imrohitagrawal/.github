@@ -114,7 +114,7 @@ add_named() {
   git -C "$d" rm -q -r --cached . >/dev/null 2>&1
   echo start >"$d/a.txt"
   write_file "$d/$f" "$3"
-  git -C "$d" add -A && git -C "$d" commit -q -m "a fixture" && git -C "$d" push -q origin main 2>/dev/null ||
+  { git -C "$d" add -A && git -C "$d" commit -q -m "a fixture" && git -C "$d" push -q origin main 2>/dev/null; } ||
     die "add_named $2"
 }
 scan_push() { # NAME BEFORE AFTER
@@ -196,13 +196,13 @@ echo "== pre-push mode"
 vis acme/hp public
 mkpush hp "$(gh_url acme/hp)"
 write_file "$P/hp/$(hostile cmd)" home
-git -C "$P/hp" add -A && git -C "$P/hp" commit -q -m "a fixture" || die "hp commit"
+{ git -C "$P/hp" add -A && git -C "$P/hp" commit -q -m "a fixture"; } || die "hp commit"
 gpush "$P/hp" "$P/hp.git" origin main
 # Red when: the pre-push report prints a hostile file name.
 safe_output "pre-push: finding in a file named 'cmd' prints no piece of the name" 1 home-folder-path withheld
 git -C "$P/hp" reset -q --hard origin/main
 write_file "$P/hp/$(hostile split)" 7z
-git -C "$P/hp" add -A && git -C "$P/hp" commit -q -m "a fixture" || die "hp commit"
+{ git -C "$P/hp" add -A && git -C "$P/hp" commit -q -m "a fixture"; } || die "hp commit"
 gpush "$P/hp" "$P/hp.git" origin main
 # git push exits 1 whatever the hook's own status, so the block is told apart by its message.
 # Red when: the pre-push unreadable-archive error prints a hostile file name.
@@ -237,37 +237,59 @@ _finding and speech_warnings. Each argument must be built only from: string or n
 constants; module constants (UPPER_CASE names bound to constants); calls to the renderer
 (`render`, whose templates must be constants); a local name every one of whose assignments is
 itself safe; a parameter of a sink function (checked at its call sites); or an expression on
-ALLOW, the fixed list of values known safe, each with its reason."""
+ALLOW, the fixed list of values known safe, each with its reason. The place of Scanner.add and
+Scanner.add_names and the label of _add_object_text count as sinks: they become the place a
+report prints."""
 import ast, sys
 
 SINKS = {"print", "ScanError", "UnreadableFile", "NotHandled", "_zip_bad", "_report", "_finding",
-         "speech_warnings"}
-# (function, expression source): why it is safe to print.
+         "speech_warnings", "add", "add_names", "_add_object_text"}
+# Sinks whose other arguments are not printed: the argument positions (and keywords) checked.
+SINK_ARGS = {"speech_warnings": ([0], ()), "add": ([0], ("place",)), "add_names": ([0], ("place",)),
+             "_add_object_text": ([1], ("what",))}
+# Calls that return a safe value whatever their argument (they validate it or raise).
+SAFE_CALLS = {"_short"}
+# (function, expression source): why it is safe to print. "*" is any function.
 ALLOW = {
     ("*", "type(exc).__name__"): "an exception class name",
     ("*", "r.returncode"): "an integer exit code",
-    ("*", "exc"): "a ScanError, whose every construction is a sink checked here",
-    ("*", "n"): "a line or object number (int)",
+    ("*", "terms.warning"): "the fixed warning text of load_terms",
+    ("*", "sc.run()"): "Scanner.run returns only _finding results (a sink)",
+    ("*", "w"): "a line built by speech_warnings (a sink)",
+    ("main", "exc"): "a ScanError or NotHandled, whose every construction is a sink checked here",
+    ("allowed_addresses", "n"): "a line number (int)",
+    ("speech_warnings", "n"): "a line number (int)",
+    ("_add_object_text", "n"): "a tag number (int)",
+    ("_add_object_text", "role"): "a loop over the fixed words author, committer, tagger",
     ("_spend", "UNPACK_LIMIT >> 20"): "a constant",
-    ("_unexpected", "shown"): "a gitleaks log line, masked, cut to 100 characters and printed with %r",
-    ("_unexpected", "have"): "gitleaks' own version string, printed after %r of the line",
-    ("cmd_event", "name"): "an EVENT_MAP key: checked against the map before this line",
+    ("unpack", "what"): "a fixed format name from _CANNOT_OPEN",
+    ("Scanner._log", "self._unexpected(ln)"): "a gitleaks log line: masked, cut to 100 characters, printed with %r",
+    ("Scanner._log", "self._unexpected(level + ' ' + message)"): "as above",
+    ("Scanner._unexpected", "shown"): "the masked, cut log line, printed with %r (escapes every line break)",
+    ("Scanner._unexpected", "have"): "the installed gitleaks' version string",
+    ("Scanner.run", "rule"): "a rule id, checked as [A-Za-z0-9_.-]+ when read from gitleaks",
+    ("Scanner.run", "line"): "an integer line number",
+    ("Scanner.run", "fixed"): "the fixed place a file was added with (a sink argument)",
+    ("Scanner.run", "reason"): "a ScanError message from unpack, whose every construction is checked",
+    ("Scanner.run", "str(chunk['place'])"): "the fixed place a chunk was added with (a sink argument)",
+    ("cmd_ci", "listed"): "a constant path inside this repository",
+    ("cmd_ci", "' and '.join(missing)"): "names of fixed environment variables",
+    ("cmd_ci", "place"): "a loop over the fixed labels the PR title and the PR body",
+    ("cmd_event", "name"): "an EVENT_MAP key: checked against the map before it is printed",
     ("cmd_event", "key"): "an EVENT_MAP value (a fixed object key)",
+    ("cmd_event", "label"): "a loop over EVENT_MAP's fixed field labels",
+    ("cmd_event", "_object_label(key, obj)"): "a fixed label and an integer (see _object_label)",
     ("cmd_event", "_word(action)"): "a lower-case word, else (unreadable)",
     ("cmd_event", "_word(name)"): "a lower-case word, else (unreadable)",
+    ("cmd_push", "flag"): "a loop over the fixed words before and after",
     ("_pr_sha", "side"): "the fixed words base or head",
     ("_field_text", "label"): "a fixed label from the callers",
     ("_commit", "name"): "the fixed words base or head",
     ("_git", "args[0]"): "a git subcommand name fixed by the callers",
     ("_recorded_notes_dir", "NOTES_KEY"): "a constant",
     ("load_terms", "where"): "a fixed folder description",
-    ("cmd_ci", "listed"): "a constant path inside this repository",
-    ("cmd_ci", "' and '.join(missing)"): "names of fixed environment variables",
     ("_report", "item"): "an element of found: each built by _finding",
-    ("main", "exc"): "a ScanError or NotHandled, whose every construction is a sink checked here",
-    ("Scanner.run", "rule"): "a rule id, validated as [A-Za-z0-9_.-]+ when read from gitleaks",
-    ("Scanner.run", "reason"): "a ScanError message from unpack, whose every construction is checked",
-    ("Scanner.run", "line"): "an integer line number",
+    ("_report", "item.replace(' at ', ' in ', 1)"): "the same element, reworded for the ::error line",
 }
 
 
@@ -310,9 +332,11 @@ class Checker:
 
     def sink_name(self, call):
         name = self.callee(call)
+        f = call.func
+        if name in ("add", "add_names"):  # Scanner.add, not set.add
+            return isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in ("sc", "self")
         if name in SINKS:
             return True
-        f = call.func
         return (name == "write" and isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute)
                 and f.value.attr in ("stdout", "stderr"))
 
@@ -320,8 +344,9 @@ class Checker:
         self.sinks += 1
         args = list(call.args) + [k.value for k in call.keywords if k.arg not in ("file", "flush")]
         name = self.callee(call)
-        if name == "speech_warnings":
-            args = args[:1]  # the place; the data is scanned text that is never printed
+        if name in SINK_ARGS:
+            pos, kws = SINK_ARGS[name]
+            args = [call.args[i] for i in pos if i < len(call.args)] + [k.value for k in call.keywords if k.arg in kws]
         for a in args:
             self.check(a, stack, fn, call.lineno, set())
 
@@ -352,9 +377,10 @@ class Checker:
             return
         if isinstance(e, ast.Call) and self.callee(e) == "render":
             self.renders += 1
-            for t in e.args[1:]:
-                if not isinstance(t, ast.Constant):
-                    self.fail(line, stack, t, "a renderer template that is not a constant")
+            for t in e.args[1:]:  # the templates; the first argument is the raw name it checks
+                self.check(t, stack, fn, line, seen)
+            return
+        if isinstance(e, ast.Call) and self.callee(e) in SAFE_CALLS:
             return
         if isinstance(e, ast.Call) and self.callee(e) in ("_annotation", "_finding") and len(e.args) >= 1:
             for a in e.args:

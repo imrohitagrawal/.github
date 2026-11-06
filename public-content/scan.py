@@ -67,7 +67,10 @@ chunk without its canary is read once more behind newlines, or the check blocks.
 
 Exit status: 0 clean, 1 findings, 2 error. Every caller treats an error as a block: a check
 that could not run never counts as a pass. Reports name the rule and the place, never the
-matched text. Lines that look like reported speech print a WARNING and never block (not
+matched text. A name this scanner did not write (a file path, an archive's path, a --label)
+reaches the output only through Scanner.render, which scans the raw name with every rule and
+prints it only when it matches none and is plain (SAFE_NAME); otherwise a fixed placeholder.
+Ref names and event payload strings are never printed; commit ids only as validated hex. Lines that look like reported speech print a WARNING and never block (not
 raised from a binary's printable runs).
 
 Standard library only (Python 3.9+), plus the gitleaks binary and, for visibility, gh.
@@ -109,6 +112,9 @@ RETRY_PREFIX = b"\n" * 100_000  # put before a chunk gitleaks skipped, so it can
 NOTES_KEY = "public-content.notesDir"
 TERMS_FILE = Path("scanner") / "private-terms.txt"
 SHA_RE = r"[0-9a-f]{40}|[0-9a-f]{64}"
+# The only names the report may print: no space, colon, percent, CR, LF, other control or
+# non-ASCII character, so a name can neither start a line nor form a workflow command.
+SAFE_NAME = re.compile(r"[A-Za-z0-9._/-]{1,4096}")
 TESTED_GITLEAKS = "8.30.1"  # the version whose log lines the parser below expects
 FIX_PUSH = (
     "Fix: amend or rebase the commits to remove it, then push again. "
@@ -128,6 +134,19 @@ class NotHandled(ScanError):
 
 def _zero(sha: str) -> bool:
     return re.fullmatch(r"0+", sha) is not None
+
+
+def _short(sha: str) -> str:
+    """The first 12 characters of an object id, for a report; ScanError when SHA is not one."""
+    if not re.fullmatch(SHA_RE, sha):
+        raise ScanError("git returned an object name that is not a hex object id")
+    return sha[:12]
+
+
+def _finding(rule: str, place: str) -> str:
+    """One report line: a rule id (checked when read from gitleaks) and a place built from
+    fixed labels, numbers and Scanner.render output."""
+    return "%s at %s" % (rule, place)
 
 
 # --------------------------------------------------------------------------- private terms
@@ -256,7 +275,8 @@ _SPEECH = (
 def speech_warnings(place: str, data: bytes | str) -> list[str]:
     """Lines that look like someone's words quoted (reported speech about "the owner", a
     common way for an agent to name the person it works for, or a Markdown quote line). A
-    warning only: such a line may be fine, so it never blocks."""
+    warning only: such a line may be fine, so it never blocks. PLACE is printed: a fixed
+    label or Scanner.render output, never a raw name."""
     if isinstance(data, bytes):
         data = data.decode("utf-8", "replace")
     out = []
@@ -725,9 +745,11 @@ class Scanner:
     only when its canary is reported. A chunk that was skipped or lost its canary is scanned
     once more behind RETRY_PREFIX (so no format can be sniffed); if that fails too, ScanError.
 
-    Every path shown in a place is scanned too, whether or not that name is new in this
-    change: a path that a public rule or a secret rule matches is never shown (a fixed
-    placeholder stands in for it); a private term in a shown path is masked."""
+    Names (render): every name a place may show (a file path, a --label) is scanned raw, as
+    its own chunk, before anything is escaped, whether or not that name is new in this change.
+    It is shown only when it is plain (SAFE_NAME) and no public rule and no secret rule
+    matches it; a private term in a shown name is masked. Anything else is replaced by a fixed
+    placeholder. render is the only way such a name reaches the output."""
 
     def __init__(self, terms: Terms) -> None:
         self.terms = terms
@@ -738,6 +760,9 @@ class Scanner:
         self.run_id = secrets.token_hex(8)
         # Files that could not be read completely: (place, path, reason).
         self.unreadable: list[tuple[str, str | None, str]] = []
+        # Every raw name a place may show, and (after run) those render may print.
+        self.names: set[str] = set()
+        self.clear: set[str] = set()
         # Given addresses (lowercased), returns those already in use as author or committer
         # addresses (None: none). Applies on identity lines only.
         self.known: Callable[[set[str]], set[str]] | None = None
@@ -750,13 +775,17 @@ class Scanner:
 
     def add(self, place: str, data: bytes | str, lines: bool = True, names: list[str] | None = None,
             path: str | None = None, kind: str = "content", file: bool = False) -> None:
-        """place: what the report calls it (masked when shown). lines: append :LINE. names: one
-        path per line of data (a file-name chunk). path: the raw path a place is built from.
-        file: DATA is a file's content, so an archive is unpacked and each file in it checked;
-        one that cannot be read completely blocks the run, naming the place (see run)."""
+        """place: a fixed label the report calls it; with PATH, what it says when PATH is not
+        shown. lines: append :LINE. names: the raw name each line of data belongs to (a
+        file-name chunk). path: the raw name the place shows, through render. file: DATA is a
+        file's content, so an archive is unpacked and each file in it checked; one that cannot
+        be read completely blocks the run, naming the place (see run)."""
         if isinstance(data, str):
             data = data.encode("utf-8", "surrogateescape")
-        for view in [data] if names is not None else as_text(data):
+        if path is not None:
+            self.names.add(path)
+        views = [data] if _utf8(data) else [data, data.decode("utf-8", "replace").encode("utf-8")]
+        for view in views if names is not None else as_text(data):
             self._chunk(place, view, lines, names, path, kind, False)
         if file:
             try:
@@ -767,6 +796,26 @@ class Scanner:
             for f in inner:
                 for view in as_text(f):
                     self._chunk(place, view, lines, None, path, kind, True)
+
+    def add_names(self, place: str, names: list[str]) -> None:
+        """Scan NAMES (raw file names) as content: the names with no newline one per line of one
+        chunk, each other name as a chunk of its own, so no name is escaped before the scan and
+        every line maps back to its name."""
+        self.names.update(names)
+        plain = [n for n in names if "\n" not in n]
+        if plain:
+            self.add(place, "\n".join(plain) + "\n", names=plain)
+        for n in names:
+            if "\n" in n:
+                self.add(place, n + "\n", names=[n] * (n.count("\n") + 1))
+
+    def render(self, raw: str | None, shown_as: str, withheld_as: str) -> str:
+        """The one way a name the scanner did not write reaches the output: SHOWN_AS with the
+        name (private terms masked) when run found it plain and matched by no rule, else
+        WITHHELD_AS. Before run, every name is withheld."""
+        if raw is None or raw not in self.clear or not SAFE_NAME.fullmatch(raw):
+            return withheld_as
+        return shown_as % self.terms.mask(raw)
 
     def _name(self, idx: int) -> str:
         return "c%07d" % idx
@@ -790,12 +839,15 @@ class Scanner:
 
     def run(self) -> list[str]:
         """The report: one line per new finding (rule and place), never the matched text. A
-        file that could not be read completely is a ScanError (UnreadableFile) naming it."""
+        file that could not be read completely is a ScanError (UnreadableFile) naming it. Every
+        name in it comes from render."""
         if not self.chunks:
             return []
-        shown = sorted({str(c["path"]) for c in self.chunks if c["path"] is not None})
+        # Only a plain name can be shown, so only plain names need the display scan; one per
+        # line, raw (a plain name holds no line break, so nothing is escaped).
+        shown = sorted(n for n in self.names if SAFE_NAME.fullmatch(n))
         if shown:
-            self.add("", "\n".join(p.replace("\n", "\\n") for p in shown) + "\n", names=shown, kind="display")
+            self.add("", "\n".join(shown) + "\n", names=shown, kind="display")
         raw = self.findings()
         withheld: set[str] = set()
         for rule, idx, line, text in raw:
@@ -803,17 +855,17 @@ class Scanner:
             names = chunk["names"]
             if not isinstance(names, list) or not 0 < line <= len(names):
                 continue
-            # Allowlist: a path is shown only when no public rule and no secret rule matches
-            # it. A private term (masked as <private>) is the one match a shown path may hold,
+            # Allowlist: a name is shown only when no public rule and no secret rule matches
+            # it. A private term (masked as <private>) is the one match a shown name may hold,
             # and only when masking removes it.
             name = names[line - 1]
             if rule != "private-term" or not text or text in self.terms.mask(name):
                 withheld.add(name)
+        self.clear = set(shown) - withheld
         if self.unreadable:
             where = []
-            for place, path, reason in self.unreadable:
-                shown_as = "a file whose name is withheld" if path in withheld else self.terms.mask(place)
-                where.append("%s: %s" % (shown_as, reason))
+            for fixed, path, reason in self.unreadable:
+                where.append("%s: %s" % (self.render(path, "%s", fixed), reason))
             raise UnreadableFile("; ".join(dict.fromkeys(where)))
         allowed = allowed_addresses()
         raw = [f for f in raw if self.chunks[f[1]]["kind"] != "display" and f[3].lower() not in allowed]
@@ -826,16 +878,15 @@ class Scanner:
         for rule, idx, line, _text in raw:
             chunk = self.chunks[idx]
             names = chunk["names"]
+            suffix = " (inside the archive)" if chunk["archive"] else (":%d" % line if chunk["lines"] else "")
             if isinstance(names, list):
-                name = names[line - 1] if 0 < line <= len(names) else "?"
-                place = "a file name (withheld)" if name in withheld else "the file name " + self.terms.mask(name)
-            elif chunk["path"] is not None and chunk["path"] in withheld:
-                place = "a file whose name is withheld"
-            elif chunk["archive"]:
-                place = self.terms.mask(str(chunk["place"])) + " (inside the archive)"
+                name = names[line - 1] if 0 < line <= len(names) else None
+                place = self.render(name, "the file name %s", "a file name (withheld)")
+            elif chunk["path"] is not None:
+                place = self.render(str(chunk["path"]), "%s" + suffix, str(chunk["place"]))
             else:
-                place = self.terms.mask(str(chunk["place"])) + (":%d" % line if chunk["lines"] else "")
-            item = f"{rule} at {place}"
+                place = str(chunk["place"]) + suffix
+            item = _finding(rule, place)
             if item not in out:
                 out.append(item)
         return out
@@ -913,6 +964,8 @@ class Scanner:
                 text = f.get("Secret") or f.get("Match") or ""
                 if not isinstance(text, str):
                     raise ValueError("matched text is not a string")
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", str(f["RuleID"])):
+                    raise ValueError("a rule id that is not a plain word")  # it is printed
                 # Line 1 is the leading newline every chunk starts with.
                 out.append((str(f["RuleID"]), int(m.group(1)), max(int(f.get("StartLine") or 0) - 1 - shift, 0), text))
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -1321,7 +1374,8 @@ def add_new_objects(sc: Scanner, repo: str | None, positives: list[str], negativ
     data = "".join(p + "\n" for p in positives) + "".join("^" + n + "\n" for n in negatives)
     listing = _git(["rev-list", "--objects", "--stdin"], repo, data=data.encode()).stdout
     paths: dict[str, str] = {}
-    for line in listing.decode("utf-8", "surrogateescape").splitlines():
+    # Split on LF only: a path may hold CR or U+2028, which splitlines() would also break on.
+    for line in listing.decode("utf-8", "surrogateescape").split("\n"):
         sha, _, path = line.partition(" ")
         if sha:
             paths.setdefault(sha, path)
@@ -1337,7 +1391,7 @@ def add_new_objects(sc: Scanner, repo: str | None, positives: list[str], negativ
     names: set[str] = set()
     commit_roots: set[str] = set()
     for sha, kind, body in _cat_objects(repo, commits + tags):
-        _add_object_text(sc, "%s %s" % (kind if kind == "commit" else "tag object", sha[:12]), body)
+        _add_object_text(sc, "%s %s" % ("commit" if kind == "commit" else "tag object", _short(sha)), body)
         if kind == "commit":
             commit_roots.update(_headers(body, b"tree"))
     changed, links = _changed_files(repo, commits)
@@ -1359,10 +1413,12 @@ def add_new_objects(sc: Scanner, repo: str | None, positives: list[str], negativ
 
     for blob, _kind, body in _cat_objects(repo, sorted(files)):
         for path in files[blob]:
-            sc.add(path or "a blob pushed to a ref (%s)" % blob[:12], body, path=path or None, file=True)
+            if path:
+                sc.add("a file whose name is withheld", body, path=path, file=True)
+            else:
+                sc.add("a blob pushed to a ref (%s)" % _short(blob), body, file=True)
     if names:
-        ordered = sorted(names)
-        sc.add("file names", "\n".join(n.replace("\n", "\\n") for n in ordered) + "\n", names=ordered)
+        sc.add_names("file names", sorted(names))
 
 
 # --------------------------------------------------------------------------- pre-push
@@ -1482,7 +1538,8 @@ def cmd_pre_push(remote: str, url: str, refs: str) -> int:
     with Scanner(terms) as sc:
         add_new_objects(sc, None, positives, existing(None, sorted(set(tips + known))))
         # Destination ref names are published too; the report says only "ref".
-        sc.add("ref", "\n".join(n.replace("\n", "\\n") for n in ref_names) + "\n", lines=False)
+        # One per line of git's input, so a name holds no line break; never shown.
+        sc.add("ref", "\n".join(ref_names) + "\n", lines=False)
         found = sc.run()
     if not found:
         return 0
@@ -1845,7 +1902,7 @@ def cmd_push(repo: str, before: str | None, after: str | None, ref: str | None, 
         add_new_objects(sc, repo, [after], negatives)
         if ref.startswith("refs/tags/"):
             for sha, body in _tag_chain(repo, after, types):
-                _add_object_text(sc, "tag object %s" % sha[:12], body)
+                _add_object_text(sc, "tag object %s" % _short(sha), body)
         sc.add("the ref name", ref + "\n", lines=False)
         found = sc.run()
     if not found:
@@ -1875,8 +1932,9 @@ def _report(what: str, found: list[str]) -> None:
         print("  - " + item, file=sys.stderr)
     if os.environ.get("GITHUB_ACTIONS") == "true":
         for item in found:
-            rule, _, place = item.partition(" at ")
-            print("::error title=public-content guard::" + _annotation("%s in %s" % (rule, place)), flush=True)
+            # "RULE at PLACE" -> "RULE in PLACE": a rule id holds no space, so the first " at "
+            # is the separator.
+            print("::error title=public-content guard::" + _annotation(item.replace(" at ", " in ", 1)), flush=True)
 
 
 def cmd_text(label: str, data: bytes) -> int:
@@ -1884,10 +1942,11 @@ def cmd_text(label: str, data: bytes) -> int:
     if terms.warning:
         print(terms.warning, file=sys.stderr)
     with Scanner(terms) as sc:
-        sc.add(label, data, file=True)
+        sc.add("the input (label withheld)", data, path=label, file=True)
         found = sc.run()
+        shown = sc.render(label, "%s", "the input (label withheld)")
     # A binary's printable runs are not someone's words: no warnings from them.
-    for w in speech_warnings(label, data) if is_text(data) else []:
+    for w in speech_warnings(shown, data) if is_text(data) else []:
         print(w, file=sys.stderr)
     if not found:
         return 0
