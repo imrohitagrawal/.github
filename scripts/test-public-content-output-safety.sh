@@ -229,6 +229,36 @@ printf 'the owner said it is fine\n' >"$WORK/t.in"
 # Red when: a plain label is withheld too (partner: the label cases above are not vacuous).
 safe_output "text: warning under a plain label names it" 0 "WARNING: demo:1"
 
+echo "== a reader that closes the output early: exit 2, the tool's error code"
+# 6 000 findings print far more than a pipe holds, so a reader that takes one byte and closes
+# its end makes the scanner's next write fail. What was not written was not reported, so that
+# is an error (2), never Python's own exit 120 or a crash.
+"$REAL_PY" -I -c 'import sys
+open(sys.argv[1], "w").write("".join("see %s %d\n" % (sys.argv[2], i) for i in range(6000)))' \
+  "$WORK/many.in" "$HOMEP" || die "many.in"
+# early_close STREAM READ: run text mode under GitHub Actions with STREAM (stdout or stderr) on a
+# pipe; read READ bytes of it (all: everything), close it, print the exit code.
+early_close() {
+  GITHUB_ACTIONS=true "$REAL_PY" -I -c 'import subprocess, sys
+scan, data, stream, n = sys.argv[1:5]
+pipe, null = subprocess.PIPE, subprocess.DEVNULL
+p = subprocess.Popen([sys.executable, scan, "text", "--label", "demo"], stdin=open(data, "rb"),
+                     stdout=pipe if stream == "stdout" else null, stderr=pipe if stream == "stderr" else null)
+end = p.stdout if stream == "stdout" else p.stderr
+end.read() if n == "all" else end.read(int(n))
+end.close()
+print(p.wait(timeout=600))' "$SCAN" "$WORK/many.in" "$1" "$2"
+}
+for stream in stdout stderr; do
+  got="$(early_close "$stream" 1)"
+  # Red when: a BrokenPipeError on the output is left to Python (exit 120) or reported as success.
+  if [ "$got" = 2 ]; then ok "broken pipe on $stream: exit 2"; else bad "broken pipe on $stream: exit 2" "got $got"; fi
+  got="$(early_close "$stream" all)"
+  # Red when: the same run with a reader that reads everything is not a finding (partner: the
+  # case above fails because the pipe closed, not because the scan did).
+  if [ "$got" = 1 ]; then ok "full read on $stream: exit 1"; else bad "full read on $stream: exit 1" "got $got"; fi
+done
+
 echo "== source: every output call formats only renderer output or allowlisted values"
 cat >"$WORK/outcheck.py" <<'PYEOF'
 """Static check of scan.py's output calls. A SINK is a call that prints or builds printed text:

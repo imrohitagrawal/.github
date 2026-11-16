@@ -2045,5 +2045,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def run(argv: list[str] | None = None) -> int:
+    """main, with its output flushed. A reader that closed the output early (BrokenPipeError,
+    here or caught inside main) is an error, 2: what could not be written was not reported.
+    The output is then pointed at the null device, so Python's own flush at exit cannot fail
+    again and exit 120."""
+    try:
+        rc = main(argv)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return rc
+    except BrokenPipeError:
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, sys.stdout.fileno())
+        os.dup2(null, sys.stderr.fileno())
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())
