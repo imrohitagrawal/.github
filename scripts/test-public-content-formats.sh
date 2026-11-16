@@ -1078,6 +1078,9 @@ elif kind == "pgp":  # pgp AT: the PGP block on its own line from byte AT
     data = b"!" * (at - 1) + b"\n" + pgp() + b"\n" + b"!" * 100000
 elif kind == "nokey-end":  # a key header with no end marker in a long line: no key, so clean
     data = b"!" * 73998 + b"\n" + dash + b"BEGIN PRIVATE KEY" + dash + b"A" * 150000
+elif kind == "letters":  # letters AT TEXT: 'a' filler, TEXT from byte AT, 150 000 'a' (no break)
+    at, text = int(args[0]), args[1].encode()
+    data = b"a" * at + text + b"a" * 150000
 elif kind == "word":  # word AT TEXT: '!' filler, TEXT from byte AT, 150 000 '!' (no newline)
     at, text = int(args[0]), args[1].encode()
     data = b"!" * at + text + b"!" * 150000
@@ -1132,6 +1135,15 @@ for at in 73999 74000 89000 147999; do
   # RED WHEN: as above, for the same key wrapped at 64 characters.
   expect_rc "long key (wrapped) from byte $at is found" 1 "private-key at demo:2" @scanned
 done
+# A key line that starts 4 000 bytes before the second window's start (beyond the 2 000 bytes an
+# edge may move back) and runs past the first window's end: no window holds all of it.
+for wrap in one wrap; do
+  ksize="$(_gen pem "$WORK/pem.txt" 70000 900 "$wrap")"
+  _text "$WORK/pem.txt"
+  # RED WHEN: key blocks are not read as pieces of their own, so a key longer than the overlap
+  # that no window edge can reach is cut between two windows and missed.
+  expect_rc "long key ($ksize bytes, $wrap) from byte 70000 is found" 1 "private-key at demo:2" @scanned
+done
 psize="$(_gen pgp "$WORK/pgp.txt" 73999)"
 _text "$WORK/pgp.txt"
 # RED WHEN: a PGP private key block (a blank line after its header) longer than the overlap is cut.
@@ -1165,6 +1177,16 @@ for at in 73990 73999 74000 $((90000 - ${#PTERM})) 89990 89999; do
   _text "$WORK/word.txt"
   # RED WHEN: the term itself is no longer found at a window edge (partner of the two above).
   expect_rc "the term alone from byte $at is found" 1 "private-term at demo:1" @scanned
+done
+
+# Inside a run of letters with no break, a window edge cannot move to a real boundary. The term
+# there is inside a longer word, so it must not be found.
+for at in 74000 $((90000 - ${#PTERM})); do
+  _gen letters "$WORK/word.txt" "$at" "$PTERM"
+  _text "$WORK/word.txt"
+  # RED WHEN: private terms are matched on each window, so a window edge at the term's start or
+  # end invents the word boundary the term needs.
+  expect_rc "the term inside a long run of letters, at a window edge from byte $at, is clean" 0 @scanned
 done
 
 echo "== (j) a text longer than one gitleaks piece is read as windows with real edges"
