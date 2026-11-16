@@ -1179,15 +1179,18 @@ for at in 73990 73999 74000 $((90000 - ${#PTERM})) 89990 89999; do
   expect_rc "the term alone from byte $at is found" 1 "private-term at demo:1" @scanned
 done
 
-# Inside a run of letters with no break, a window edge cannot move to a real boundary. The term
-# there is inside a longer word, so it must not be found.
-for at in 74000 $((90000 - ${#PTERM})); do
-  _gen letters "$WORK/word.txt" "$at" "$PTERM"
-  _text "$WORK/word.txt"
-  # RED WHEN: private terms are matched on each window, so a window edge at the term's start or
-  # end invents the word boundary the term needs.
-  expect_rc "the term inside a long run of letters, at a window edge from byte $at, is clean" 0 @scanned
-done
+# Inside a run of letters with no break, a window start cannot move to a real boundary. The term
+# (written without its separator, which it also matches) ends at a break but starts inside a
+# longer word, so it must not be found.
+_gen letters "$WORK/word.txt" 74000 "${TERM_A}labs!"
+_text "$WORK/word.txt"
+# RED WHEN: private terms are matched on each window, so the window starting at byte 74 000,
+# inside the run of letters, invents the word boundary the term needs before it.
+expect_rc "the term after a long run of letters, at a window start, is clean" 0 @scanned
+_gen word "$WORK/word.txt" 74000 "${TERM_A}labs!"
+_text "$WORK/word.txt"
+# RED WHEN: the separator-less form is not matched at all (partner: after a break it is found).
+expect_rc "the same term after a break is found" 1 "private-term at demo:1" @scanned
 
 echo "== (j) a text longer than one gitleaks piece is read as windows with real edges"
 _gen short-lines "$WORK/short.txt" 124990 "$GHPAT"
