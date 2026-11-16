@@ -367,6 +367,42 @@ cie "$CICLEAN" "$EV/lone-pr.json"
 # Red when: the pull request step crashes on a lone surrogate in its title.
 expect_rc "ci --event-path: a lone surrogate in the title is clean" 0
 
+# Unit level: every surrogate an event's JSON holds is U+FFFD in what the rules read, including
+# U+DC80..U+DCFF, which JSON did not get from a file name's bytes (two of them must not become
+# the character those bytes spell). A file name's bytes, read with surrogateescape, are kept.
+SURPY="$WORK/surrogates.py"
+cat >"$SURPY" <<'EOF'
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import scan
+work = sys.argv[2]
+bad = []
+for text in ("\ud800", "\udc80", "\udcff", "\udcc3\udca9", "a\udfffb"):
+    path = os.path.join(work, "sur.json")
+    with open(path, "w", encoding="ascii") as f:
+        json.dump({"action": "opened", "repository": {"private": False},
+                   "issue": {"number": 7, "title": "", "body": text}}, f)
+    body = scan._field_text(scan.load_event(path)["issue"], "body", "the issue body")
+    with scan.Scanner(scan.Terms([], None)) as sc:
+        sc.add("issues issue #7 body", body)
+        got = sc._text(0)
+    want = "".join("�" if 0xD800 <= ord(c) <= 0xDFFF else c for c in text).encode("utf-8")
+    if got != want:
+        bad.append("event %r read as %s, want %s" % (text, got.hex(), want.hex()))
+name = b"caf\xc3\xa9-\xff.txt".decode("utf-8", "surrogateescape")
+with scan.Scanner(scan.Terms([], None)) as sc:
+    sc.add_names("a file name", [name])
+    got = sc._text(0)
+if got != b"caf\xc3\xa9-\xff.txt\n":
+    bad.append("file name bytes read as %s" % got.hex())
+print("\n".join(bad) or "OK")
+EOF
+sur="$("$REAL_PY" -I -B "$SURPY" "$ROOT/public-content" "$WORK" 2>&1)"
+# Red when: event text keeps U+DC80..U+DCFF as raw bytes (the two-byte case then reads as a
+# different, valid character), or file names lose their bytes (the partner).
+if [ "$sur" = OK ]; then ok "events: every JSON surrogate is U+FFFD; file name bytes are kept"; else
+  bad "events: every JSON surrogate is U+FFFD; file name bytes are kept" "$(printf '%s' "$sur" | tr '\n' ';')"; fi
+
 echo "== the pull request clean line comes from a real scan only"
 CLEANLINE="public-content guard: scanned this pull request: clean for the public rules (private terms are not checked in CI)"
 cie "$CICLEAN" "$EV/pr-clean.json"

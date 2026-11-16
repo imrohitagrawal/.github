@@ -338,8 +338,11 @@ _RUNS = tuple((re.compile(rb"(?:%s){%d,}" % (unit, MIN_RUN)), first, step) for u
 ))
 
 
+# Any UTF-16 surrogate: event text from JSON has each replaced (see _field_text).
+_SURROGATE = re.compile("[\ud800-\udfff]")
 # A lone UTF-16 surrogate that is not one of surrogateescape's (U+DC80..U+DCFF: a byte of a name
-# that is not UTF-8). JSON can hold one (\ud800), and it cannot be encoded as UTF-8.
+# that is not UTF-8). It cannot be encoded as UTF-8; text from git or the environment, read with
+# surrogateescape, holds none, so this only keeps any other text from stopping the scan.
 _LONE_SURROGATE = re.compile("[\ud800-\udc7f\udd00-\udfff]")
 
 
@@ -1864,7 +1867,9 @@ def _field_text(obj: dict[str, object], field: str, label: str) -> str:
         return ""
     if not isinstance(value, str):
         raise ScanError(f"the {label} field of the event is not text")
-    return value
+    # JSON can hold lone UTF-16 surrogates (\ud800, \udc80). None of them stands for a byte:
+    # each is U+FFFD, the way it is shown, so two of them never spell another character.
+    return _SURROGATE.sub("\ufffd", value)
 
 
 def _object_label(key: str, obj: dict[str, object]) -> str:
