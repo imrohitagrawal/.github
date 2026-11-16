@@ -1020,7 +1020,7 @@ class Scanner:
             m = _LOG_LINE.match(ln.strip())
             if not m:
                 raise ScanError("gitleaks printed something that is not a log line (%s), so not everything "
-                                "was checked" % self._unexpected(ln))
+                                "was checked" % self._unexpected())
             level, message = m.groups()
             if message.startswith("skipping finding"):
                 continue  # an allowlisted match (trace level in 8.30.1): the file itself was read
@@ -1033,21 +1033,25 @@ class Scanner:
                 skipped.add(int(name.group(1)))
             elif level in ("WRN", "ERR", "FTL", "PNC") and not re.fullmatch(r"leaks found: \d+", message.strip()):
                 raise ScanError("gitleaks reported a problem (%s), so not everything was checked"
-                                % self._unexpected(level + " " + message))
+                                % self._unexpected())
         return skipped
 
-    def _unexpected(self, line: str) -> str:
-        """An unexpected gitleaks log line for a block message: masked, cut short, and with the
-        installed and the tested gitleaks versions, since a new version's log is the usual cause."""
-        shown = self.terms.mask(line.strip())[:100]
+    def _unexpected(self) -> str:
+        """The block message's note on an unexpected gitleaks log line: a fixed text with the
+        installed and the tested gitleaks versions, since a new version's log is the usual cause.
+        It never quotes the line: gitleaks' log can repeat what it read, so an excerpt could
+        put scanned content in the log. The installed version is shown only as a plain version
+        number."""
         try:
             r = subprocess.run([shutil.which("gitleaks") or "gitleaks", "version"], stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=20)
-            have = r.stdout.strip() or "unknown"
+            have = r.stdout.strip()
         except (OSError, subprocess.SubprocessError):
+            have = ""
+        if not re.fullmatch(r"v?[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}", have):
             have = "unknown"
-        return "it printed %r; gitleaks %s is installed, the guard is tested with %s" % (
-            shown, have, TESTED_GITLEAKS)
+        return "the line is not shown; gitleaks %s is installed, the guard is tested with %s" % (
+            have, TESTED_GITLEAKS)
 
 
 # --------------------------------------------------------------------------- visibility
