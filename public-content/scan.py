@@ -64,8 +64,9 @@ plain text:
 gitleaks skips a file it sniffs as a binary format, logging only at debug level, and passes a
 file it could not open; so every chunk carries a canary line that proves it was read, and a
 chunk without its canary is read once more behind newlines, or the check blocks.
-gitleaks also cuts a long line with no break where its read ends, so text longer than WINDOW is
-scanned as overlapping windows, each read whole and each with its own canary (see WINDOW).
+gitleaks also cuts a long text at an arbitrary byte where no blank line comes near the end of
+its read, so such a text is scanned as overlapping windows, each read whole and each with its
+own canary, and its key blocks as pieces of their own (see WINDOW).
 
 Exit status: 0 clean, 1 findings, 2 error. Every caller treats an error as a block: a check
 that could not run never counts as a pass. Reports name the rule and the place, never the
@@ -81,6 +82,7 @@ Standard library only (Python 3.9+), plus the gitleaks binary and, for visibilit
 from __future__ import annotations
 
 import argparse
+import bisect
 import bz2
 import io
 import json
@@ -111,17 +113,32 @@ UNPACK_LIMIT = 512 * 1024 * 1024  # bytes unpacked from one file, counted at eve
 STREAM_COST = 4096  # budget each compressed stream costs besides its output
 MIN_RUN = 12  # characters in a printable run of a binary that the rules read
 RETRY_PREFIX = b"\n" * 100_000  # put before a chunk gitleaks skipped, so it cannot sniff a format
-# gitleaks reads a file in pieces of 100 000 bytes, each extended by at most 25 000 bytes to the
-# next whitespace (8.30.1), so a match across a piece's end in a line with no break is cut in two
-# and missed. So text longer than WINDOW is scanned as windows of WINDOW bytes (plus up to 3 to
-# start on a whole UTF-8 character), each its own chunk with its own canary, small enough that
-# gitleaks reads the whole file at once (with its newlines and canary, under 100 000 bytes).
-# Each window starts WINDOW - OVERLAP bytes after the one before, so every run of up to OVERLAP
-# bytes lies wholly inside some window. OVERLAP is far longer than any text a rule needs to see
-# at once: the longest is a PEM private key block (about 6.5 KB for an 8192-bit RSA key); the
-# public rules and the other secret rules need a few hundred bytes at most.
+# How gitleaks 8.30.1 reads a file (measured): pieces of 100 000 bytes, each extended to the next
+# "safe" place, which is two line breaks with only spaces or tabs between them (a blank line, or
+# any CRLF line end), but by at most 25 000 bytes. So where no such place comes within 25 000
+# bytes, a piece ends at an arbitrary byte and a match across it is cut in two and missed.
+# A text is therefore read whole, as one chunk, when it is short enough for one piece, or when no
+# stretch of it longer than SAFE_STRETCH lacks such a place (gitleaks then only cuts there).
+# Otherwise it is read as overlapping windows (_windows), each its own chunk with its own canary
+# and small enough for one piece. Each window starts at most WINDOW - OVERLAP bytes after the one
+# before, moved back by up to EDGE bytes to a line start or to just after a byte that is not a
+# letter or digit, and ends the same way, so windows overlap by at least OVERLAP - EDGE bytes and
+# a rule's word boundary is real wherever such a byte is near. Every match of up to that many
+# bytes lies wholly inside some window. The private-key rule has no upper length, and a PGP key
+# block holds a blank line, so every key block (a BEGIN line to the first END marker after it)
+# of a text longer than one piece is also read as a chunk of its own, and a block longer than
+# WINDOW blocks the check. Private terms are matched in Python on the whole text, never on
+# windows.
+GITLEAKS_PIECE = 100_000
+SAFE_STRETCH = 20_000
 WINDOW = 90_000
 OVERLAP = 16_000
+EDGE = 2_000
+_SAFE_PLACE = re.compile(rb"[\r\n][ \t]*[\r\n]")
+_NOT_WORD = re.compile(rb"[^A-Za-z0-9\x80-\xff]")
+_KEY_BEGIN = re.compile(rb"(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----")
+_KEY_END = re.compile(rb"(?i)KEY(?: BLOCK)?-----")
+KEY_MIN_BODY = 64  # the rule's [\s\S-]{64,}? between the markers
 NOTES_KEY = "public-content.notesDir"
 TERMS_FILE = Path("scanner") / "private-terms.txt"
 SHA_RE = r"[0-9a-f]{40}|[0-9a-f]{64}"
@@ -739,6 +756,72 @@ class UnreadableFile(ScanError):
     be read to its last byte). The report names the file and says what to do."""
 
 
+def _read_whole(text: bytes) -> bool:
+    """True when gitleaks reads TEXT (as a chunk) without cutting it at an arbitrary byte: it
+    fits in one piece, or no stretch longer than SAFE_STRETCH lacks a safe place (see WINDOW)."""
+    if len(text) <= GITLEAKS_PIECE - 100:
+        return True
+    last = 0
+    for m in _SAFE_PLACE.finditer(text):
+        if m.end() - last > SAFE_STRETCH:
+            return False
+        last = m.end()
+    return len(text) - last <= SAFE_STRETCH
+
+
+def _edge(text: bytes, pos: int) -> int:
+    """POS moved back by up to EDGE bytes: to a line start, else to just after a byte that is
+    not a letter or digit, else to the start of a whole UTF-8 character."""
+    if pos <= 0 or pos >= len(text):
+        return max(0, min(pos, len(text)))
+    low = max(0, pos - EDGE)
+    nl = text.rfind(b"\n", low, pos)
+    if nl >= 0:
+        return nl + 1
+    found = -1
+    for m in _NOT_WORD.finditer(text, low, pos):
+        found = m.end()
+    if found > 0:
+        return found
+    at = pos
+    while 0 < at and pos - at < 3 and 0x80 <= text[at] < 0xC0:
+        at -= 1
+    return at
+
+
+def _windows(text: bytes) -> list[tuple[int, int]]:
+    """(start, end) of each window of TEXT (see WINDOW): at most WINDOW bytes each, every window
+    after the first starting before the one before it ends by at least OVERLAP - EDGE bytes."""
+    out = []
+    start = 0
+    while True:
+        if start + WINDOW >= len(text):
+            out.append((start, len(text)))
+            return out
+        out.append((start, _edge(text, start + WINDOW)))
+        start = _edge(text, start + WINDOW - OVERLAP)
+
+
+def _key_blocks(text: bytes) -> list[tuple[int, int]]:
+    """(start, end) of each private-key block of TEXT: from the start of the line holding a
+    BEGIN marker to the end of the first END marker at least KEY_MIN_BODY bytes after it (the
+    rule's own shape). A BEGIN marker with no END marker after it is no key and is skipped. A
+    block longer than WINDOW cannot be read in one piece: ScanError, a fixed message."""
+    ends = [m for m in _KEY_END.finditer(text)]
+    starts = [m.start() for m in ends]
+    out = []
+    for m in _KEY_BEGIN.finditer(text):
+        i = bisect.bisect_left(starts, m.end() + KEY_MIN_BODY)
+        if i == len(ends):
+            continue
+        begin = text.rfind(b"\n", 0, m.start()) + 1
+        if ends[i].end() - begin > WINDOW:
+            raise ScanError("a private key block crosses a scan window and is too long to be read in one "
+                            "piece, so it could not be checked")
+        out.append((begin, ends[i].end()))
+    return out
+
+
 FIX_UNREADABLE = (
     "Fix: remove it from the commits and push again; or commit its contents unpacked; or repack it "
     "as zip, tar.gz or tar.xz, which the guard reads completely; or keep it in a private repository. "
@@ -849,23 +932,40 @@ class Scanner:
 
     def _chunk(self, place: str, text: bytes, lines: bool, names: list[str] | None, path: str | None,
                kind: str, inside: bool) -> None:
+        """TEXT as one chunk when gitleaks reads it safely, else as overlapping windows; a text
+        longer than one piece also gets one chunk per key block (see WINDOW). The first chunk of
+        a text carries the private-term match for the whole text (see findings)."""
+        meta = {"place": place, "lines": lines, "names": names, "path": path, "archive": inside, "kind": kind}
+        if len(text) <= GITLEAKS_PIECE - 100:
+            self._write(meta, text, 0, terms=None)
+            return
+        if _read_whole(text):
+            self._write(meta, text, 0, terms=None)
+        else:
+            whole = self.work / ("whole-%07d" % len(self.chunks))
+            whole.write_bytes(text)
+            nl, last = 0, 0  # a running count of the line breaks before each window
+            for n, (at, end) in enumerate(_windows(text)):
+                nl += text.count(b"\n", last, at)
+                last = at
+                self._write(meta, text[at:end], nl, terms=whole if n == 0 else False)
+        # gitleaks cuts a long text even where it reads it whole (at a blank line, which a PGP
+        # key block holds), so every key block of a long text is also read on its own.
+        nl, last = 0, 0
+        for at, end in _key_blocks(text):
+            nl += text.count(b"\n", last, at)
+            last = at
+            self._write(meta, text[at:end], nl, terms=False)
+
+    def _write(self, meta: dict[str, object], text: bytes, shift: int, terms: Path | bool | None) -> None:
         # The leading newline keeps gitleaks from reading the first bytes as a binary file's
         # signature; line numbers are shifted back when read. The canary line ends the chunk.
-        # Text longer than WINDOW becomes overlapping windows (see WINDOW); "shift" is the lines
-        # of the text before a window's first line, added back to its findings' line numbers.
-        start = 0
-        while True:
-            at = start
-            while 0 < at and start - at < 3 and 0x80 <= text[at] < 0xC0:
-                at -= 1  # start on a whole UTF-8 character
-            idx = len(self.chunks)
-            (self.src / self._name(idx)).write_bytes(
-                b"\n" + text[at:start + WINDOW] + b"\n" + self._canary(idx).encode())
-            self.chunks.append({"place": place, "lines": lines, "names": names, "path": path,
-                                "archive": inside, "kind": kind, "shift": text.count(b"\n", 0, at)})
-            if start + WINDOW >= len(text):
-                break
-            start += WINDOW - OVERLAP
+        # shift: the lines of the whole text before this chunk's first line. terms: None, match
+        # the private terms on this chunk's text; a path, on the whole text saved there; False,
+        # not on this chunk (a later window or a key block of a text matched elsewhere).
+        idx = len(self.chunks)
+        (self.src / self._name(idx)).write_bytes(b"\n" + text + b"\n" + self._canary(idx).encode())
+        self.chunks.append(dict(meta, shift=shift, terms=terms))
 
     def _text(self, idx: int) -> bytes:
         """A chunk's text, without the leading newline and the canary line."""
@@ -940,8 +1040,12 @@ class Scanner:
         for n, cfg in enumerate((secrets_cfg, public_cfg)):
             raw += self._pass(exe, cfg, n)
         if self.terms.find_re is not None:
-            for idx in range(len(self.chunks)):
-                text = self._text(idx).decode("utf-8", "surrogateescape")
+            for idx, chunk in enumerate(self.chunks):
+                source = chunk["terms"]
+                if source is False:
+                    continue
+                raw_text = source.read_bytes() if isinstance(source, Path) else self._text(idx)
+                text = raw_text.decode("utf-8", "surrogateescape")
                 for m in self.terms.find_re.finditer(text):
                     raw.append(("private-term", idx, text.count("\n", 0, m.start()) + 1, m.group(0)))
         # Line numbers of the whole text, not of a window.

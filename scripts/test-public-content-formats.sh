@@ -27,9 +27,11 @@
 #     Log lines are read at debug level: WRN/ERR (other than `leaks found: N`) -> 2; a line not
 #     of the shape `<time> <LEVEL> ...` -> 2; a `skipping` line naming a file that is not one of
 #     this run's chunks -> 2; other TRC/DBG/INF lines are ignored.
-#     Text longer than 90 000 bytes is scanned as windows of 90 000 bytes, each starting 74 000
-#     bytes after the one before (16 000 bytes of overlap), each with its own canary; findings
-#     keep the text's line numbers. So a match anywhere in a line with no break is found.
+#     A text gitleaks would cut at an arbitrary byte (more than one piece of 100 000 bytes, and
+#     a stretch of over 20 000 bytes with no blank line) is scanned as windows of at most
+#     90 000 bytes overlapping by at least 14 000, each with its own canary; any other text
+#     whole. Every key block of a text over one piece is also read on its own (one over 90 000
+#     bytes -> 2). Private terms are matched on the whole text. Findings keep the text's lines.
 # (b) A file that starts like a zip, tar, gzip, bzip2 or xz is read completely, or exit 2.
 #     zip: one end record, ending exactly at the end of the file; entries back to back from byte
 #     0 to the central directory (data descriptors of 12, 16, 20 or 24 bytes matched to the
@@ -1050,6 +1052,128 @@ lines[2499] = "key " + sys.argv[1]
 sys.stdout.write("\n".join(lines) + "\n")' "$GHPAT" >"$WORK/many-lines.txt"
 _run python3 "$SCAN" text --label demo <"$WORK/many-lines.txt"
 expect_rc "long text: a finding past the first window keeps its line number" 1 "github-pat at demo:2500" @scanned
+
+# The fixtures below come from one generator, so this file holds no key envelope and no term in
+# a form a rule matches. The key bodies are base64 of a fixed phrase: not real keys.
+LONGGEN="$WORK/longgen.py"
+cat >"$LONGGEN" <<'EOF'
+import base64, sys
+kind, out = sys.argv[1], sys.argv[2]
+args = sys.argv[3:]
+dash = b"-" * 5
+def pem(phrases, wrap):
+    body = base64.b64encode(b"not-a-real-private-key" * phrases)
+    if wrap:
+        body = b"\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+    return dash + b"BEGIN PRIVATE KEY" + dash + b"\n" + body + b"\n" + dash + b"END PRIVATE KEY" + dash
+def pgp():
+    body = base64.encodebytes(b"not-a-real-pgp-private-key-block" * 470)
+    return (dash + b"BEGIN PGP PRIVATE KEY BLOCK" + dash + b"\n\n" + body
+            + dash + b"END PGP PRIVATE KEY BLOCK" + dash)
+if kind == "pem":  # pem AT PHRASES WRAP: '!' filler, a newline, the key from byte AT, a newline, '!'
+    at, phrases, wrap = int(args[0]), int(args[1]), args[2] == "wrap"
+    data = b"!" * (at - 1) + b"\n" + pem(phrases, wrap) + b"\n" + b"!" * 100000
+elif kind == "pgp":  # pgp AT: the PGP block on its own line from byte AT
+    at = int(args[0])
+    data = b"!" * (at - 1) + b"\n" + pgp() + b"\n" + b"!" * 100000
+elif kind == "nokey-end":  # a key header with no end marker in a long line: no key, so clean
+    data = b"!" * 73998 + b"\n" + dash + b"BEGIN PRIVATE KEY" + dash + b"A" * 150000
+elif kind == "word":  # word AT TEXT: '!' filler, TEXT from byte AT, 150 000 '!' (no newline)
+    at, text = int(args[0]), args[1].encode()
+    data = b"!" * at + text + b"!" * 150000
+elif kind == "short-lines":  # 60-byte lines, no blank line, TOKEN from byte AT
+    at, tok = int(args[0]), args[1].encode()
+    line = b"y" * 59 + b"\n"
+    data = (line * (at // 60 + 1))[:at] + b" " + tok + b" \n" + line * 3000
+elif kind == "glued":  # a blank line every 3 lines; TOKEN glued to letters, from byte AT
+    at, tok = int(args[0]), args[1].encode()
+    para = (b"y" * 59 + b"\n") * 3 + b"\n"
+    pre = (para * (at // len(para) + 1))[:at - 30]
+    data = pre + b"\n" + b"a" * 29 + tok + b"a" * 20 + b"\n" + para * 2000
+else:
+    sys.exit("unknown fixture " + kind)
+open(out, "wb").write(data)
+if kind == "pem":
+    print(len(pem(int(args[1]), args[2] == "wrap")))
+elif kind == "pgp":
+    print(len(pgp()))
+EOF
+_gen() { "$REAL_PY" -I "$LONGGEN" "$@" || die "longgen $1"; }
+_text() { _run python3 "$SCAN" text --label demo <"$1"; }
+
+echo "== (h) a private-key block longer than the window overlap is still found"
+# A PEM key has no upper length in the secret rule, so no fixed overlap covers every key. A key
+# block in text that gitleaks would split is read as a piece of its own.
+size="$(_gen pem "$WORK/pem.txt" 2 600 one)"
+[ "$size" -gt 16000 ] || die "the PEM fixture is only $size bytes"
+_text "$WORK/pem.txt"
+# RED WHEN: a long key near the start of a long line is missed (control for the cases below).
+expect_rc "long key ($size bytes) near the start of a long line is found" 1 "private-key at demo:2" @scanned
+for at in 73999 74000 89000 147999; do
+  _gen pem "$WORK/pem.txt" "$at" 600 one >/dev/null
+  _text "$WORK/pem.txt"
+  # RED WHEN: a key block longer than the overlap that starts just before a window start is cut
+  # between two windows and missed.
+  expect_rc "long key ($size bytes, one line) from byte $at is found" 1 "private-key at demo:2" @scanned
+  _gen pem "$WORK/pem.txt" "$at" 600 wrap >/dev/null
+  _text "$WORK/pem.txt"
+  # RED WHEN: as above, for the same key wrapped at 64 characters.
+  expect_rc "long key (wrapped) from byte $at is found" 1 "private-key at demo:2" @scanned
+done
+psize="$(_gen pgp "$WORK/pgp.txt" 73999)"
+_text "$WORK/pgp.txt"
+# RED WHEN: a PGP private key block (a blank line after its header) longer than the overlap is cut.
+expect_rc "PGP key block ($psize bytes) from byte 73999 is found" 1 "private-key at demo:2" @scanned
+_gen pem "$WORK/pem.txt" 1000 6000 one >/dev/null
+_text "$WORK/pem.txt"
+# RED WHEN: a key block too long to be read in one piece passes instead of blocking.
+expect_rc "a key block too long for one piece blocks" 2 "could not check" "private key block crosses a scan window"
+# RED WHEN: the block message quotes the key (the message is fixed).
+if grep -q -F -e "bm90LWEtcmVhbC" "$ERR"; then bad "the key block message quotes no key text" "key text in stderr"; else
+  ok "the key block message quotes no key text"; fi
+_gen nokey-end "$WORK/nokey.txt"
+_text "$WORK/nokey.txt"
+# RED WHEN: a key header with no end marker blocks or is found (partner: no key, nothing to find).
+expect_rc "a key header with no end marker in a long line is clean" 0 @scanned
+
+echo "== (i) words at window edges are judged with the text around them"
+# The private term (PTERM) must not match inside a longer word of letters and digits. Window
+# edges must not invent a word boundary there.
+for at in 73990 73999 74000 $((90000 - ${#PTERM})) 89990 89999; do
+  _gen word "$WORK/word.txt" "$at" "x$PTERM"
+  _text "$WORK/word.txt"
+  # RED WHEN: private terms are matched in each window, so a window starting inside "x<term>"
+  # loses the x and reports the term.
+  expect_rc "x<term> from byte $at is clean" 0 @scanned
+  _gen word "$WORK/word.txt" "$at" "${PTERM}x"
+  _text "$WORK/word.txt"
+  # RED WHEN: a window ending inside "<term>x" loses the x and reports the term.
+  expect_rc "<term>x from byte $at is clean" 0 @scanned
+  _gen word "$WORK/word.txt" "$at" "$PTERM"
+  _text "$WORK/word.txt"
+  # RED WHEN: the term itself is no longer found at a window edge (partner of the two above).
+  expect_rc "the term alone from byte $at is found" 1 "private-term at demo:1" @scanned
+done
+
+echo "== (j) text is read whole unless gitleaks would cut it where it is not a blank line"
+_gen short-lines "$WORK/short.txt" 124990 "$GHPAT"
+_text "$WORK/short.txt"
+# RED WHEN: only over-long lines are split: gitleaks cuts text of short lines with no blank line
+# at byte 125 000 too (measured, 8.30.1), so the token across it is missed.
+expect_rc "a token across byte 125 000 of short lines with no blank line is found" 1 "github-pat at demo:" @scanned
+# An agent id shape: its rule needs a word boundary before it, and nothing after it.
+AGENTID="too""lu_$(printf 'Ab3%.0s' 1 2 3 4 5 6 7 8)"
+_gen glued "$WORK/glued.txt" 74000 "$AGENTID"
+_text "$WORK/glued.txt"
+# RED WHEN: text that gitleaks reads safely (a blank line every few lines) is split into windows
+# anyway, so a window starting at byte 74 000 invents the word boundary the rule needs before an
+# agent id glued to letters.
+expect_rc "an agent id glued to letters at byte 74 000 of text with blank lines is clean" 0 @scanned
+_gen glued "$WORK/glued.txt" 74000 " $AGENTID"
+_text "$WORK/glued.txt"
+# RED WHEN: the agent id after a space is no longer found (partner: the case above is clean
+# because of the glued letters, not because nothing is read there).
+expect_rc "the same agent id after a space is found" 1 "agent-" @scanned
 
 echo
 echo "${PASS} passed, ${FAIL} failed, ${SKIPPED} skipped"

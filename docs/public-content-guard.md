@@ -227,13 +227,31 @@ lines (no signature can be sniffed there; line numbers are mapped back). If that
 the check blocks. gitleaks' log is read at debug level: any warning or error other than its
 count of findings, or a line that is not a log line, blocks.
 
-gitleaks reads a file in pieces of 100 000 bytes, each extended by at most 25 000 bytes to the
-next space or line break, so a match across the end of a piece in a long line with no break
-would be cut in two and missed. So text longer than 90 000 bytes is handed to gitleaks as
-windows of 90 000 bytes, each starting 74 000 bytes after the one before. Each window is read
-whole, carries its own proof-of-reading line, and overlaps the next by 16 000 bytes, which is
-more than any rule needs to see at once (the longest is a PEM private key, about 6.5 KB for an
-8192-bit RSA key). Line numbers are those of the whole text.
+gitleaks reads a file in pieces of 100 000 bytes. It extends each piece to the next blank line
+(two line breaks with only spaces or tabs between them; a Windows line end counts too), but by
+at most 25 000 bytes. Where no such place comes within that distance, a piece ends at an
+arbitrary byte, and a match across it is cut in two and missed. So:
+
+- A text is handed to gitleaks whole, as before, when it fits in one piece, or when it has no
+  stretch of more than 20 000 bytes without such a place (gitleaks then cuts only there).
+- Any other text (a long line, or a long run of lines with no blank line) is handed over as
+  windows of at most 90 000 bytes, each read whole and each with its own proof-of-reading
+  line. A window starts at most 74 000 bytes after the one before, moved back by up to
+  2 000 bytes to a line start or to just after a character that is not a letter or digit, so
+  windows overlap by at least 14 000 bytes. A match of up to that length is wholly inside some
+  window. A match that is longer and crosses a window edge can be missed; where a window edge
+  falls inside a run of letters and digits with no break nearby, a rule that needs a word
+  boundary can match there although it would not match in the whole text (this can only add a
+  finding).
+- The private-key rule has no length limit, and a PGP key block holds a blank line. So in every
+  text longer than one piece, each key block (from the line of its BEGIN marker to the first
+  END marker after it) is also read as a piece of its own. A key block longer than 90 000
+  bytes blocks the check with a fixed message ("a private key block crosses a scan window"); a
+  BEGIN marker with no END marker after it is not a key and is not reported.
+- Private terms are matched on the whole text, never on windows, so a window edge never
+  changes whether a term is inside a longer word.
+
+Line numbers are those of the whole text.
 
 What passes: the allowed addresses, the rules' own allowlists, and, on author, committer and
 tagger lines only, an address that is the configured `user.email` (as git sees it for that
