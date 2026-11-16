@@ -259,6 +259,43 @@ for stream in stdout stderr; do
   if [ "$got" = 1 ]; then ok "full read on $stream: exit 1"; else bad "full read on $stream: exit 1" "got $got"; fi
 done
 
+echo "== the argument parser's own exits: a closed output is exit 2 too"
+# closed_exit STREAM ARGS...: run scan.py with STREAM (stdout or stderr) on a pipe whose reader is
+# closed before it starts (the other stream to the null device); print the exit code. With
+# STREAM "none", both go to the null device (the partner: the exit without a broken pipe).
+closed_exit() {
+  "$REAL_PY" -I -c 'import os, subprocess, sys
+scan, stream = sys.argv[1], sys.argv[2]
+r, w = os.pipe()
+os.close(r)
+kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+if stream != "none":
+    kw[stream] = w
+p = subprocess.run([sys.executable, scan] + sys.argv[3:], stdin=subprocess.DEVNULL, timeout=60, **kw)
+os.close(w)
+print(p.returncode)' "$SCAN" "$@"
+}
+# each case: STREAM, the exit without a broken pipe, ARGS
+while read -r stream plain args; do
+  # shellcheck disable=SC2086 # ARGS is a word list on purpose
+  got="$(closed_exit "$stream" $args)"
+  # Red when: --help or a usage error exits through SystemExit before the output is flushed and
+  # the broken pipe is mapped, so Python exits 120.
+  if [ "$got" = 2 ]; then ok "closed $stream on '${args:-no arguments}': exit 2"; else
+    bad "closed $stream on '${args:-no arguments}': exit 2" "got $got"; fi
+  # shellcheck disable=SC2086
+  got="$(closed_exit none $args)"
+  # Red when: the same call without a broken pipe changes its exit (partner of the case above).
+  if [ "$got" = "$plain" ]; then ok "'${args:-no arguments}' without a broken pipe: exit $plain"; else
+    bad "'${args:-no arguments}' without a broken pipe: exit $plain" "got $got"; fi
+done <<'EOF'
+stdout 0 --help
+stderr 2
+stderr 2 unknown
+stdout 0 text --help
+stderr 2 text
+EOF
+
 echo "== source: every output call formats only renderer output or allowlisted values"
 cat >"$WORK/outcheck.py" <<'PYEOF'
 """Static check of scan.py's output calls. A SINK is a call that prints or builds printed text:

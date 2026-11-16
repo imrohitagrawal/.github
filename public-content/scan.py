@@ -2154,12 +2154,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run(argv: list[str] | None = None) -> int:
-    """main, with its output flushed. A reader that closed the output early (BrokenPipeError,
-    here or caught inside main) is an error, 2: what could not be written was not reported.
-    The output is then pointed at the null device, so Python's own flush at exit cannot fail
-    again and exit 120."""
+    """main, with its output flushed, on every way out: a return, or the SystemExit of the
+    argument parser (--help, a usage error). A reader that closed the output early
+    (BrokenPipeError, here or caught inside main) is an error, 2: what could not be written was
+    not reported. The output is then pointed at the null device, so Python's own flush at exit
+    cannot fail again and exit 120."""
     try:
-        rc = main(argv)
+        try:
+            rc = main(argv)
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 2)
         sys.stdout.flush()
         sys.stderr.flush()
         return rc
