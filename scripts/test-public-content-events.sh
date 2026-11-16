@@ -341,6 +341,32 @@ else
   bad "events: no ::error line outside GitHub Actions" "exit $(rc)"
 fi
 
+echo "== a lone surrogate in a text field is read, not a crash"
+# JSON may hold a lone UTF-16 surrogate (\ud800), which Python parses into a string that cannot
+# be encoded as UTF-8. It is read as U+FFFD, the way it is shown.
+# lone TEMPLATE OUT FIELD VALUE: render with VALUE, then put a JSON \ud800 where LONE stands.
+lone() {
+  render "$1" "$2" "$3" "$4"
+  "$REAL_PY" -I -c 'import sys
+p = sys.argv[1]
+t = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(t.replace("LONE", "\\ud800"))' "$2" || die "lone $2"
+  grep -q -F -e '\ud800' "$2" || die "lone: no surrogate in $2"
+}
+lone "$EVENTS/issues.json" "$EV/lone-clean.json" body "Clean text LONE here."
+ev issues "$EV/lone-clean.json"
+# Red when: text is encoded strictly (or with surrogateescape only), so a lone surrogate is an
+# internal error (exit 2) instead of a scan.
+expect_rc "events: a lone surrogate in clean text is clean" 0
+lone "$EVENTS/issues.json" "$EV/lone-title.json" title "LONE see $HOMEP"
+ev issues "$EV/lone-title.json"
+# Red when: the field holding a lone surrogate is dropped instead of read (partner: its match is found).
+expect_rc "events: a match next to a lone surrogate is found" 1 "home-folder-path at issues issue #7 title:1"
+lone "$EVENTS/pull_request.json" "$EV/lone-pr.json" title "A title LONE here."
+cie "$CICLEAN" "$EV/lone-pr.json"
+# Red when: the pull request step crashes on a lone surrogate in its title.
+expect_rc "ci --event-path: a lone surrogate in the title is clean" 0
+
 echo "== the pull request clean line comes from a real scan only"
 CLEANLINE="public-content guard: scanned this pull request: clean for the public rules (private terms are not checked in CI)"
 cie "$CICLEAN" "$EV/pr-clean.json"

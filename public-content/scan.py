@@ -321,6 +321,17 @@ _RUNS = tuple((re.compile(rb"(?:%s){%d,}" % (unit, MIN_RUN)), first, step) for u
 ))
 
 
+# A lone UTF-16 surrogate that is not one of surrogateescape's (U+DC80..U+DCFF: a byte of a name
+# that is not UTF-8). JSON can hold one (\ud800), and it cannot be encoded as UTF-8.
+_LONE_SURROGATE = re.compile("[\ud800-\udc7f\udd00-\udfff]")
+
+
+def _encode(text: str) -> bytes:
+    """TEXT as the bytes the rules read: a byte that surrogateescape carried is that byte again,
+    and any other lone surrogate is U+FFFD, the way it is shown."""
+    return _LONE_SURROGATE.sub("\ufffd", text).encode("utf-8", "surrogateescape")
+
+
 def _utf8(data: bytes) -> bool:
     try:
         data.decode("utf-8")
@@ -794,7 +805,7 @@ class Scanner:
         file's content, so an archive is unpacked and each file in it checked; one that cannot
         be read completely blocks the run, naming the place (see run)."""
         if isinstance(data, str):
-            data = data.encode("utf-8", "surrogateescape")
+            data = _encode(data)
         if path is not None:
             self.names.add(path)
         views = [data] if _utf8(data) else [data, data.decode("utf-8", "replace").encode("utf-8")]
