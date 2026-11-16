@@ -45,6 +45,23 @@ body), so editing a PR's text can never turn a red commit result green. `public-
 attach to the latest commit of the default branch, so a red mark on the default branch can come
 from a comment, not from code.
 
+**A required check can be replaced by the pull request it checks.** On `pull_request`, GitHub
+runs the caller workflow as the pull request has it, so a pull request can edit
+`.github/workflows/public-content.yml` to skip the scan while keeping a job of the same name.
+The ruleset matches the check by name only, so that job satisfies it. The repository owner can
+close this in one of two ways:
+
+- **Require the workflow, not only the check.** A ruleset rule that requires a workflow to pass
+  runs that workflow from a fixed ref chosen in the ruleset, not from the pull request. GitHub
+  offers this rule in organization rulesets only.
+- **Require code-owner review of workflow changes.** A `CODEOWNERS` entry for
+  `.github/workflows/` plus a ruleset that requires review from code owners means no pull
+  request that edits a workflow can merge without a code owner's approval. A code owner cannot
+  approve their own pull request, so this needs a second person (see
+  [branch protection](branch-protection.md)).
+
+Until one of these is in place, review every pull request that edits a workflow.
+
 ## What it blocks
 
 - **Secrets**: gitleaks' default rules (keys, tokens, private keys and so on), plus OpenRouter
@@ -388,7 +405,9 @@ ready to copy. Once that tag exists:
 2. Add it next to the pull request caller: step 3 of [repo onboarding](repo-onboarding.md)
    names both callers.
 3. Require the check `public-content / public-content` in the repository's ruleset (the
-   caller's job name, then the called job's name). Never require `public-content-text`.
+   caller's job name, then the called job's name). Never require `public-content-text`. A pull
+   request can replace that check by editing its own caller; see the note under
+   [Scope](#scope-what-blocks-and-what-only-raises-an-alarm) for the two ways to close that.
 
 Cutting the tag and changing rulesets are the repository owner's actions.
 
