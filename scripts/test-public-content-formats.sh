@@ -27,11 +27,11 @@
 #     Log lines are read at debug level: WRN/ERR (other than `leaks found: N`) -> 2; a line not
 #     of the shape `<time> <LEVEL> ...` -> 2; a `skipping` line naming a file that is not one of
 #     this run's chunks -> 2; other TRC/DBG/INF lines are ignored.
-#     A text gitleaks would cut at an arbitrary byte (more than one piece of 100 000 bytes, and
-#     a stretch of over 20 000 bytes with no blank line) is scanned as windows of at most
-#     90 000 bytes overlapping by at least 14 000, each with its own canary; any other text
-#     whole. Every key block of a text over one piece is also read on its own (one over 90 000
-#     bytes -> 2). Private terms are matched on the whole text. Findings keep the text's lines.
+#     A text longer than one gitleaks piece (100 000 bytes) is scanned as windows of at most
+#     90 000 bytes overlapping by at least 14 000, edges moved back to a line start or a byte
+#     that is not a letter or digit when one is near, each with its own canary. Every key block
+#     of such a text is also read on its own (blocks do not overlap; one over 90 000 bytes -> 2).
+#     Private terms are matched on the whole text. Findings keep the text's line numbers.
 # (b) A file that starts like a zip, tar, gzip, bzip2 or xz is read completely, or exit 2.
 #     zip: one end record, ending exactly at the end of the file; entries back to back from byte
 #     0 to the central directory (data descriptors of 12, 16, 20 or 24 bytes matched to the
@@ -1085,6 +1085,18 @@ elif kind == "short-lines":  # 60-byte lines, no blank line, TOKEN from byte AT
     at, tok = int(args[0]), args[1].encode()
     line = b"y" * 59 + b"\n"
     data = (line * (at // 60 + 1))[:at] + b" " + tok + b" \n" + line * 3000
+elif kind == "curl":  # a blank line every 3 lines; a curl command with a blank line, from byte AT
+    at = int(args[0])
+    para = (b"y" * 59 + b"\n") * 3 + b"\n"
+    auth = base64.b64encode(b"someone:not-a-real-password").decode()
+    cmd = ("curl https://api.example.org/v1 \\\n\n  -H \"Author" "ization: Basic %s\"\n" % auth).encode()
+    pre = (para * (at // len(para) + 1))[:at]
+    pre = pre[:pre.rfind(b"\n") + 1]
+    data = pre + b"y" * (at - len(pre) - 1) + b"\n" + cmd + para * 3000
+elif kind == "nested":  # N key headers, one end marker, padding: the key blocks nest
+    n = int(args[0])
+    data = (dash + b"BEGIN PRIVATE KEY" + dash + b"\n") * n + b"A" * 100 + b"\n" + dash + b"END PRIVATE KEY" + dash
+    data += b"\n" + (b"y" * 59 + b"\n") * 2000
 elif kind == "glued":  # a blank line every 3 lines; TOKEN glued to letters, from byte AT
     at, tok = int(args[0]), args[1].encode()
     para = (b"y" * 59 + b"\n") * 3 + b"\n"
@@ -1155,7 +1167,7 @@ for at in 73990 73999 74000 $((90000 - ${#PTERM})) 89990 89999; do
   expect_rc "the term alone from byte $at is found" 1 "private-term at demo:1" @scanned
 done
 
-echo "== (j) text is read whole unless gitleaks would cut it where it is not a blank line"
+echo "== (j) a text longer than one gitleaks piece is read as windows with real edges"
 _gen short-lines "$WORK/short.txt" 124990 "$GHPAT"
 _text "$WORK/short.txt"
 # RED WHEN: only over-long lines are split: gitleaks cuts text of short lines with no blank line
@@ -1165,15 +1177,54 @@ expect_rc "a token across byte 125 000 of short lines with no blank line is foun
 AGENTID="too""lu_$(printf 'Ab3%.0s' 1 2 3 4 5 6 7 8)"
 _gen glued "$WORK/glued.txt" 74000 "$AGENTID"
 _text "$WORK/glued.txt"
-# RED WHEN: text that gitleaks reads safely (a blank line every few lines) is split into windows
-# anyway, so a window starting at byte 74 000 invents the word boundary the rule needs before an
-# agent id glued to letters.
+# RED WHEN: a window edge is not moved back to a line start, so a window starting at byte 74 000
+# invents the word boundary the rule needs before an agent id glued to letters.
 expect_rc "an agent id glued to letters at byte 74 000 of text with blank lines is clean" 0 @scanned
 _gen glued "$WORK/glued.txt" 74000 " $AGENTID"
 _text "$WORK/glued.txt"
 # RED WHEN: the agent id after a space is no longer found (partner: the case above is clean
 # because of the glued letters, not because nothing is read there).
 expect_rc "the same agent id after a space is found" 1 "agent-" @scanned
+for at in 99970 99990 199970; do
+  _gen curl "$WORK/curl.txt" "$at"
+  _text "$WORK/curl.txt"
+  # RED WHEN: text with blank lines is handed to gitleaks whole: gitleaks cuts it at a blank line
+  # near byte 100 000 (measured, 8.30.1), so a curl command whose blank line is there is missed.
+  expect_rc "a curl credential split by a blank line at byte $at is found" 1 "curl-auth-header at demo:" @scanned
+done
+NESTPY="$WORK/nested.py"
+cat >"$NESTPY" <<'PYEOF'
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import scan
+data = open(sys.argv[2], "rb").read()
+with scan.Scanner(scan.Terms([], None)) as sc:
+    try:
+        sc.add("x", data)
+    except scan.ScanError:
+        print("blocked")
+        sys.exit(0)
+    written = sum(os.path.getsize(os.path.join(sc.src, f)) for f in os.listdir(sc.src))
+print("ok" if written <= 3 * len(data) else "written %d bytes for %d" % (written, len(data)))
+PYEOF
+for n in 3000 10000; do
+  _gen nested "$WORK/nested.txt" "$n"
+  got="$("$REAL_PY" -I -B "$NESTPY" "$ROOT/public-content" "$WORK/nested.txt" 2>&1)"
+  # RED WHEN: nested key blocks (many headers before one end marker) are each written out, so the
+  # chunks grow with the square of the input instead of staying within a small multiple of it.
+  case "$got" in ok|blocked) ok "$n nested key headers: chunks stay within 3x the input, or block ($got)" ;;
+    *) bad "$n nested key headers: chunks stay within 3x the input, or block" "$got" ;; esac
+done
+_gen nested "$WORK/nested.txt" 3000
+_text "$WORK/nested.txt"
+# RED WHEN: merging nested blocks loses the key (partner: the outer block is still found).
+expect_rc "nested key headers with one end marker are found" 1 "private-key at demo:1" @scanned
+_gen word "$WORK/word.txt" 73971 "$(printf 'a%.0s' $(seq 29))$AGENTID"
+_text "$WORK/word.txt"
+# RED WHEN: a window in a long line starts at a fixed byte instead of moving back to just after
+# a byte that is not a letter or digit, so a window starting at byte 74 000 invents the word
+# boundary before the agent id glued to letters.
+expect_rc "a long line: an agent id glued to letters at byte 74 000 is clean" 0 @scanned
 
 echo
 echo "${PASS} passed, ${FAIL} failed, ${SKIPPED} skipped"
