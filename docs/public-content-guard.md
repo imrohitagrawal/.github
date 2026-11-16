@@ -210,6 +210,14 @@ lines (no signature can be sniffed there; line numbers are mapped back). If that
 the check blocks. gitleaks' log is read at debug level: any warning or error other than its
 count of findings, or a line that is not a log line, blocks.
 
+gitleaks reads a file in pieces of 100 000 bytes, each extended by at most 25 000 bytes to the
+next space or line break, so a match across the end of a piece in a long line with no break
+would be cut in two and missed. So text longer than 90 000 bytes is handed to gitleaks as
+windows of 90 000 bytes, each starting 74 000 bytes after the one before. Each window is read
+whole, carries its own proof-of-reading line, and overlaps the next by 16 000 bytes, which is
+more than any rule needs to see at once (the longest is a PEM private key, about 6.5 KB for an
+8192-bit RSA key). Line numbers are those of the whole text.
+
 What passes: the allowed addresses, the rules' own allowlists, and, on author, committer and
 tagger lines only, an address that is the configured `user.email` (as git sees it for that
 push or CI run) or is already used as an author or committer address on the destination's

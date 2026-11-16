@@ -27,6 +27,9 @@
 #     Log lines are read at debug level: WRN/ERR (other than `leaks found: N`) -> 2; a line not
 #     of the shape `<time> <LEVEL> ...` -> 2; a `skipping` line naming a file that is not one of
 #     this run's chunks -> 2; other TRC/DBG/INF lines are ignored.
+#     Text longer than 90 000 bytes is scanned as windows of 90 000 bytes, each starting 74 000
+#     bytes after the one before (16 000 bytes of overlap), each with its own canary; findings
+#     keep the text's line numbers. So a match anywhere in a line with no break is found.
 # (b) A file that starts like a zip, tar, gzip, bzip2 or xz is read completely, or exit 2.
 #     zip: one end record, ending exactly at the end of the file; entries back to back from byte
 #     0 to the central directory (data descriptors of 12, 16, 20 or 24 bytes matched to the
@@ -1015,6 +1018,38 @@ expect_rc "diff-tree: the path named like a commit sha is found under its name" 
 expect_rc "diff-tree: the merge resolution is found under its name" 1 "home-folder-path at conf.txt:2"
 n_items="$(grep -c '^  - ' "$ERR")"
 if [ "$n_items" = 3 ]; then ok "diff-tree: exactly three findings in the range"; else bad "diff-tree: exactly three findings in the range" "got $n_items$(_hint)"; fi
+
+echo "== (g) long lines: every byte is read with enough context around it"
+# gitleaks reads a file in pieces of 100 000 bytes, each extended by at most 25 000 bytes to the
+# next whitespace, so a token that crosses byte 125 000 of a line with no break was cut in two
+# and missed. The scanner gives gitleaks overlapping windows small enough to be read whole.
+# _long BEFORE TOKEN AFTER: BEFORE filler bytes, TOKEN, a space, AFTER filler bytes, no newline
+# (TOKEN may be empty), scanned in text mode.
+_long() {
+  "$REAL_PY" -c 'import sys; sys.stdout.write("a" * int(sys.argv[1]) + sys.argv[2] + " " + "a" * int(sys.argv[3]))' \
+    "$1" "$2" "$3" >"$WORK/long.txt"
+  _run python3 "$SCAN" text --label demo <"$WORK/long.txt"
+}
+# RED WHEN: chunks are handed to gitleaks whole (no windows), or the windows are larger than
+# gitleaks reads at once, so the token across byte 125 000 is cut in two and missed.
+_long 124970 "$GHPAT" 150000
+expect_rc "long line: a token across byte 125 000 of one line is found" 1 "github-pat at demo:1" @scanned
+# RED WHEN: a window boundary turns clean filler into a finding or an error (partner of the case
+# above: same shape, no token).
+_long 124970 "" 150000
+expect_rc "long line: the same line without a token is clean" 0 @scanned
+# RED WHEN: windows do not overlap (or overlap by less than a token), so a token across the end
+# of the first window (byte 90 000 of the text) is cut in two.
+_long 89980 "$GHPAT" 150000
+expect_rc "long line: a token across the first window's end is found" 1 "github-pat at demo:1" @scanned
+# RED WHEN: a window past the first counts lines from its own start, not from the text's.
+"$REAL_PY" -c '
+import sys
+lines = ["x" * 60] * 3000
+lines[2499] = "key " + sys.argv[1]
+sys.stdout.write("\n".join(lines) + "\n")' "$GHPAT" >"$WORK/many-lines.txt"
+_run python3 "$SCAN" text --label demo <"$WORK/many-lines.txt"
+expect_rc "long text: a finding past the first window keeps its line number" 1 "github-pat at demo:2500" @scanned
 
 echo
 echo "${PASS} passed, ${FAIL} failed, ${SKIPPED} skipped"

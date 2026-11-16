@@ -64,6 +64,8 @@ plain text:
 gitleaks skips a file it sniffs as a binary format, logging only at debug level, and passes a
 file it could not open; so every chunk carries a canary line that proves it was read, and a
 chunk without its canary is read once more behind newlines, or the check blocks.
+gitleaks also cuts a long line with no break where its read ends, so text longer than WINDOW is
+scanned as overlapping windows, each read whole and each with its own canary (see WINDOW).
 
 Exit status: 0 clean, 1 findings, 2 error. Every caller treats an error as a block: a check
 that could not run never counts as a pass. Reports name the rule and the place, never the
@@ -109,6 +111,17 @@ UNPACK_LIMIT = 512 * 1024 * 1024  # bytes unpacked from one file, counted at eve
 STREAM_COST = 4096  # budget each compressed stream costs besides its output
 MIN_RUN = 12  # characters in a printable run of a binary that the rules read
 RETRY_PREFIX = b"\n" * 100_000  # put before a chunk gitleaks skipped, so it cannot sniff a format
+# gitleaks reads a file in pieces of 100 000 bytes, each extended by at most 25 000 bytes to the
+# next whitespace (8.30.1), so a match across a piece's end in a line with no break is cut in two
+# and missed. So text longer than WINDOW is scanned as windows of WINDOW bytes (plus up to 3 to
+# start on a whole UTF-8 character), each its own chunk with its own canary, small enough that
+# gitleaks reads the whole file at once (with its newlines and canary, under 100 000 bytes).
+# Each window starts WINDOW - OVERLAP bytes after the one before, so every run of up to OVERLAP
+# bytes lies wholly inside some window. OVERLAP is far longer than any text a rule needs to see
+# at once: the longest is a PEM private key block (about 6.5 KB for an 8192-bit RSA key); the
+# public rules and the other secret rules need a few hundred bytes at most.
+WINDOW = 90_000
+OVERLAP = 16_000
 NOTES_KEY = "public-content.notesDir"
 TERMS_FILE = Path("scanner") / "private-terms.txt"
 SHA_RE = r"[0-9a-f]{40}|[0-9a-f]{64}"
@@ -827,10 +840,21 @@ class Scanner:
                kind: str, inside: bool) -> None:
         # The leading newline keeps gitleaks from reading the first bytes as a binary file's
         # signature; line numbers are shifted back when read. The canary line ends the chunk.
-        idx = len(self.chunks)
-        (self.src / self._name(idx)).write_bytes(b"\n" + text + b"\n" + self._canary(idx).encode())
-        self.chunks.append({"place": place, "lines": lines, "names": names, "path": path,
-                            "archive": inside, "kind": kind})
+        # Text longer than WINDOW becomes overlapping windows (see WINDOW); "shift" is the lines
+        # of the text before a window's first line, added back to its findings' line numbers.
+        start = 0
+        while True:
+            at = start
+            while 0 < at and start - at < 3 and 0x80 <= text[at] < 0xC0:
+                at -= 1  # start on a whole UTF-8 character
+            idx = len(self.chunks)
+            (self.src / self._name(idx)).write_bytes(
+                b"\n" + text[at:start + WINDOW] + b"\n" + self._canary(idx).encode())
+            self.chunks.append({"place": place, "lines": lines, "names": names, "path": path,
+                                "archive": inside, "kind": kind, "shift": text.count(b"\n", 0, at)})
+            if start + WINDOW >= len(text):
+                break
+            start += WINDOW - OVERLAP
 
     def _text(self, idx: int) -> bytes:
         """A chunk's text, without the leading newline and the canary line."""
@@ -909,7 +933,8 @@ class Scanner:
                 text = self._text(idx).decode("utf-8", "surrogateescape")
                 for m in self.terms.find_re.finditer(text):
                     raw.append(("private-term", idx, text.count("\n", 0, m.start()) + 1, m.group(0)))
-        return raw
+        # Line numbers of the whole text, not of a window.
+        return [(rule, idx, line + int(self.chunks[idx]["shift"]), text) for rule, idx, line, text in raw]
 
     def _pass(self, exe: str, cfg: Path, n: int) -> list[tuple[str, int, int, str]]:
         """One gitleaks pass: every chunk, then the chunks it skipped or did not prove it read
