@@ -193,8 +193,9 @@ term_push() {
 }
 # The term strasse-labs spelled with a sharp s (escaped for _u).
 term_push fold 'stra\u00dfe-labs' STRASSE-LABS.txt
-# T10. Red when: mask uses the old regex (IGNORECASE, no folding), or the withhold test is
-# `text in mask(name)`, so the name is printed with the term in it.
+# T10. Red when: mask uses the old regex (IGNORECASE, no folding), so the name is printed with
+# the term in it. (An earlier second clause, the withhold test reverted to `text in mask(name)`,
+# was false: that change still shows <private>.txt here. T23 in the formats suite guards it.)
 safe_output "T10: a file name holding a folded spelling of a term is masked or withheld" 1 home-folder-path
 if grep -q -i -F "strasse" "$OUT" "$ERR"; then bad "T10: the folded term in the file name is not printed" "printed"; else
   ok "T10: the folded term in the file name is not printed"; fi

@@ -1290,7 +1290,8 @@ elif kind == "pemv":  # pemv AT SIZE VARIANT: a SIZE-byte body; the block starts
     at, size, v = int(args[0]), int(args[1]), args[2]
     b, e = {"ascii": (begin(), end()), "kelvin-begin": (begin(k=KELVIN), end()),
             "kelvin-end": (begin(), end(k=KELVIN)), "long-s": (begin(label=b"R" + LONGS + b"A "), end()),
-            "dotted-i": (begin(i=DOTI), end())}[v]
+            "dotted-i": (begin(i=DOTI), end()), "lower": (begin(label=b"RSA ").lower(), end().lower()),
+            "kelvin-header": (begin(label=b"R" + KELVIN + b"A "), end())}[v]
     block = b + b"\n" + body(size) + b"\n" + e
     data = b"!" * (at - 1) + b"\n" + block + b"!" * 100000
 elif kind == "pgpv":  # pgpv AT VARIANT: a PGP block whose END has the Kelvin sign in KEY or BLOCK
@@ -1416,7 +1417,9 @@ pieces = [p.encode("utf-8", "surrogateescape") for p in (
     dash + "BEGIN PRIVATE \u212aEY" + dash, dash + "BEGIN \u017fX PRIVATE KEY" + dash,
     dash + "BEGIN PGP PRIVATE KEY BLOCK" + dash, dash + "END PRIVATE KEY" + dash, "KEY" + dash,
     "KEY BLOCK" + dash, "\u212aEY" + dash, dash + "BEGIN ", " PRIVATE KEY" + dash, dash + "BEGIN" + dash + "BEGIN",
-    "\u20ac", "\udcff", "\u0130", "-", "\n", "A" * 10, "ab+/")] + [b"\xe2\x84"]
+    "\u20ac", "\udcff", "\u0130", "-", "\n", "A" * 10, "ab+/", dash + "begin private key" + dash,
+    dash + "begin rsa private key" + dash, dash + "end private key" + dash, "key" + dash, "key block" + dash,
+    dash + "Begin Private Key Block" + dash)] + [b"\xe2\x84"]
 # T15. RED WHEN: _windows advances by more than WINDOW - OVERLAP + EDGE, key spans overlap, or
 # body_end counts bytes (an oracle match then lies in no chunk).
 fails = []
@@ -1484,17 +1487,20 @@ _text "$WORK/json.txt"
 # T3. RED WHEN: a block's length is measured from its line start (a 4 KB key at byte 100 000 of
 # a JSON line then counts as 104 KB).
 expect_rc "T3: a 4 KB key with escaped line breaks inside a 174 KB JSON line is found" 1 "private-key at demo:1" @scanned
-for v in ascii kelvin-begin kelvin-end long-s; do
+for v in ascii kelvin-begin kelvin-end long-s kelvin-header lower; do
   _kgen pemv "$WORK/pemv.txt" 70000 50000 "$v" >/dev/null
   # RED WHEN: the fixture stops being a key gitleaks itself reports when read whole.
   if gl_finds "$WORK/pemv.txt.block" private-key; then ok "T4: gitleaks reports the $v block read whole"; else
     bad "T4: gitleaks reports the $v block read whole" "not reported"; fi
   _text "$WORK/pemv.txt"
-  # T4. RED WHEN: the U+212A or U+017F alternative is removed from the marker regexes, or they
-  # become a str (?i) regex.
+  # T4. RED WHEN: the U+212A or U+017F alternative is removed from the marker regexes (in a
+  # marker word or in the header class), they become a str (?i) regex, or a marker letter stops
+  # matching its ASCII lower case (the lower variant).
   expect_rc "T4: a 50 KB key ($v) from byte 70 000 of a long line is found" 1 "private-key at demo:2" @scanned
 done
 _kgen pemv "$WORK/pemv.txt" 70000 50000 dotted-i >/dev/null
+# RED WHEN: the fixture changes so that gitleaks reports it read whole (the partner below would
+# then no longer show a fold gitleaks does not make).
 if gl_finds "$WORK/pemv.txt.block" private-key; then bad "T4: gitleaks does not report a BEGIN with a dotted capital I" "reported"; else
   ok "T4: gitleaks does not report a BEGIN with a dotted capital I"; fi
 _text "$WORK/pemv.txt"
@@ -1502,6 +1508,7 @@ _text "$WORK/pemv.txt"
 expect_rc "T4: a key whose BEGIN has a dotted capital I is clean, as in gitleaks" 0 @scanned
 for v in kelvin-key kelvin-block; do
   _kgen pgpv "$WORK/pgpv.txt" 70000 "$v" >/dev/null
+  # RED WHEN: the fixture stops being a key gitleaks itself reports when read whole.
   if gl_finds "$WORK/pgpv.txt.block" private-key; then ok "T5: gitleaks reports the PGP $v block read whole"; else
     bad "T5: gitleaks reports the PGP $v block read whole" "not reported"; fi
   _text "$WORK/pgpv.txt"
@@ -1509,12 +1516,36 @@ for v in kelvin-key kelvin-block; do
   expect_rc "T5: a PGP key whose END has a Kelvin sign ($v) is found" 1 "private-key at demo:2" @scanned
 done
 _kgen euro "$WORK/euro.txt" 70000 >/dev/null
+# RED WHEN: the fixture stops being a key gitleaks itself reports when read whole.
 if gl_finds "$WORK/euro.txt.block" private-key; then ok "T6: gitleaks reports the euro-sign block read whole"; else
   bad "T6: gitleaks reports the euro-sign block read whole" "not reported"; fi
 _text "$WORK/euro.txt"
 # T6. RED WHEN: body_end counts bytes, not characters (the span then ends at the first END and
 # gitleaks' real 25 KB match is cut between two windows).
 expect_rc "T6: a key whose first END is under 64 characters after BEGIN is found" 1 "private-key at demo:2" @scanned
+# The 64-character body at a window edge. The body runs from the end of the BEGIN marker to the
+# K of the END marker: a line break, SIZE base64 characters, a line break and the 17 characters
+# of the END marker before KEY, so SIZE 44 gives 63 characters and SIZE 45 gives 64. The block
+# starts at byte 89 950, so the first window's edge (about byte 90 000) cuts it.
+for size in 44 45; do
+  runes=$((size + 19))
+  _kgen pemv "$WORK/pemb.txt" 89950 "$size" ascii >/dev/null
+  _text "$WORK/pemb.txt"
+  if [ "$size" = 45 ]; then
+    # RED WHEN: the fixture stops being a key gitleaks itself reports when read whole.
+    if gl_finds "$WORK/pemb.txt.block" private-key; then ok "T6b: gitleaks reports the $runes-character body read whole"; else
+      bad "T6b: gitleaks reports the $runes-character body read whole" "not reported"; fi
+    # T6b. RED WHEN: a block a window edge cuts is in no chunk whole (64 characters is a key).
+    expect_rc "T6b: a block with a $runes-character body across a window edge is found" 1 "private-key at demo:2" @scanned
+  else
+    # RED WHEN: the fixture changes so that gitleaks reports a 63-character body (the clean case
+    # below would then test nothing).
+    if gl_finds "$WORK/pemb.txt.block" private-key; then bad "T6b: gitleaks does not report a $runes-character body" "reported"; else
+      ok "T6b: gitleaks does not report a $runes-character body"; fi
+    # T6b. RED WHEN: a 63-character body counts as a key (KEY_MIN_BODY or body_end off by one).
+    expect_rc "T6b: a block with a $runes-character body across a window edge is clean" 0 @scanned
+  fi
+done
 sline="$(_kgen swallow "$WORK/swallow.txt" 68000)"
 _text "$WORK/swallow.txt"
 # T15b. RED WHEN: BEGIN markers are found with finditer (the greedy header of a BEGIN inside key
@@ -1584,6 +1615,149 @@ for name, terms, text, want in CASES:
     print(("ok " if got == want else "bad ") + name + ("" if got == want else " - got %s, want %s" % (ascii(got), ascii(want))))
 EOF
 py_verdicts "$TERMPY" "$ROOT/public-content"
+
+UNITPY="$WORK/units.py"
+cat >"$UNITPY" <<'EOF'
+import os, random, re, subprocess, sys, tempfile, unicodedata
+sys.path.insert(0, sys.argv[1])
+import scan
+def report(name, good, detail=""):
+    print(("ok " if good else "bad ") + name + ("" if good else " - " + detail))
+def found(terms, text):
+    return [t for _n, t in scan.Terms(terms, None).find(text)]
+def run_report(terms, add):
+    """The report lines of a run over what ADD adds (gitleaks' passes left out)."""
+    with scan.Scanner(scan.Terms(terms, None)) as sc:
+        sc._pass = lambda exe, cfg, n: []
+        add(sc)
+        return sc.run()
+
+# The fold of a line is whole-string Unicode compatibility caseless match (D146), with ignorable
+# characters removed, U+0131 (dotless i) read as i and a U+0307 (dot above) after an i dropped.
+T = scan.Terms(["x"], None)
+def d146(s):
+    s = "".join(c for c in s if not T._ignorable(c))
+    n = unicodedata.normalize
+    s = n("NFKD", n("NFKD", n("NFD", s).casefold()).casefold())
+    return re.sub("(?<=i)\u0307+", "", s.replace("\u0131", "i"))
+POOL = (list("abcinpxyzIK019 -_.") + [
+    "\u00e9", "\u00c5", "\u0301", "\u0316", "\u0323", "\u0345", "\u0307", "\u031b", "\u0130", "\u0131",
+    "\U0001d6a4", "\u212a", "\u017f", "\u00df", "\u1e9e", "\ufb00", "\ufb03", "\u0149", "\uff21", "\uff41",
+    "\uff76", "\uff9e", "\u03d2", "\u03d3", "\u03c5", "\u03a5", "\u1f88", "\u1fb3", "\u0390", "\uac00",
+    "\u1100", "\u1161", "\u304b", "\u3099", "\u30cf", "\u309a", "\u200b", "\ufe0f", "\u00ad", "\u034f",
+    "\U000e0041", "\u2122", "\u00bd", "\u2460"])
+rnd = random.Random(20261118)
+bad = []
+for _ in range(20000):
+    s = "".join(rnd.choice(POOL) for _ in range(rnd.randint(0, 12)))
+    units, folded, owner = T._line(s)
+    if folded != d146(s) or len(owner) != len(folded) or "".join(units) != s \
+            or any(not 0 <= k < len(units) for k in owner):
+        bad.append(s)
+# T16. RED WHEN: the fold works unit by unit instead of on the whole line (U+1D6A4, a dotless i
+# that only NFKD reveals, then stays a dotless i), or a fold step or reordering pass is left out.
+report("T16: 20 000 random lines fold to whole-string D146 with owners on every folded character", not bad,
+       "%d lines differ, first %s" % (len(bad), ascii(bad[:3])))
+# T16 partner. RED WHEN: as above (the reported case: a mathematical dotless i inside a term).
+report("T16: the term pin is found in p + U+1D6A4 + n", found(["pin"], "p\U0001d6a4n") == ["p\U0001d6a4n"],
+       ascii(found(["pin"], "p\U0001d6a4n")))
+# T16 partner. RED WHEN: the second casefold of D146 is left out (U+03D2 folds to upsilon only after NFKD).
+report("T16: the term upsilon-x is found in U+03D2 + x", found(["\u03c5x"], "\u03d2x") == ["\u03d2x"],
+       ascii(found(["\u03c5x"], "\u03d2x")))
+
+# T17. RED WHEN: the pure-ASCII fast path gives a result the general path does not (it is the
+# guard of that path: disabling the fast path changes nothing, so no other test can see it).
+terms = ["ab", "a-b", "x.y", "B", "ab ab"]
+diff = []
+for _ in range(3000):
+    s = "".join(rnd.choice("aAbB-_. xyXY1") for _ in range(rnd.randint(0, 24)))
+    fast = scan.Terms(terms, None)
+    slow = scan.Terms(terms, None)
+    general = getattr(slow, "_general", None)
+    if general is None:
+        diff.append("no general path to compare")
+        break
+    slow._line = general
+    a, b = fast._line(s), general(s)
+    if (list(a[0]), a[1], list(a[2])) != (list(b[0]), b[1], list(b[2])) or fast.find(s) != slow.find(s) \
+            or fast.mask(s) != slow.mask(s):
+        diff.append(s)
+report("T17: on 3 000 random ASCII lines the fast path equals the general path", not diff, ascii(diff[:3]))
+
+# T18. RED WHEN: a term's separator runs are capped at three whatever the term holds (a term
+# with four separators in a row then never finds itself, and its file name shows unmasked).
+report("T18: a term with four full stops in a row finds itself", found(["acme....labs"], "acme....labs") == ["acme....labs"],
+       ascii(found(["acme....labs"], "acme....labs")))
+report("T18 partner: the term with four full stops masks itself", scan.Terms(["acme....labs"], None).mask("acme....labs.txt")
+       == "<private>.txt", scan.Terms(["acme....labs"], None).mask("acme....labs.txt"))
+# T18 partner. RED WHEN: the separator allowance grows past three for a term written with one.
+report("T18 partner: a term written with one hyphen is found across three", found(["a-b"], "a---b") == ["a---b"],
+       ascii(found(["a-b"], "a---b")))
+report("T18 partner: a term written with one hyphen is not found across four", found(["a-b"], "a----b") == [],
+       ascii(found(["a-b"], "a----b")))
+
+# T19. RED WHEN: load_terms stops checking that every term finds its own text, or its error
+# names the term instead of the line number.
+notes = tempfile.mkdtemp()
+os.makedirs(os.path.join(notes, "scanner"))
+with open(os.path.join(notes, "scanner", "private-terms.txt"), "w", encoding="utf-8") as f:
+    f.write("# a comment\nacme\nqqhiddenterm\n")
+os.environ["PRIVATE_NOTES_DIR"] = notes
+scan._recorded_notes_dir = lambda: None
+real_find = scan.Terms.find
+scan.Terms.find = lambda self, text: [] if text == "qqhiddenterm" else real_find(self, text)
+try:
+    scan.load_terms()
+    report("T19: a term that does not find itself fails the load, naming its line", False, "no error")
+except scan.ScanError as exc:
+    report("T19: a term that does not find itself fails the load, naming its line",
+           "line 3" in str(exc) and "qqhidden" not in str(exc), str(exc).replace("qqhidden", "<term>"))
+finally:
+    scan.Terms.find = real_find
+# T19 partner. RED WHEN: the check rejects a term that does find itself.
+try:
+    report("T19 partner: a list whose terms find themselves loads", len(scan.load_terms().patterns) == 2)
+except scan.ScanError as exc:
+    report("T19 partner: a list whose terms find themselves loads", False, str(exc))
+
+# T20. RED WHEN: a unit is grown one character at a time (each mark copies the unit so far:
+# quadratic in a run of marks). Run in a child process so a quadratic build cannot hang the suite.
+code = ("import sys, time; sys.path.insert(0, sys.argv[1]); import scan; t = scan.Terms(['acme'], None); "
+        "line = 'a' + '\\u0301' * 1000000; t0 = time.time(); "
+        "ok = t.find(line) == [] and t.mask(line) == line; print('%s %.2f' % (ok, time.time() - t0))")
+try:
+    r = subprocess.run([sys.executable, "-I", "-B", "-c", code, sys.argv[1]], capture_output=True, text=True, timeout=30)
+    got = r.stdout.split()
+    report("T20: one letter and 1 000 000 marks are found and masked in under 2 s",
+           r.returncode == 0 and got[0] == "True" and float(got[1]) < 2, (r.stdout + r.stderr)[-200:])
+except subprocess.TimeoutExpired:
+    report("T20: one letter and 1 000 000 marks are found and masked in under 2 s", False, "over 30 s")
+
+# T21. RED WHEN: the word test stops skipping ignorable characters on the left (M13) or on the
+# right (M19): a zero-width space between the term and a letter then hides the letter.
+report("T21: a letter, a zero-width space, then the term is clean", found(["acme"], "x\u200bacme") == [],
+       ascii(found(["acme"], "x\u200bacme")))
+report("T21: the term, a zero-width space, then a letter is clean", found(["acme"], "acme\u200bx") == [],
+       ascii(found(["acme"], "acme\u200bx")))
+# T21 partner. RED WHEN: a hit may start inside a unit (the ff ligature folds to two letters, the
+# second of which starts the term's folded text).
+report("T21: the term fabc is not found inside the ff ligature + abc", found(["fabc"], "\ufb00abc") == [],
+       ascii(found(["fabc"], "\ufb00abc")))
+report("T21 partner: the term ffabc is found in the ff ligature + abc", found(["ffabc"], "\ufb00abc") == ["\ufb00abc"],
+       ascii(found(["ffabc"], "\ufb00abc")))
+
+# T22. RED WHEN: the report's duplicate test is removed (M16): two hits on one line print twice.
+got = run_report(["acme"], lambda sc: sc.add("demo", "acme acme\n"))
+report("T22: two hits of one term on one line print one report line", got == ["private-term at demo:1"], ascii(got))
+# T23. RED WHEN: the withhold test goes back to `text in mask(name)` (M17): the matched text ate
+# occurs inside <private>, so a name that masking made safe is withheld instead of shown masked.
+got = run_report(["ate"], lambda sc: sc.add_names("a file name", ["ate-notes.txt"]))
+report("T23: a name holding only a term and plain text is shown masked",
+       got == ["private-term at the file name <private>-notes.txt"], ascii(got))
+got = run_report(["acme"], lambda sc: sc.add_names("a file name", ["acme-notes.txt"]))
+report("T23 partner: acme-notes.txt is shown masked", got == ["private-term at the file name <private>-notes.txt"], ascii(got))
+EOF
+py_verdicts "$UNITPY" "$ROOT/public-content"
 
 printf '%s\n%s\n' "$(_u '\u00df one\n\ufb00 two')" "we build $PTERM next" >"$WORK/t13.txt"
 _text "$WORK/t13.txt"
