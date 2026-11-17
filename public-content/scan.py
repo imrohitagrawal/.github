@@ -253,6 +253,10 @@ class Terms:
     _SKIP, _MARK, _OTHER = 0, 1, 2  # what a character is to the unit split (_kind)
     # The steps of D146 after NFD, in order: a decomposition (then reordering) or a case fold.
     _STEPS = ("NFD", "casefold", "NFKD", "casefold", "NFKD")
+    # Folded segments are cached by their text. A line of many distinct segments would grow the
+    # cache without end, so it is emptied when it reaches this many entries (a cache miss only
+    # costs a fold).
+    SEGMENT_CACHE_LIMIT = 4096
 
     def __init__(self, terms: list[str], warning: str | None) -> None:
         self.warning = warning
@@ -368,6 +372,8 @@ class Terms:
             if got is None:
                 got = self._fold_segment(text)
                 if len(text) <= 32:
+                    if len(self._segments) >= self.SEGMENT_CACHE_LIMIT:
+                        self._segments.clear()
                     self._segments[text] = got
             folded.append(got[0])
             owner.extend([seg_owner[k] for k in got[1]])
