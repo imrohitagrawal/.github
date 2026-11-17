@@ -234,8 +234,10 @@ class Terms:
     dotless i fold to i. Ignorable characters are left out first. NFC and NFD spellings fold the
     same. A term is folded the same way, then split into words on [-_. ]+; its pattern joins the
     words with up to three separators, or up to the longest run of separators the term holds.
-    Word test. A hit counts only when it starts and ends at unit edges (the owner changes there)
-    and the nearest unit on each side that is not ignorable is not a word unit: one whose base
+    Word test. A hit counts only when it holds whole units: every unit that has a folded
+    character inside the hit has all its folded characters inside it (reordering can put another
+    unit's mark between one unit's characters, so adjacent owners are not enough), and the
+    nearest unit on each side that is not ignorable is not a word unit: one whose base
     character's own Unicode category is Lu, Ll, Lt (a letter of a cased script) or Nd (a decimal
     digit), with or without marks. Letters of scripts with no case (Lo) even with marks, modifier
     letters (Lm), other numbers (Nl, No), punctuation, symbols, spaces and units with no base are
@@ -400,11 +402,25 @@ class Terms:
     def _word(self, unit: str) -> bool:
         return unicodedata.category(unit[0]) in self._WORD
 
-    def _alone(self, units: Sequence[str], owner: Sequence[int], s: int, e: int, lo: int, hi: int) -> bool:
-        """The hit [s, e) of the folded line, covering units [lo, hi), starts and ends at unit
-        edges, with no word unit next to it (ignorable units skipped)."""
-        if (s > 0 and owner[s - 1] == owner[s]) or (e < len(owner) and owner[e] == owner[e - 1]):
-            return False
+    @staticmethod
+    def _extent(units: Sequence[str], owner: Sequence[int]) -> tuple[list[int], list[int]]:
+        """(first, last): the first and last position in the folded line of each unit's folded
+        characters (a unit with none keeps first past the end and last at -1)."""
+        first, last = [len(owner)] * len(units), [-1] * len(units)
+        for k, o in enumerate(owner):
+            if k < first[o]:
+                first[o] = k
+            last[o] = k
+        return first, last
+
+    def _alone(self, units: Sequence[str], owner: Sequence[int], extent: tuple[list[int], list[int]],
+               s: int, e: int, lo: int, hi: int) -> bool:
+        """The hit [s, e) of the folded line, covering units [lo, hi), holds every folded
+        character of each unit it touches, with no word unit next to it (ignorable units skipped)."""
+        first, last = extent
+        for o in owner[s:e]:
+            if first[o] < s or last[o] >= e:
+                return False
         k = lo - 1
         while k >= 0 and self._ignorable(units[k][0]):
             k -= 1
@@ -423,6 +439,7 @@ class Terms:
         one past a rejected hit's start. Without (masking), every match counts and the search
         always goes on one past its start, so overlapping matches are all found."""
         units, folded, owner = self._line(line)
+        extent: tuple[list[int], list[int]] | None = None  # built at the first hit that needs it
         out = []
         for pattern in self.patterns:
             pos = 0
@@ -433,9 +450,12 @@ class Terms:
                 s, e = m.span()
                 span = owner[s:e]
                 lo, hi = min(span), max(span) + 1
-                if edges and not self._alone(units, owner, s, e, lo, hi):
-                    pos = s + 1
-                    continue
+                if edges:
+                    if extent is None:
+                        extent = self._extent(units, owner)
+                    if not self._alone(units, owner, extent, s, e, lo, hi):
+                        pos = s + 1
+                        continue
                 out.append((lo, hi))
                 pos = e if edges else s + 1
         return units, sorted(out)
