@@ -98,10 +98,11 @@ import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 import zipfile
 import zlib
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 HERE = Path(__file__).resolve().parent
 PUBLIC_RULES = HERE / "gitleaks-public.toml"
@@ -208,25 +209,149 @@ def _finding(rule: str, place: str) -> str:
 
 
 class Terms:
-    """The private terms, and how to find and mask them."""
+    """The private terms, and how to find and mask them: one fold, one word test, one pattern per
+    term, used by find and mask alike.
+
+    Units. A line is split into units: a character that is not a mark (category M*) with every
+    mark after it. Marks at the start of a line, or right after an ignorable character, form a
+    unit with no base. An ignorable character (category Cf, and the other default-ignorable
+    characters in _IGNORABLE) is a unit of its own and folds to nothing.
+    Fold. Each unit is folded on its own with Unicode's compatibility caseless match (D146):
+    NFKD(casefold(NFKD(casefold(NFD(unit))))), after U+0130 and U+0131 (Turkish capital I with a
+    dot, dotless i) become i and a U+0307 (dot above) on an i is dropped. Folding a whole unit
+    puts its marks in canonical order, so NFC and NFD spellings fold the same. A term is folded
+    the same way, then split into words on [-_. ]+; its pattern joins the words with up to three
+    separators.
+    Word test. A hit counts only when it starts and ends at unit edges and the nearest unit on
+    each side that is not ignorable is not a word unit: one whose base is a letter of a cased
+    script (Lu, Ll, Lt) or a decimal digit (Nd), with or without marks. Letters of scripts with
+    no case (Lo) even with marks, modifier letters (Lm), other numbers (Nl, No), punctuation,
+    symbols, spaces and units with no base are breaks: text in many caseless scripts has no
+    spaces between words, so a term glued to it is reported (fail closed). The test reads the
+    original units, never folded ones (a symbol can fold to letters).
+    Lines are split on \n only; no fold of another character holds a \n."""
+
+    _IGNORABLE = re.compile("[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2065\u3164\ufe00-\ufe0f\uffa0"
+                            "\ufff0-\ufff8\U000e0000-\U000e0fff]")
+    _SEPARATORS = re.compile("[-_. ]+")
+    _WORD = ("Lu", "Ll", "Lt", "Nd")
 
     def __init__(self, terms: list[str], warning: str | None) -> None:
         self.warning = warning
-        parts = []
+        self._folds: dict[str, str] = {}
+        self.patterns: list[re.Pattern[str]] = []
         for term in terms:
-            words = [w for w in re.split(r"[-_. ]+", term) if w]
+            folded = "".join(self._fold(u) for u in self._units(term))
+            words = [w for w in self._SEPARATORS.split(folded) if w]
             if words:
-                parts.append("[-_. ]?".join(re.escape(w) for w in words))
-        self.alternation = "|".join(parts)
-        self.mask_re = re.compile("(?:" + self.alternation + ")", re.IGNORECASE) if parts else None
-        # Not inside a longer word of letters and digits; `_` and other marks are breaks. The
-        # look-around consumes nothing, so two terms side by side are both found.
-        self.find_re = (re.compile("(?<![A-Za-z0-9])(?:" + self.alternation + ")(?![A-Za-z0-9])", re.IGNORECASE)
-                        if parts else None)
+                self.patterns.append(re.compile("[-_. ]{0,3}".join(re.escape(w) for w in words)))
+
+    def _ignorable(self, ch: str) -> bool:
+        return unicodedata.category(ch) == "Cf" or self._IGNORABLE.match(ch) is not None
+
+    def _units(self, line: str) -> list[str]:
+        units: list[str] = []
+        takes_marks = False
+        for ch in line:
+            if self._ignorable(ch):
+                units.append(ch)
+                takes_marks = False
+            elif takes_marks and unicodedata.category(ch)[0] == "M":
+                units[-1] += ch
+            else:
+                units.append(ch)
+                takes_marks = True
+        return units
+
+    def _fold(self, unit: str) -> str:
+        got = self._folds.get(unit)
+        if got is None:
+            if self._ignorable(unit[0]):
+                got = ""
+            else:
+                u = unicodedata.normalize("NFD", unit.replace("\u0130", "i").replace("\u0131", "i"))
+                if u[:1] in ("i", "I"):
+                    u = u[0] + u[1:].replace("\u0307", "")
+                got = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", u.casefold()).casefold())
+            self._folds[unit] = got
+        return got
+
+    def _line(self, line: str) -> tuple[Sequence[str], str, Sequence[int]]:
+        """(units, folded line, owner): owner[k] is the unit that folded character k came from.
+        A pure-ASCII line takes a fast path with the same results (one unit per character)."""
+        if line.isascii():
+            return line, line.lower(), range(len(line))
+        units = self._units(line)
+        parts = [self._fold(u) for u in units]
+        return units, "".join(parts), [k for k, f in enumerate(parts) for _ in f]
+
+    def _word(self, unit: str) -> bool:
+        return unicodedata.category(unit[0]) in self._WORD
+
+    def _alone(self, units: Sequence[str], owner: Sequence[int], s: int, e: int) -> bool:
+        """The hit [s, e) of the folded line starts and ends at unit edges, with no word unit
+        next to it (ignorable units skipped)."""
+        if (s > 0 and owner[s - 1] == owner[s]) or (e < len(owner) and owner[e] == owner[e - 1]):
+            return False
+        k = owner[s] - 1
+        while k >= 0 and self._ignorable(units[k][0]):
+            k -= 1
+        if k >= 0 and self._word(units[k]):
+            return False
+        k = owner[e - 1] + 1
+        while k < len(units) and self._ignorable(units[k][0]):
+            k += 1
+        return not (k < len(units) and self._word(units[k]))
+
+    def _hits(self, line: str, edges: bool) -> tuple[Sequence[str], list[tuple[int, int]]]:
+        """(units, hits) of LINE: each hit is a range of units [first, last + 1), sorted. With
+        EDGES, a hit must pass the word test, and the search goes on at a counted hit's end, or
+        one past a rejected hit's start. Without (masking), every match counts and the search
+        always goes on one past its start, so overlapping matches are all found."""
+        units, folded, owner = self._line(line)
+        out = []
+        for pattern in self.patterns:
+            pos = 0
+            while True:
+                m = pattern.search(folded, pos)
+                if m is None:
+                    break
+                s, e = m.span()
+                if edges and not self._alone(units, owner, s, e):
+                    pos = s + 1
+                    continue
+                out.append((owner[s], owner[e - 1] + 1))
+                pos = e if edges else s + 1
+        return units, sorted(out)
+
+    def find(self, text: str) -> list[tuple[int, str]]:
+        """(line number, matched original text) of each term in TEXT."""
+        out: list[tuple[int, str]] = []
+        if self.patterns:
+            for n, line in enumerate(text.split("\n"), 1):
+                units, hits = self._hits(line, True)
+                out.extend((n, "".join(units[a:b])) for a, b in hits)
+        return out
 
     def mask(self, text: str) -> str:
-        if self.mask_re is not None:
-            text = self.mask_re.sub("<private>", text)
+        """TEXT with every match of a term (word test left out) replaced by <private>, overlapping
+        or touching matches as one; then every public rule's match by <redacted>."""
+        if self.patterns:
+            lines = []
+            for line in text.split("\n"):
+                units, hits = self._hits(line, False)
+                merged: list[list[int]] = []
+                for a, b in hits:
+                    if merged and a <= merged[-1][1]:
+                        merged[-1][1] = max(merged[-1][1], b)
+                    else:
+                        merged.append([a, b])
+                parts, k = [], 0
+                for a, b in merged:
+                    parts += ["".join(units[k:a]), "<private>"]
+                    k = b
+                lines.append("".join(parts) + "".join(units[k:]))
+            text = "\n".join(lines)
         for rx in _public_regexes():
             text = rx.sub("<redacted>", text)
         return text
@@ -274,7 +399,7 @@ def load_terms() -> Terms:
         raise ScanError(f"the private term list ({where}) could not be read ({type(exc).__name__})") from None
     terms = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     found = Terms(terms, None)
-    if not found.alternation:
+    if not found.patterns:
         raise ScanError(f"the private term list ({where}) is empty")
     return found
 
@@ -1046,7 +1171,7 @@ class Scanner:
             # it. A private term (masked as <private>) is the one match a shown name may hold,
             # and only when masking removes it.
             name = names[line - 1]
-            if rule != "private-term" or not text or text in self.terms.mask(name):
+            if rule != "private-term" or not text or self.terms.find(self.terms.mask(name)):
                 withheld.add(name)
         self.clear = set(shown) - withheld
         if self.unreadable:
@@ -1069,6 +1194,7 @@ class Scanner:
             in_use = self.known(emails) if emails else set()
             raw = [f for f in raw if not (f in ident and f[3].lower() in in_use)]
         out: list[str] = []
+        seen: set[str] = set()  # beside the list, so the duplicate test is not a list search
         for rule, idx, line, _text in raw:
             chunk = self.chunks[idx]
             names = chunk["names"]
@@ -1081,7 +1207,8 @@ class Scanner:
             else:
                 place = str(chunk["place"]) + suffix
             item = _finding(rule, place)
-            if item not in out:
+            if item not in seen:
+                seen.add(item)
                 out.append(item)
         return out
 
@@ -1098,15 +1225,14 @@ class Scanner:
         raw: list[tuple[str, int, int, str]] = []
         for n, cfg in enumerate((secrets_cfg, public_cfg)):
             raw += self._pass(exe, cfg, n)
-        if self.terms.find_re is not None:
+        if self.terms.patterns:
             for idx, chunk in enumerate(self.chunks):
                 source = chunk["terms"]
                 if source is False:
                     continue
                 raw_text = source.read_bytes() if isinstance(source, Path) else self._text(idx)
-                text = raw_text.decode("utf-8", "surrogateescape")
-                for m in self.terms.find_re.finditer(text):
-                    raw.append(("private-term", idx, text.count("\n", 0, m.start()) + 1, m.group(0)))
+                for line, matched in self.terms.find(raw_text.decode("utf-8", "surrogateescape")):
+                    raw.append(("private-term", idx, line, matched))
         # Line numbers of the whole text, not of a window.
         return [(rule, idx, line + int(self.chunks[idx]["shift"]), text) for rule, idx, line, text in raw]
 
