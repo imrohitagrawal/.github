@@ -1306,7 +1306,8 @@ class Scanner:
             where = []
             for fixed, path in self.too_long:
                 where.append(self.render(path, "%s", fixed))
-            raise ScanError("a private key block crosses a scan window and is too long to be read in one piece, "
+            raise ScanError("a private key block (or text shaped like one) crosses a scan window and is too long "
+                            "to be read in one piece, "
                             "so %s could not be checked. Fix: remove the key from the commits and push again; "
                             "a private key never belongs in a public repository" % "; ".join(dict.fromkeys(where)))
         allowed = allowed_addresses()

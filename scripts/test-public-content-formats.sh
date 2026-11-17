@@ -1152,7 +1152,8 @@ expect_rc "PGP key block ($psize bytes) from byte 73999 is found" 1 "private-key
 _gen pem "$WORK/pem.txt" 1000 6000 one >/dev/null
 _text "$WORK/pem.txt"
 # RED WHEN: a key block too long to be read in one piece passes instead of blocking.
-expect_rc "a key block too long for one piece blocks" 2 "could not check" "private key block crosses a scan window"
+expect_rc "a key block too long for one piece blocks" 2 "could not check" \
+  "a private key block (or text shaped like one) crosses a scan window"
 # T7. RED WHEN: the too-long error is raised without the rendered place (here the label demo)
 # and its own fix line, or reuses the unreadable-file advice (repack as zip).
 expect_rc "T7: the too-long key block message names the place and says to remove the key" 2 \
@@ -1362,7 +1363,8 @@ for label, text in texts:
                    "%d bytes in %d chunks for %d" % (sum(written), len(written), len(text)))
         except scan.ScanError as exc:
             report("T1: %s: chunk bytes within 9n/4 + 2W" % label, False, "ScanError: %s" % exc)
-# T1 (plan). RED WHEN: as above, or key spans overlap, or their count passes I4's.
+# T1 (plan). RED WHEN: as above, or key spans overlap, or there are more chunks than
+# n/72 000 + n/14 000 + 2 (one window per 72 000 bytes, one key span per 14 000).
 for label, text in texts:
     name = "T1: %s: the plan's key spans are disjoint and within the bound" % label
     try:
@@ -1442,18 +1444,22 @@ for it in range(300):
     wins = scan._windows(text)
     keys = sorted(keys_of(spans, wins))
     n = len(text)
-    i1 = (wins[0][0] == 0 and wins[-1][1] == n and all(e - s <= W for s, e in wins)
+    # The windows cover the text, each at most WINDOW bytes, each starting at least
+    # WINDOW - OVERLAP - EDGE after the one before and at least OVERLAP - EDGE before it ends.
+    wins_ok = (wins[0][0] == 0 and wins[-1][1] == n and all(e - s <= W for s, e in wins)
           and all(b[0] - a[0] >= W - OV - E and b[0] <= a[1] - (OV - E) for a, b in zip(wins, wins[1:])))
     held = lambda a, b: any(s <= a and b <= e for s, e in wins)
-    i3 = (all(a[1] <= b[0] for a, b in zip(keys, keys[1:])) and all(e - s <= W for s, e in keys)
+    # The added key spans never overlap, are at most WINDOW bytes, and no window holds one whole.
+    keys_ok = (all(a[1] <= b[0] for a, b in zip(keys, keys[1:])) and all(e - s <= W for s, e in keys)
           and not any(held(s, e) for s, e in keys))
     found = oracle(text)
     missed = [m for m in found if m[1] - m[0] <= W and not any(s <= m[0] and m[1] <= e for s, e in spans)]
     longer = [m for m in found if m[1] - m[0] > W]
-    if not (i1 and i3) or missed or (longer and not too_long):
-        fails.append("text %d: I1 %s, I3 %s, %d oracle matches in no chunk, %d too long (flag %s)" % (
-            it, i1, i3, len(missed), len(longer), too_long))
-report("T15: 300 fuzz texts: every oracle match lies in a planned chunk; I1-I3 hold", not fails,
+    if not (wins_ok and keys_ok) or missed or (longer and not too_long):
+        fails.append("text %d: windows %s, key spans %s, %d oracle matches in no chunk, %d too long (flag %s)" % (
+            it, wins_ok, keys_ok, len(missed), len(longer), too_long))
+report("T15: 300 fuzz texts: every oracle match lies in a planned chunk; windows and key spans keep their bounds",
+       not fails,
        "; ".join(fails[:3]) + (" (%d texts)" % len(fails) if fails else ""))
 EOF
 # py_verdicts PY ARGS...: run a Python check and turn its `ok NAME` / `bad NAME - DETAIL` lines into verdicts.
@@ -1535,14 +1541,17 @@ for size in 44 45; do
     # RED WHEN: the fixture stops being a key gitleaks itself reports when read whole.
     if gl_finds "$WORK/pemb.txt.block" private-key; then ok "T6b: gitleaks reports the $runes-character body read whole"; else
       bad "T6b: gitleaks reports the $runes-character body read whole" "not reported"; fi
-    # T6b. RED WHEN: a block a window edge cuts is in no chunk whole (64 characters is a key).
+    # T6b. RED WHEN: a block a window edge cuts is in no chunk whole (windows stop overlapping
+    # by more than the block), so the 64-character key is missed.
     expect_rc "T6b: a block with a $runes-character body across a window edge is found" 1 "private-key at demo:2" @scanned
   else
     # RED WHEN: the fixture changes so that gitleaks reports a 63-character body (the clean case
     # below would then test nothing).
     if gl_finds "$WORK/pemb.txt.block" private-key; then bad "T6b: gitleaks does not report a $runes-character body" "reported"; else
       ok "T6b: gitleaks does not report a $runes-character body"; fi
-    # T6b. RED WHEN: a 63-character body counts as a key (KEY_MIN_BODY or body_end off by one).
+    # T6b. RED WHEN: the guard reports a block gitleaks does not report read whole (a chunk
+    # boundary inside the block making a key of it). KEY_MIN_BODY off by one does not turn this
+    # red, because a window holds the block whole; T15's oracle guards that (measured).
     expect_rc "T6b: a block with a $runes-character body across a window edge is clean" 0 @scanned
   fi
 done
