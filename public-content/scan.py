@@ -233,7 +233,7 @@ class Terms:
     i, and a U+0307 (dot above) right after an i is dropped, so Turkish capital I with a dot and
     dotless i fold to i. Ignorable characters are left out first. NFC and NFD spellings fold the
     same. A term is folded the same way, then split into words on [-_. ]+; its pattern joins the
-    words with up to three separators.
+    words with up to three separators, or up to the longest run of separators the term holds.
     Word test. A hit counts only when it starts and ends at unit edges (the owner changes there)
     and the nearest unit on each side that is not ignorable is not a word unit: one whose base
     character's own Unicode category is Lu, Ll, Lt (a letter of a cased script) or Nd (a decimal
@@ -262,7 +262,8 @@ class Terms:
             folded = self._line(term)[1]
             words = [w for w in self._SEPARATORS.split(folded) if w]
             if words:
-                self.patterns.append(re.compile("[-_. ]{0,3}".join(re.escape(w) for w in words)))
+                most = max([3] + [len(run) for run in self._SEPARATORS.findall(folded)])
+                self.patterns.append(re.compile(("[-_. ]{0,%d}" % most).join(re.escape(w) for w in words)))
 
     def _ignorable(self, ch: str) -> bool:
         return unicodedata.category(ch) == "Cf" or self._IGNORABLE.match(ch) is not None
@@ -496,7 +497,8 @@ def load_terms() -> Terms:
     """Where the list lives: PRIVATE_NOTES_DIR, else the folder recorded in global git config.
     Both set and naming different folders: ScanError (the variable must not silently replace
     the recorded list). Neither set: no private terms, with a warning (CI, other machines).
-    A folder whose list is missing, unreadable or empty: ScanError (fail closed)."""
+    A folder whose list is missing, unreadable or empty: ScanError (fail closed); so is a list
+    holding a term that does not find its own text (the error names its line, never the term)."""
     env = os.environ.get("PRIVATE_NOTES_DIR") or None
     recorded = _recorded_notes_dir()
     if env and recorded and not _same_folder(env, recorded):
@@ -512,10 +514,16 @@ def load_terms() -> Terms:
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         raise ScanError(f"the private term list ({where}) could not be read ({type(exc).__name__})") from None
-    terms = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
-    found = Terms(terms, None)
+    numbered = [(n, ln.strip()) for n, raw in enumerate(text.split("\n"), 1) for ln in raw.splitlines()
+                if ln.strip() and not ln.lstrip().startswith("#")]
+    found = Terms([term for _n, term in numbered], None)
     if not found.patterns:
         raise ScanError(f"the private term list ({where}) is empty")
+    for n, term in numbered:
+        one = Terms([term], None)
+        if one.patterns and not one.find(term):
+            raise ScanError(f"the private term list ({where}) could not be used: the term on line {n} "
+                            "does not match its own text")
     return found
 
 
