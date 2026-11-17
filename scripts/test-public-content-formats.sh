@@ -1729,6 +1729,31 @@ try:
 except scan.ScanError as exc:
     report("T19 partner: a list whose terms find themselves loads", False, str(exc))
 
+def load_error(lines):
+    """The ScanError text of load_terms over a list holding LINES, or None when it loads."""
+    with open(os.path.join(notes, "scanner", "private-terms.txt"), "w", encoding="utf-8") as f:
+        f.write(lines)
+    try:
+        scan.load_terms()
+        return None
+    except scan.ScanError as exc:
+        return str(exc)
+# T24. RED WHEN: load_terms checks only the terms that yield a pattern (a term of separators
+# alone yields none, so it would load and match nothing), or the error names the term.
+got = load_error("acme\n....\n")
+report("T24: a term with no letters or digits fails the load, naming its line",
+       got is not None and "line 2" in got and "...." not in got, ascii(got))
+# T24 partner. RED WHEN: a term may start with a combining mark (its first unit has no base).
+got = load_error("acme\n# note\n\u0301acme\n")
+report("T24: a term that starts with a combining mark fails the load, naming its line",
+       got is not None and "line 3" in got and "acme" not in got, ascii(got))
+got = load_error("acme\n\u200d\u0323x\n")
+report("T24: a term whose first unit after an ignorable one has no base fails the load",
+       got is not None and "line 2" in got, ascii(got))
+# T24 partner. RED WHEN: the check rejects a term holding a mark after its first letter.
+got = load_error("acme\nacm\u00e9 labs\nx\u0301y\n")
+report("T24 partner: terms with a base letter first load", got is None, ascii(got))
+
 # T20. RED WHEN: a unit is grown one character at a time (each mark copies the unit so far:
 # quadratic in a run of marks). Run in a child process so a quadratic build cannot hang the suite.
 code = ("import sys, time; sys.path.insert(0, sys.argv[1]); import scan; t = scan.Terms(['acme'], None); "
@@ -1765,6 +1790,57 @@ report("T23: a name holding only a term and plain text is shown masked",
        got == ["private-term at the file name <private>-notes.txt"], ascii(got))
 got = run_report(["acme"], lambda sc: sc.add_names("a file name", ["acme-notes.txt"]))
 report("T23 partner: acme-notes.txt is shown masked", got == ["private-term at the file name <private>-notes.txt"], ascii(got))
+
+# T25. RED WHEN: a hit's unit edges are tested on adjacent owners only: canonical reordering
+# across an ignorable character can leave a unit's folded characters on both sides of the hit
+# (here the e-acute's acute sorts after the next unit's grave below).
+report("T25: the term acme is not found in acm + e-acute + CGJ + grave below",
+       found(["acme"], "acm\u00e9\u034f\u0316") == [],
+       ascii(found(["acme"], "acm\u00e9\u034f\u0316")))
+report("T25: the term acme is not found in acm + e + acute + CGJ + grave below",
+       found(["acme"], "acme\u0301\u034f\u0316") == [],
+       ascii(found(["acme"], "acme\u0301\u034f\u0316")))
+# T25 partner. RED WHEN: the edge test rejects a hit that holds every folded character of its units.
+report("T25 partner: acme + CGJ + grave below finds acme", found(["acme"], "acme\u034f\u0316") == ["acme"],
+       ascii(found(["acme"], "acme\u034f\u0316")))
+# T26. RED WHEN: a hit's units run from its first folded character's owner to its last one's
+# (M6) instead of from the least owner to the greatest: reordering puts a later unit's mark
+# between an earlier unit's characters, so find returns too little and mask leaves part showing.
+for label, term, line, want_find in (
+        ("e with dot below and acute, in e-acute + ZWJ + dot below", "\u1eb9\u0301",
+         "\u00e9\u200d\u0323", ["\u00e9\u200d\u0323"]),
+        ("dot below and acute, in a-acute + ZWJ + dot below", "\u0323\u0301",
+         "\u00e1\u200d\u0323", [])):
+    t = scan.Terms([term], None)
+    got_find, got_mask = [x for _n, x in t.find(line)], t.mask(line)
+    report("T26: %s finds %s and masks every matched unit" % (label, ascii(want_find)),
+           got_find == want_find and got_mask == "<private>", ascii((got_find, got_mask)))
+# T27. RED WHEN: the segment cache grows without bound (each distinct short segment of a line
+# stays in it, so a long run of distinct text holds memory for the life of the Terms).
+limit = getattr(scan.Terms, "SEGMENT_CACHE_LIMIT", None)
+t = scan.Terms(["acme"], None)
+t.find("".join(chr(0x20000 + i) for i in range(40000)))
+report("T27: 40 000 distinct segments leave the segment cache at or under its bound",
+       isinstance(limit, int) and 0 < limit <= 10000 and len(t._segments) <= limit,
+       "limit %r, %d entries" % (limit, len(t._segments)))
+# T27 partner. RED WHEN: the cache is never filled (the bound then holds trivially).
+t = scan.Terms(["acme"], None)
+t.find("x\u00e9y")
+report("T27 partner: a short non-ASCII line fills the segment cache", len(t._segments) > 0, str(len(t._segments)))
+# T20 partner. RED WHEN: a long run of marks of different classes is sorted or matched in more
+# than linear-log time. Run in a child process so a slow path cannot hang the suite.
+code = ("import sys, time; sys.path.insert(0, sys.argv[1]); import scan; t = scan.Terms(['acme'], None); "
+        "line = 'a' + '\\u0301\\u0323\\u0345' * 333334; t0 = time.time(); "
+        "ok = t.find(line) == [] and t.mask(line) == line; print('%s %.2f %d' % (ok, time.time() - t0, len(line)))")
+try:
+    r = subprocess.run([sys.executable, "-I", "-B", "-c", code, sys.argv[1]], capture_output=True, text=True, timeout=60)
+    got = r.stdout.split()
+    report("T20 partner: one letter and 1 000 000 marks of three classes are found and masked in under 10 s",
+           r.returncode == 0 and got[0] == "True" and float(got[1]) < 10 and int(got[2]) > 1000000,
+           (r.stdout + r.stderr)[-200:])
+except subprocess.TimeoutExpired:
+    report("T20 partner: one letter and 1 000 000 marks of three classes are found and masked in under 10 s",
+           False, "over 60 s")
 EOF
 py_verdicts "$UNITPY" "$ROOT/public-content"
 
