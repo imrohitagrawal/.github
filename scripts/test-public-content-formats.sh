@@ -1591,7 +1591,7 @@ _text "$WORK/t13.txt"
 expect_rc "T13: a term on line 3 after two lines that fold longer is reported on line 3" 1 "private-term at demo:3" @scanned
 "$REAL_PY" -I -c '
 import sys
-sys.stdout.write("".join("line %05d uses %s here\n" % (i, sys.argv[1]) for i in range(1, 80001)))' "$PTERM" >"$WORK/t14.txt"
+sys.stdout.write("".join(("line %05d uses %s " % (i, sys.argv[1])).ljust(55, ".") + "\n" for i in range(1, 80001)))' "$PTERM" >"$WORK/t14.txt"
 t0="$("$REAL_PY" -I -c 'import time; print(time.time())')"
 _text "$WORK/t14.txt"
 t1="$("$REAL_PY" -I -c 'import time; print(time.time())')"
