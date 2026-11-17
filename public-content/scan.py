@@ -848,6 +848,36 @@ def _key_spans(text: bytes) -> list[tuple[int, int]]:
         pos = ends[i].end()
 
 
+def _plan(text: bytes) -> tuple[list[tuple[int, int]], bool]:
+    """The chunks of TEXT as (start, end), sorted by start, and whether a key block was too long
+    to be read in one piece. A text that fits in one gitleaks piece is one chunk. A longer text:
+    its windows, plus each key span (_key_spans) that no window holds whole; a span longer than
+    WINDOW is not added and sets the flag (the caller blocks, naming the place). Windows add up
+    to at most 1.25n + WINDOW bytes; the key spans added never overlap, so they add up to at
+    most n. So all chunks add up to at most 9n/4 + 2 * WINDOW; a plan over that is a ScanError
+    (it cannot happen; the check guards later edits)."""
+    n = len(text)
+    if n <= GITLEAKS_PIECE - 100:
+        return [(0, n)], False
+    wins = _windows(text)
+    starts = [at for at, _end in wins]
+    spans = list(wins)
+    too_long = False
+    for at, end in _key_spans(text):
+        # Windows start and end in order, so the last one starting at or before AT ends last.
+        i = bisect.bisect_right(starts, at) - 1
+        if i >= 0 and wins[i][1] >= end:
+            continue
+        if end - at > WINDOW:
+            too_long = True
+            continue
+        spans.append((at, end))
+    spans.sort(key=lambda span: span[0])  # stable: the first window stays first
+    if sum(end - at for at, end in spans) > 9 * n // 4 + 2 * WINDOW:
+        raise ScanError("the scan plan for a long text exceeds its size bound")
+    return spans, too_long
+
+
 FIX_UNREADABLE = (
     "Fix: remove it from the commits and push again; or commit its contents unpacked; or repack it "
     "as zip, tar.gz or tar.xz, which the guard reads completely; or keep it in a private repository. "
@@ -893,6 +923,8 @@ class Scanner:
         self.run_id = secrets.token_hex(8)
         # Files that could not be read completely: (place, path, reason).
         self.unreadable: list[tuple[str, str | None, str]] = []
+        # Texts holding a key block too long to be read in one piece: (place, path).
+        self.too_long: list[tuple[str, str | None]] = []
         # Every raw name a place may show, and (after run) those render may print.
         self.names: set[str] = set()
         self.clear: set[str] = set()
@@ -958,28 +990,24 @@ class Scanner:
 
     def _chunk(self, place: str, text: bytes, lines: bool, names: list[str] | None, path: str | None,
                kind: str, inside: bool) -> None:
-        """TEXT as one chunk when it fits in one gitleaks piece, else as overlapping windows and
-        one chunk per key block (see WINDOW). The first chunk of a text carries the private-term
-        match for the whole text (see findings)."""
+        """TEXT as one chunk when it fits in one gitleaks piece, else as the chunks _plan gives:
+        overlapping windows and each key block no window holds (see WINDOW). A key block too
+        long for one piece is recorded, and run blocks naming the place. The first chunk of a
+        text carries the private-term match for the whole text (see findings)."""
         meta = {"place": place, "lines": lines, "names": names, "path": path, "archive": inside, "kind": kind}
+        spans, too_long = _plan(text)
+        if too_long:
+            self.too_long.append((place, path))
         if len(text) <= GITLEAKS_PIECE - 100:
             self._write(meta, text, 0, terms=None)
             return
         whole = self.work / ("whole-%07d" % len(self.chunks))
         whole.write_bytes(text)
-        nl, last = 0, 0  # a running count of the line breaks before each window
-        for n, (at, end) in enumerate(_windows(text)):
+        nl, last = 0, 0  # a running count of the line breaks before each chunk (spans are sorted)
+        for n, (at, end) in enumerate(spans):
             nl += text.count(b"\n", last, at)
             last = at
             self._write(meta, text[at:end], nl, terms=whole if n == 0 else False)
-        nl, last = 0, 0
-        for at, end in _key_spans(text):
-            if end - at > WINDOW:
-                raise ScanError("a private key block crosses a scan window and is too long to be read in one "
-                                "piece, so it could not be checked")
-            nl += text.count(b"\n", last, at)
-            last = at
-            self._write(meta, text[at:end], nl, terms=False)
 
     def _write(self, meta: dict[str, object], text: bytes, shift: int, terms: Path | bool | None) -> None:
         # The leading newline keeps gitleaks from reading the first bytes as a binary file's
@@ -1026,6 +1054,13 @@ class Scanner:
             for fixed, path, reason in self.unreadable:
                 where.append("%s: %s" % (self.render(path, "%s", fixed), reason))
             raise UnreadableFile("; ".join(dict.fromkeys(where)))
+        if self.too_long:
+            where = []
+            for fixed, path in self.too_long:
+                where.append(self.render(path, "%s", fixed))
+            raise ScanError("a private key block crosses a scan window and is too long to be read in one piece, "
+                            "so %s could not be checked. Fix: remove the key from the commits and push again; "
+                            "a private key never belongs in a public repository" % "; ".join(dict.fromkeys(where)))
         allowed = allowed_addresses()
         raw = [f for f in raw if self.chunks[f[1]]["kind"] != "display" and f[3].lower() not in allowed]
         if self.known is not None:
