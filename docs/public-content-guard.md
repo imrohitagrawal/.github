@@ -108,21 +108,26 @@ Until one of these is in place, review every pull request that edits a workflow.
   such word pass.
 - **Private terms**: a private list of words, such as private project names. The list is
   never committed (see [Private terms](#private-terms)). Terms are compared after Unicode
-  compatibility and case folding (STRASSE matches straße; full-width letters and Turkish İ
-  match), with up to three of `-`, `_`, `.` or space, or nothing, between their words. A term
-  is part of a longer word when a letter of a cased script (Latin, Greek, Cyrillic and others),
-  a digit, or a mark on such a letter touches it; letters of scripts without case (Han, Kana,
-  Thai, Arabic and others), punctuation and symbols are breaks, so a term next to them is
-  reported. `_` counts as a break, so `term_client` matches.
+  compatibility and case folding of the whole line (STRASSE matches the word written with a
+  German sharp s; full-width letters, ligatures and the Turkish capital I with a dot match),
+  with nothing or up to three of `-`, `_`, `.` or space between their words (more, when the
+  term itself holds a longer run). A term is part of a longer word when the character next to
+  it is a word character: one whose own Unicode category is an upper-case, lower-case or
+  title-case letter (Lu, Ll, Lt: the letters of scripts with case, such as Latin, Greek and
+  Cyrillic) or a decimal digit (Nd), together with any combining marks (accents written after
+  a character) on it. Everything else is a break: letters of scripts without case (Han, Kana,
+  Thai, Arabic and others), modifier letters, other numbers, punctuation and symbols, so a term
+  next to them is reported. Invisible characters such as a zero-width space are skipped. `_`
+  counts as a break, so `term_client` matches.
 
 The public rules live in [`public-content/gitleaks-public.toml`](../public-content/gitleaks-public.toml).
 Secrets and the public rules run as two separate gitleaks passes. One layered config does not
 work: gitleaks' default allowlist silently drops any match that contains `/home/`. Private
 terms are matched by the scanner itself.
 
-A report names the rule and the place (a file and line, a commit, a ref). A match inside an
-archive names the archive's path followed by "(inside the archive)". It never repeats the
-matched text. A path is printed only when it is plain (letters, digits, `.`, `_`, `/` and `-`;
+A report names the rule and the place (the file and line, the commit, the ref or the
+message). A match inside an archive names the archive's path followed by "(inside the
+archive)". It never repeats the matched text. A path is printed only when it is plain (letters, digits, `.`, `_`, `/` and `-`;
 no space, colon, percent sign, line break, other control or non-ASCII character) and its raw
 name, scanned before anything is escaped, matches no rule; a private term in it shows as
 `<private>`. Any other path is withheld, and a fixed placeholder stands in for it. A file the
@@ -246,18 +251,20 @@ that holds one (a `curl` command with a blank line in it, a PGP key block). So:
   missed. Where a window edge falls inside a run of letters and digits with no break within
   2 000 bytes, a rule that needs a word boundary can match there although it would not match
   in the whole text (this can only add a finding). Likewise, a window can start just after a
-  mark that is not a letter or digit (for example the `//` of a URL), so a rule that looks at
-  the character before a match can match there although it would not in the whole text; this
-  can only add a finding, never hide one.
+  character that is not a letter or digit (for example the `//` of a URL), so a rule that
+  looks at the character before a match can match there although it would not in the whole
+  text; this can only add a finding, never hide one.
 - The private-key rule has no length limit. So in a text longer than one piece, each key
   block that no window already holds is also read as a piece of its own; a block a window
   holds is not read again. A block runs from its BEGIN marker to the first END marker at
   least 64 characters after it. The END marker is any `KEY-----` or `KEY BLOCK-----`,
   including the end of a later key's own BEGIN line; a BEGIN marker with none of these after
   it is not a key. The Kelvin sign and the long s count as k and s, as they do in gitleaks. A
-  key block longer than 90 000 bytes blocks the check and names the file ("a private key
-  block crosses a scan window", and the fix: remove the key from the commits). The pieces of
-  one text add up to at most 2.25 times its size plus 180 000 bytes.
+  key block longer than 90 000 bytes blocks the check and names the place (the file, commit
+  or message), saying "a private key block (or text shaped like one) crosses a scan window",
+  with the fix: remove the key from the commits. The text of the pieces of one text adds up to
+  at most 2.25 times its size plus 180 000 bytes; each piece's file adds 37 bytes to that (a
+  line break before the text, and a line break and a 35-byte proof-of-reading line after it).
 - Private terms are matched on the whole text, never on windows, so a window edge never
   changes whether a term is inside a longer word.
 
@@ -468,7 +475,8 @@ The hook blocks the push, and the CI step fails, when a check cannot finish:
   (even after the one retry), or writes a report that cannot be read;
 - an archive cannot be read completely, or is a format the guard cannot open (see
   [What is checked](#what-is-checked));
-- the notes folder is set but its term list is missing, unreadable or empty;
+- the notes folder is set but its term list is missing, unreadable or empty, or holds a term
+  that does not match its own text (the message names the line number, never the term);
 - the allowed address list is missing, unreadable, or has a line that is not an address;
 - `PRIVATE_NOTES_DIR` differs from the recorded notes folder;
 - a destination tip is missing locally and cannot be fetched;
