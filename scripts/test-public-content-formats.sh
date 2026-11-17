@@ -1152,6 +1152,12 @@ _gen pem "$WORK/pem.txt" 1000 6000 one >/dev/null
 _text "$WORK/pem.txt"
 # RED WHEN: a key block too long to be read in one piece passes instead of blocking.
 expect_rc "a key block too long for one piece blocks" 2 "could not check" "private key block crosses a scan window"
+# T7. RED WHEN: the too-long error is raised without the rendered place (here the label demo)
+# and its own fix line, or reuses the unreadable-file advice (repack as zip).
+expect_rc "T7: the too-long key block message names the place and says to remove the key" 2 \
+  "so demo could not be checked" "a private key never belongs in a public repository"
+if grep -q -F "repack it" "$ERR"; then bad "T7: the too-long key block message is not the unreadable-file advice" "repack advice printed"; else
+  ok "T7: the too-long key block message is not the unreadable-file advice"; fi
 # RED WHEN: the block message quotes the key (the message is fixed).
 if grep -q -F -e "bm90LWEtcmVhbC" "$ERR"; then bad "the key block message quotes no key text" "key text in stderr"; else
   ok "the key block message quotes no key text"; fi
@@ -1250,6 +1256,352 @@ _text "$WORK/word.txt"
 # a byte that is not a letter or digit, so a window starting at byte 74 000 invents the word
 # boundary before the agent id glued to letters.
 expect_rc "a long line: an agent id glued to letters at byte 74 000 is clean" 0 @scanned
+
+echo "== (k) key blocks: one planner, a faithful copy of the private-key rule, a size bound"
+# The fixtures come from one generator, so this file holds no key envelope. KELVIN is U+212A
+# (Kelvin sign), LONGS U+017F (long s), DOTI U+0130 (capital I with dot), EURO U+20AC: gitleaks'
+# engine folds the first two to k and s and not the third (measured, 8.30.1).
+KEYGEN="$WORK/keygen.py"
+cat >"$KEYGEN" <<'EOF'
+import base64, sys
+kind, out = sys.argv[1], sys.argv[2]
+args = sys.argv[3:]
+dash = b"-" * 5
+KELVIN, LONGS, DOTI, EURO = (c.encode() for c in ("\u212a", "\u017f", "\u0130", "\u20ac"))
+def body(n, wrap=b"\n"):  # n bytes of base64 of a fixed phrase, wrapped at 64: not a real key
+    raw = base64.b64encode(b"not-a-real-private-key" * (n // 29 + 1))[:n]
+    return wrap.join(raw[i:i + 64] for i in range(0, len(raw), 64))
+def begin(label=b"", k=b"K", i=b"I"):
+    return dash + b"BEG" + i + b"N " + label + b"PRIVATE " + k + b"EY" + dash
+def end(k=b"K"):
+    return dash + b"END PRIVATE " + k + b"EY" + dash
+block, line = None, None
+if kind == "blocks":  # blocks LINES: LINES lines of back-to-back 116-byte blocks, 89 900 bytes each
+    blk = begin() + b"ab+/" * 16 + end()
+    data = b"\n".join([blk * (89990 // len(blk))] * int(args[0]))
+elif kind == "letters":  # letters N: back-to-back blocks with all-letter bodies, one line of N bytes
+    blk = begin() + b"A" * 64 + end()
+    data = blk * (int(args[0]) // len(blk))
+elif kind == "json":  # json AT: a 4 KB key with escaped line breaks inside a JSON string from byte AT
+    key = begin() + b"\\n" + body(4000, b"\\n") + b"\\n" + end() + b"\\n"
+    data = b'{"pad":"' + b"x" * int(args[0]) + b'","key":"' + key + b'","more":"' + b"y" * 70000 + b'"}'
+elif kind == "pemv":  # pemv AT SIZE VARIANT: a SIZE-byte body; the block starts a long line at AT
+    at, size, v = int(args[0]), int(args[1]), args[2]
+    b, e = {"ascii": (begin(), end()), "kelvin-begin": (begin(k=KELVIN), end()),
+            "kelvin-end": (begin(), end(k=KELVIN)), "long-s": (begin(label=b"R" + LONGS + b"A "), end()),
+            "dotted-i": (begin(i=DOTI), end())}[v]
+    block = b + b"\n" + body(size) + b"\n" + e
+    data = b"!" * (at - 1) + b"\n" + block + b"!" * 100000
+elif kind == "pgpv":  # pgpv AT VARIANT: a PGP block whose END has the Kelvin sign in KEY or BLOCK
+    at, v = int(args[0]), args[1]
+    e = {"kelvin-key": b"END PGP PRIVATE " + KELVIN + b"EY BLOCK",
+         "kelvin-block": b"END PGP PRIVATE KEY BLOC" + KELVIN}[v]
+    block = (dash + b"BEGIN PGP PRIVATE KEY BLOCK" + dash + b"\n\n"
+             + base64.encodebytes(b"not-a-real-pgp-private-key-block" * 700) + dash + e + dash)
+    data = b"!" * (at - 1) + b"\n" + block + b"!" * 100000
+elif kind == "euro":  # euro AT: BEGIN, 30 euro signs, END, a 25 KB body, END: one key of ~25 KB
+    at = int(args[0])
+    block = begin() + EURO * 30 + end() + b"\n" + body(25000) + b"\n" + end()
+    data = b"!" * (at - 1) + b"\n" + block + b"!" * 100000
+elif kind == "swallow":  # swallow AT: key A, its END line holding two BEGIN markers, a 25 KB key
+    at = int(args[0])
+    key_a = begin() + b"\n" + body(200) + b"\n" + dash + b"BEGIN" + end()
+    pre = b"!" * (at - 1) + b"\n" + key_a + b" "
+    data = pre + begin(label=b"RSA ") + b"\n" + body(25000) + b"\n" + end() + b"\n" + b"!" * 100000
+    line = pre.count(b"\n") + 1
+else:
+    sys.exit("unknown fixture " + kind)
+open(out, "wb").write(data)
+if block is not None:
+    open(out + ".block", "wb").write(block)
+    print(len(block))
+if line is not None:
+    print(line)
+EOF
+_kgen() { "$REAL_PY" -I "$KEYGEN" "$@" || die "keygen $1"; }
+# gl_finds FILE RULE: real gitleaks (default rules) on FILE as one piece reports RULE.
+gl_finds() { gl_rules - <"$1" | grep -q -x -F "$2"; }
+
+# T1, T8 and T15 call the planner directly (pure Python, no gitleaks).
+KEYPY="$WORK/keyplan.py"
+cat >"$KEYPY" <<'EOF'
+import random, re, sys
+sys.path.insert(0, sys.argv[1])
+import scan
+W, OV, E = scan.WINDOW, scan.OVERLAP, scan.EDGE
+dash = "-" * 5
+def report(name, good, detail=""):
+    print(("ok " if good else "bad ") + name + ("" if good else " - " + detail))
+def bound(n):
+    return 9 * n // 4 + 2 * W
+def keys_of(spans, wins):
+    rest = list(wins)
+    out = []
+    for s in spans:
+        if s in rest:
+            rest.remove(s)
+        else:
+            out.append(s)
+    return out
+
+blk = (dash + "BEGIN PRIVATE KEY" + dash + "ab+/" * 16 + dash + "END PRIVATE KEY" + dash).encode()
+line = blk * (89990 // len(blk))
+texts = (("32 lines of back-to-back blocks", b"\n".join([line] * 32)),
+         ("one 2.8 MB line of back-to-back blocks", blk * (2800000 // len(blk))))
+# T1. RED WHEN: a key block starts at its line start (rfind), or a block a window holds is
+# chunked again (the chunk bytes then grow far past 2.25 times the text).
+for label, text in texts:
+    written = []
+    with scan.Scanner(scan.Terms([], None)) as sc:
+        sc._write = lambda meta, chunk, shift, terms: written.append(len(chunk))
+        try:
+            sc.add("demo", text)
+            report("T1: %s: chunk bytes within 9n/4 + 2W" % label, sum(written) <= bound(len(text)),
+                   "%d bytes in %d chunks for %d" % (sum(written), len(written), len(text)))
+        except scan.ScanError as exc:
+            report("T1: %s: chunk bytes within 9n/4 + 2W" % label, False, "ScanError: %s" % exc)
+# T1 (plan). RED WHEN: as above, or key spans overlap, or their count passes I4's.
+for label, text in texts:
+    name = "T1: %s: the plan's key spans are disjoint and within the bound" % label
+    try:
+        spans, too_long = scan._plan(text)
+    except AttributeError as exc:
+        report(name, False, "no planner (%s)" % exc)
+        continue
+    keys = sorted(keys_of(spans, scan._windows(text)))
+    n = len(text)
+    good = (sum(e - s for s, e in spans) <= bound(n) and not too_long
+            and all(a[1] <= b[0] for a, b in zip(keys, keys[1:]))
+            and len(spans) <= n / 72000 + n / 14000 + 2)
+    report(name, good, "%d spans, %d key spans, %d bytes, too long %s" % (
+        len(spans), len(keys), sum(e - s for s, e in spans), too_long))
+
+# T8. RED WHEN: the planner's size check is removed (overlapping key spans then pass silently).
+text = b"!" * 200000
+name = "T8: the planner refuses key spans past its size bound"
+real = getattr(scan, "_key_spans", None)
+try:
+    scan._key_spans = lambda t: [(80000, 170000)] * 100
+    scan._plan(text)
+    report(name, False, "no error")
+except scan.ScanError as exc:
+    report(name, "exceeds its size bound" in str(exc), "other error: %s" % exc)
+except AttributeError as exc:
+    report(name, False, "no planner (%s)" % exc)
+finally:
+    if real is not None:
+        scan._key_spans = real
+
+# T15. An oracle: the whole private-key rule as a str regex on surrogateescape text, with the
+# fold classes of gitleaks' engine written out (k, K, Kelvin sign; s, S, long s). Slow; test only.
+def fold(ch):
+    alts = [ch.lower(), ch.upper()] + (["\u212a"] if ch.lower() == "k" else []) + (["\u017f"] if ch.lower() == "s" else [])
+    return "(?:" + "|".join(map(re.escape, alts)) + ")"
+def lit(w):
+    return "".join(fold(c) if c.isalpha() else re.escape(c) for c in w)
+TAIL = "(?: " + lit("BLOCK") + ")?" + dash
+ORACLE = re.compile(dash + lit("BEGIN") + "(?:[ A-Za-z0-9_\\-]|\u017f|\u212a){0,100}" + lit("PRIVATE KEY") + TAIL
+                    + "[\\s\\S]{64,}?" + lit("KEY") + TAIL)
+def oracle(text):
+    s = text.decode("utf-8", "surrogateescape")
+    off = [0]
+    for c in s:
+        off.append(off[-1] + len(c.encode("utf-8", "surrogateescape")))
+    return [(off[m.start()], off[m.end()]) for m in ORACLE.finditer(s)]
+rnd = random.Random(20261117)
+table = bytes(b"Ab+/\n"[i % 5] for i in range(256))
+pieces = [p.encode("utf-8", "surrogateescape") for p in (
+    dash + "BEGIN PRIVATE KEY" + dash, dash + "BEGIN RSA PRIVATE KEY" + dash,
+    dash + "BEGIN PRIVATE \u212aEY" + dash, dash + "BEGIN \u017fX PRIVATE KEY" + dash,
+    dash + "BEGIN PGP PRIVATE KEY BLOCK" + dash, dash + "END PRIVATE KEY" + dash, "KEY" + dash,
+    "KEY BLOCK" + dash, "\u212aEY" + dash, dash + "BEGIN ", " PRIVATE KEY" + dash, dash + "BEGIN" + dash + "BEGIN",
+    "\u20ac", "\udcff", "\u0130", "-", "\n", "A" * 10, "ab+/")] + [b"\xe2\x84"]
+# T15. RED WHEN: _windows advances by more than WINDOW - OVERLAP + EDGE, key spans overlap, or
+# body_end counts bytes (an oracle match then lies in no chunk).
+fails = []
+for it in range(300):
+    parts = []
+    while sum(map(len, parts)) < 130000:
+        r = rnd.random()
+        if r < 0.15:
+            parts.append(rnd.randbytes(rnd.randint(64, 40000)).translate(table))
+        elif r < 0.25:
+            parts.append(b"x" * rnd.randint(1, 30000))
+        else:
+            parts.append(rnd.choice(pieces))
+    text = b"".join(parts)
+    try:
+        spans, too_long = scan._plan(text)
+    except AttributeError as exc:
+        fails.append("no planner (%s)" % exc)
+        break
+    wins = scan._windows(text)
+    keys = sorted(keys_of(spans, wins))
+    n = len(text)
+    i1 = (wins[0][0] == 0 and wins[-1][1] == n and all(e - s <= W for s, e in wins)
+          and all(b[0] - a[0] >= W - OV - E and b[0] <= a[1] - (OV - E) for a, b in zip(wins, wins[1:])))
+    held = lambda a, b: any(s <= a and b <= e for s, e in wins)
+    i3 = (all(a[1] <= b[0] for a, b in zip(keys, keys[1:])) and all(e - s <= W for s, e in keys)
+          and not any(held(s, e) for s, e in keys))
+    found = oracle(text)
+    missed = [m for m in found if m[1] - m[0] <= W and not any(s <= m[0] and m[1] <= e for s, e in spans)]
+    longer = [m for m in found if m[1] - m[0] > W]
+    if not (i1 and i3) or missed or (longer and not too_long):
+        fails.append("text %d: I1 %s, I3 %s, %d oracle matches in no chunk, %d too long (flag %s)" % (
+            it, i1, i3, len(missed), len(longer), too_long))
+report("T15: 300 fuzz texts: every oracle match lies in a planned chunk; I1-I3 hold", not fails,
+       "; ".join(fails[:3]) + (" (%d texts)" % len(fails) if fails else ""))
+EOF
+# py_verdicts PY ARGS...: run a Python check and turn its `ok NAME` / `bad NAME - DETAIL` lines into verdicts.
+py_verdicts() {
+  local out="$WORK/py-verdicts.txt" verdict rest
+  "$REAL_PY" -I -B "$@" >"$out" 2>&1 || { bad "$(basename "$1") ran" "exit $?: $(tail -c 300 "$out" | tr '\n' ' ')"; return; }
+  while IFS= read -r ln; do
+    verdict="${ln%% *}"
+    rest="${ln#* }"
+    case "$verdict" in
+      ok) ok "$rest" ;;
+      bad) bad "${rest%% - *}" "${rest#* - }" ;;
+      *) bad "$(basename "$1") output" "$ln" ;;
+    esac
+  done <"$out"
+}
+py_verdicts "$KEYPY" "$ROOT/public-content"
+
+_kgen blocks "$WORK/blocks2.txt" 2
+_text "$WORK/blocks2.txt"
+# T1b. RED WHEN: blocks a window holds are skipped AND windows shrink below the block size, so
+# the planner's savings would hide real keys (proves T1 counts real findings).
+expect_rc "T1b: back-to-back blocks on two long lines are found on both" 1 "private-key at demo:1" "private-key at demo:2" @scanned
+_kgen letters "$WORK/letters.txt" 300000
+_text "$WORK/letters.txt"
+# T2. RED WHEN: key spans start at the line start (each block then measures from byte 0 and the
+# check blocks with "crosses a scan window").
+expect_rc "T2: a 300 KB line of all-letter key blocks is found" 1 "private-key at demo:1" @scanned
+_kgen json "$WORK/json.txt" 100000
+_text "$WORK/json.txt"
+# T3. RED WHEN: a block's length is measured from its line start (a 4 KB key at byte 100 000 of
+# a JSON line then counts as 104 KB).
+expect_rc "T3: a 4 KB key with escaped line breaks inside a 174 KB JSON line is found" 1 "private-key at demo:1" @scanned
+for v in ascii kelvin-begin kelvin-end long-s; do
+  _kgen pemv "$WORK/pemv.txt" 70000 50000 "$v" >/dev/null
+  # RED WHEN: the fixture stops being a key gitleaks itself reports when read whole.
+  if gl_finds "$WORK/pemv.txt.block" private-key; then ok "T4: gitleaks reports the $v block read whole"; else
+    bad "T4: gitleaks reports the $v block read whole" "not reported"; fi
+  _text "$WORK/pemv.txt"
+  # T4. RED WHEN: the U+212A or U+017F alternative is removed from the marker regexes, or they
+  # become a str (?i) regex.
+  expect_rc "T4: a 50 KB key ($v) from byte 70 000 of a long line is found" 1 "private-key at demo:2" @scanned
+done
+_kgen pemv "$WORK/pemv.txt" 70000 50000 dotted-i >/dev/null
+if gl_finds "$WORK/pemv.txt.block" private-key; then bad "T4: gitleaks does not report a BEGIN with a dotted capital I" "reported"; else
+  ok "T4: gitleaks does not report a BEGIN with a dotted capital I"; fi
+_text "$WORK/pemv.txt"
+# T4 partner. RED WHEN: the marker regex folds U+0130 to i, which gitleaks does not (a str (?i) regex).
+expect_rc "T4: a key whose BEGIN has a dotted capital I is clean, as in gitleaks" 0 @scanned
+for v in kelvin-key kelvin-block; do
+  _kgen pgpv "$WORK/pgpv.txt" 70000 "$v" >/dev/null
+  if gl_finds "$WORK/pgpv.txt.block" private-key; then ok "T5: gitleaks reports the PGP $v block read whole"; else
+    bad "T5: gitleaks reports the PGP $v block read whole" "not reported"; fi
+  _text "$WORK/pgpv.txt"
+  # T5. RED WHEN: the K alternative is missing from the END regex (in KEY or in BLOCK).
+  expect_rc "T5: a PGP key whose END has a Kelvin sign ($v) is found" 1 "private-key at demo:2" @scanned
+done
+_kgen euro "$WORK/euro.txt" 70000 >/dev/null
+if gl_finds "$WORK/euro.txt.block" private-key; then ok "T6: gitleaks reports the euro-sign block read whole"; else
+  bad "T6: gitleaks reports the euro-sign block read whole" "not reported"; fi
+_text "$WORK/euro.txt"
+# T6. RED WHEN: body_end counts bytes, not characters (the span then ends at the first END and
+# gitleaks' real 25 KB match is cut between two windows).
+expect_rc "T6: a key whose first END is under 64 characters after BEGIN is found" 1 "private-key at demo:2" @scanned
+sline="$(_kgen swallow "$WORK/swallow.txt" 68000)"
+_text "$WORK/swallow.txt"
+# T15b. RED WHEN: BEGIN markers are found with finditer (the greedy header of a BEGIN inside key
+# A swallows the next real BEGIN, and its 25 KB key is in no chunk).
+expect_rc "T15b: a key after a line holding two BEGIN markers is found with the key before it" 1 \
+  "private-key at demo:2" "private-key at demo:$sline" @scanned
+
+echo "== (l) private terms: one fold, one word test"
+TERMPY="$WORK/terms.py"
+cat >"$TERMPY" <<'EOF'
+import sys
+sys.path.insert(0, sys.argv[1])
+import scan
+def hits(terms, text):
+    """The matched text of every private-term finding in TEXT (gitleaks' passes left out)."""
+    with scan.Scanner(scan.Terms(terms, None)) as sc:
+        sc._pass = lambda exe, cfg, n: []
+        sc.add("demo", text)
+        return [t for rule, _idx, _line, t in sc.findings() if rule == "private-term"]
+CASES = []
+def case(name, terms, text, want):
+    CASES.append((name, terms, text, want))
+A = ["acme"]
+# T11. RED WHEN: the look-arounds go back to [A-Za-z0-9] (a cased letter or digit of any
+# script, or a mark on one, touching the term must make it part of a longer word).
+case("T11: e-acute before the term", A, "\u00e9acme", [])
+case("T11: e-acute after the term", A, "acme\u00e9", [])
+case("T11: an Arabic-Indic digit before the term", A, "\u0663acme", [])
+case("T11: a combining acute on the term's last letter", A, "acme\u0301", [])
+case("T11 partner: a-acute in place of the term's a", A, "\u00e1cme", [])
+case("T11 partner: a hyphen and an underscore are breaks", A, "x-acme_y", ["acme"])
+case("T11 partner: two hits on one line", A, "acme acme", ["acme", "acme"])
+# T11b. RED WHEN: the word test reads folded characters, a mark counts as a word character
+# whatever its base, or letters of type Lm, Nl or No count as word characters.
+for label, text, got in (("a trade mark sign", "Acme\u2122 Labs", "Acme"), ("a numero sign", "\u2116acme", "acme"),
+                         ("a Han letter before", "\u793eacme", "acme"), ("a Han letter after", "acme\u793e", "acme"),
+                         ("a Thai letter with a tone mark", "\u0e01\u0e48acme", "acme"),
+                         ("Katakana with a length mark", "\u30b5\u30fc\u30d0\u30fcacme", "acme"),
+                         ("Thai with a repetition mark", "\u0e14\u0e35\u0e46acme", "acme"),
+                         ("an ideographic iteration mark", "acme\u3005", "acme"),
+                         ("an ideographic zero", "\u3007acme", "acme")):
+    case("T11b: the term next to %s is found" % label, A, text, [got])
+# T11c. RED WHEN: units are folded one character at a time (NFC and NFD spellings then differ),
+# or ignorable characters are not skipped.
+case("T11c: an NFC term is found in NFD text with its marks in another order",
+     ["\u00e1\u0316"], "x a\u0316\u0301 y", ["a\u0316\u0301"])
+case("T11c: a zero-width space inside the term", A, "ac\u200bme", ["ac\u200bme"])
+case("T11c: a variation selector after the term", A, "acme\ufe0f", ["acme"])
+# T12. RED WHEN: after a rejected hit the search restarts at its end instead of one past its start.
+case("T12: a-a in xa-a-a is found once, at the second a-a", ["a-a"], "xa-a-a", ["a-a"])
+case("T12 partner: terms a-b and b in xa-b find b", ["a-b", "b"], "xa-b", ["b"])
+# T12b. RED WHEN: all terms share one alternation with the word test outside it (a shorter term
+# that fails the word test then hides a longer one).
+case("T12b: acme and acmecorp in 'see acmecorp.x' find acmecorp", ["acme", "acmecorp"], "see acmecorp.x", ["acmecorp"])
+case("T12b: acme corp and acme in 'acme corpx' find acme", ["acme corp", "acme"], "acme corpx", ["acme"])
+# T9b. RED WHEN: the special case for U+0130 and U+0131 is removed (Turkish capital I with a
+# dot, and dotless i, then fold to something other than i).
+case("T9b: a capital I with a dot", ["istanbul"], "\u0130STANBUL", ["\u0130STANBUL"])
+case("T9b: a dotless i", ["istanbul"], "\u0131stanbul", ["\u0131stanbul"])
+# T9c. RED WHEN: a term's words are joined with [-_. ]? (a term with two separators in a row
+# then never matches itself).
+case("T9c: a term with a full stop and a space between words", ["Acme Inc. Labs"], "made by Acme Inc. Labs today",
+     ["Acme Inc. Labs"])
+case("T9c partner: a term holding an ellipsis", ["a\u2026b"], "x a\u2026b y", ["a\u2026b"])
+for name, terms, text, want in CASES:
+    got = hits(terms, text)
+    print(("ok " if got == want else "bad ") + name + ("" if got == want else " - got %s, want %s" % (ascii(got), ascii(want))))
+EOF
+py_verdicts "$TERMPY" "$ROOT/public-content"
+
+printf '%s\n%s\n' "$(_u '\u00df one\n\ufb00 two')" "we build $PTERM next" >"$WORK/t13.txt"
+_text "$WORK/t13.txt"
+# T13. RED WHEN: lines are counted in a folded string with a wrong index map (a sharp s and an ff
+# ligature each fold to two characters).
+expect_rc "T13: a term on line 3 after two lines that fold longer is reported on line 3" 1 "private-term at demo:3" @scanned
+"$REAL_PY" -I -c '
+import sys
+sys.stdout.write("".join("line %05d uses %s here\n" % (i, sys.argv[1]) for i in range(1, 80001)))' "$PTERM" >"$WORK/t14.txt"
+t0="$("$REAL_PY" -I -c 'import time; print(time.time())')"
+_text "$WORK/t14.txt"
+t1="$("$REAL_PY" -I -c 'import time; print(time.time())')"
+secs="$("$REAL_PY" -I -c 'import sys; print("%.1f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$t0" "$t1")"
+# T14. RED WHEN: a term's line is counted with count("\n", 0, start) per match, or the report's
+# duplicate test is a list search (both quadratic: 80 000 findings then take tens of seconds).
+expect_rc "T14: 80 000 lines each holding a term are reported to line 80000" 1 "private-term at demo:80000" @scanned
+if "$REAL_PY" -I -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "$secs"; then
+  ok "T14: 80 000 term findings in a 4.5 MB text take under 10 s (${secs} s)"
+else bad "T14: 80 000 term findings in a 4.5 MB text take under 10 s" "${secs} s"; fi
 
 echo
 echo "${PASS} passed, ${FAIL} failed, ${SKIPPED} skipped"

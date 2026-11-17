@@ -66,6 +66,17 @@ _leaks() {
     "$@" 2>/dev/null
 }
 
+# _u TEXT: TEXT with its \uXXXX, \UXXXXXXXX and \n escapes decoded, written as UTF-8 (bash 3.2's
+# printf has no \u). TEXT itself is ASCII, so no committed file holds the decoded characters.
+_u() {
+  "$REAL_PY" -I -c 'import sys; sys.stdout.buffer.write(sys.argv[1].encode("ascii").decode("unicode_escape").encode("utf-8"))' "$1"
+}
+# _term_notes DIR TERMS: a private notes folder at DIR whose term list is TERMS (escaped as for
+# _u; terms separated by \n).
+_term_notes() {
+  mkdir -p "$1/scanner" && _u "$2" >"$1/scanner/private-terms.txt" || die "term notes $1"
+}
+
 # ---------------------------------------------------------------- throwaway world
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pcg-test.XXXXXX")" || die "mktemp"
 cleanup() { chmod -R u+rwx "$WORK" 2>/dev/null; rm -rf "$WORK"; }

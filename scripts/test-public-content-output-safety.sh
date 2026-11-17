@@ -180,6 +180,33 @@ safe_output "push: a file name with a space is withheld" 1 home-folder-path with
 if grep -q -F "my notes" "$ERR" "$OUT"; then bad "push: the spaced name is not printed" "printed"; else
   ok "push: the spaced name is not printed"; fi
 
+echo "== push mode: a private term in a file name is masked after folding"
+# term_push ID TERMS NAME: commit NAME (holding a home path) with TERMS as the private list.
+term_push() {
+  _term_notes "$WORK/notes-$1" "$2"
+  newrepo "h-$1"
+  B="$(tip "h-$1" refs/heads/main)"
+  add_named "h-$1" "lit:$3" home
+  C="$(tip "h-$1" refs/heads/main)"
+  co "h-$1"
+  (PRIVATE_NOTES_DIR="$WORK/notes-$1" scan_push "h-$1" "$B" "$C")
+}
+# The term strasse-labs spelled with a sharp s (escaped for _u).
+term_push fold 'stra\u00dfe-labs' STRASSE-LABS.txt
+# T10. Red when: mask uses the old regex (IGNORECASE, no folding), or the withhold test is
+# `text in mask(name)`, so the name is printed with the term in it.
+safe_output "T10: a file name holding a folded spelling of a term is masked or withheld" 1 home-folder-path
+if grep -q -i -F "strasse" "$OUT" "$ERR"; then bad "T10: the folded term in the file name is not printed" "printed"; else
+  ok "T10: the folded term in the file name is not printed"; fi
+if grep -q -F -e "<private>.txt" -e "withheld" "$ERR"; then ok "T10: the name is shown masked or withheld"; else
+  bad "T10: the name is shown masked or withheld" "$(head -c 300 "$ERR" | tr '\n' ' ')"; fi
+term_push overlap 'foo-foo' xfoo-foo-foo.txt
+# T12c. Red when: mask continues after a hit's end instead of one past its start, so part of a
+# self-overlapping term (foo-foo in xfoo-foo-foo) stays visible.
+safe_output "T12c: a file name holding a self-overlapping term exits as a finding" 1 home-folder-path
+if sed 's/<private>//g' "$OUT" "$ERR" | grep -q -F "foo"; then bad "T12c: no part of the term is printed outside <private>" "$(grep -h -F foo "$ERR" | head -3 | tr '\n' ' ')"; else
+  ok "T12c: no part of the term is printed outside <private>"; fi
+
 echo "== ci mode"
 for id in cmd lead; do
   newrepo "c-$id"
