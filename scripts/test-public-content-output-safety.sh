@@ -381,6 +381,7 @@ ALLOW = {
     ("_git", "args[0]"): "a git subcommand name fixed by the callers",
     ("_recorded_notes_dir", "NOTES_KEY"): "a constant",
     ("load_terms", "where"): "a fixed folder description",
+    ("load_terms", "n"): "a line number (int) of the term list, never the term",
     ("_report", "item"): "an element of found: each built by _finding",
     ("_report", "item.replace(' at ', ' in ', 1)"): "the same element, reworded for the ::error line",
 }
