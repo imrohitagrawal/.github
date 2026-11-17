@@ -518,7 +518,9 @@ def load_terms() -> Terms:
     Both set and naming different folders: ScanError (the variable must not silently replace
     the recorded list). Neither set: no private terms, with a warning (CI, other machines).
     A folder whose list is missing, unreadable or empty: ScanError (fail closed); so is a list
-    holding a term that does not find its own text (the error names its line, never the term)."""
+    holding a term that yields no pattern, does not find its own text, or starts with a
+    combining mark (its first unit that is not ignorable has no base). The error names the
+    line, never the term."""
     env = os.environ.get("PRIVATE_NOTES_DIR") or None
     recorded = _recorded_notes_dir()
     if env and recorded and not _same_folder(env, recorded):
@@ -536,14 +538,18 @@ def load_terms() -> Terms:
         raise ScanError(f"the private term list ({where}) could not be read ({type(exc).__name__})") from None
     numbered = [(n, ln.strip()) for n, raw in enumerate(text.split("\n"), 1) for ln in raw.splitlines()
                 if ln.strip() and not ln.lstrip().startswith("#")]
+    for n, term in numbered:
+        one = Terms([term], None)
+        units = [u for u in one._line(term)[0] if not one._ignorable(u[0])]
+        if units and unicodedata.category(units[0][0])[0] == "M":
+            raise ScanError(f"the private term list ({where}) could not be used: the term on line {n} "
+                            "starts with a combining mark")
+        if not one.patterns or not one.find(term):
+            raise ScanError(f"the private term list ({where}) could not be used: the term on line {n} "
+                            "does not match its own text")
     found = Terms([term for _n, term in numbered], None)
     if not found.patterns:
         raise ScanError(f"the private term list ({where}) is empty")
-    for n, term in numbered:
-        one = Terms([term], None)
-        if one.patterns and not one.find(term):
-            raise ScanError(f"the private term list ({where}) could not be used: the term on line {n} "
-                            "does not match its own text")
     return found
 
 

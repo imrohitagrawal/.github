@@ -476,7 +476,9 @@ The hook blocks the push, and the CI step fails, when a check cannot finish:
 - an archive cannot be read completely, or is a format the guard cannot open (see
   [What is checked](#what-is-checked));
 - the notes folder is set but its term list is missing, unreadable or empty, or holds a term
-  that does not match its own text (the message names the line number, never the term);
+  made only of separators (hyphen, underscore, full stop, space), that does not match its own
+  text, or that starts with a combining mark (the message names the line number, never the
+  term);
 - the allowed address list is missing, unreadable, or has a line that is not an address;
 - `PRIVATE_NOTES_DIR` differs from the recorded notes folder;
 - a destination tip is missing locally and cannot be fetched;
