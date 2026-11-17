@@ -30,7 +30,8 @@
 #     A text longer than one gitleaks piece (100 000 bytes) is scanned as windows of at most
 #     90 000 bytes overlapping by at least 14 000, edges moved back to a line start or a byte
 #     that is not a letter or digit when one is near, each with its own canary. Every key block
-#     of such a text is also read on its own (blocks do not overlap; one over 90 000 bytes -> 2).
+#     of such a text that no window holds is also read on its own (a block starts at its BEGIN
+#     marker; blocks do not overlap; one over 90 000 bytes -> 2, naming the place).
 #     Private terms are matched on the whole text. Findings keep the text's line numbers.
 # (b) A file that starts like a zip, tar, gzip, bzip2 or xz is read completely, or exit 2.
 #     zip: one end record, ending exactly at the end of the file; entries back to back from byte

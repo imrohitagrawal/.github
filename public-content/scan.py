@@ -65,8 +65,8 @@ gitleaks skips a file it sniffs as a binary format, logging only at debug level,
 file it could not open; so every chunk carries a canary line that proves it was read, and a
 chunk without its canary is read once more behind newlines, or the check blocks.
 gitleaks also cuts a text longer than its read, so such a text is scanned as overlapping windows,
-each read whole and each with its own canary, and its key blocks as pieces of their own (see
-WINDOW).
+each read whole and each with its own canary, and the key blocks no window holds whole as
+pieces of their own (see WINDOW).
 
 Exit status: 0 clean, 1 findings, 2 error. Every caller treats an error as a block: a check
 that could not run never counts as a pass. Reports name the rule and the place, never the
@@ -125,15 +125,24 @@ RETRY_PREFIX = b"\n" * 100_000  # put before a chunk gitleaks skipped, so it can
 # line start or to just after a byte that is not a letter or digit, and ends the same way, so
 # windows overlap by at least OVERLAP - EDGE bytes, and a rule's word boundary at a window edge
 # is real wherever such a byte is near. Every match of up to that many bytes lies wholly inside
-# some window. The private-key rule has no upper length, so each key block (a BEGIN line to the
-# first END marker after it; blocks never overlap) of a long text is also read as a chunk of
-# its own, and a block longer than WINDOW blocks the check. Private terms are matched in Python
-# on the whole text, never on windows.
+# some window. A window can start just after a byte that is not a letter or digit (the // of a
+# URL), so a rule that looks at the character before a match can match there although it would
+# not in the whole text; this can only add a finding, never hide one.
+# The private-key rule has no upper length, so each key block of a long text that no window
+# holds whole (_key_spans: from its BEGIN marker to the first END marker at least KEY_MIN_BODY
+# characters after it; blocks never overlap) is also read as a chunk of its own (_plan), and a
+# block longer than WINDOW blocks the check, naming the place. So the chunks of one text add up
+# to at most 9n/4 + 2 * WINDOW bytes. Private terms are matched in Python on the whole text,
+# never on windows.
 GITLEAKS_PIECE = 100_000
 WINDOW = 90_000
 OVERLAP = 16_000
 EDGE = 2_000
-_NOT_WORD = re.compile(rb"[^A-Za-z0-9\x80-\xff]")
+# Where a window edge may sit: just after a byte that is not part of a word. It serves gitleaks'
+# rules, whose \b and character classes are ASCII, so only ASCII letters and digits are word
+# bytes for them; bytes of 0x80 and above count as part of a word only so that an edge never
+# splits a UTF-8 character or a non-ASCII path name.
+_EDGE_BREAK = re.compile(rb"[^A-Za-z0-9\x80-\xff]")
 # gitleaks 8.30.1's private-key rule, read from its binary:
 #   (?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\s\S-]{64,}?KEY(?: BLOCK)?-----
 # copied as two byte regexes, one per marker. Go's (?i) also folds U+212A (Kelvin sign) to k
@@ -919,7 +928,7 @@ def _edge(text: bytes, pos: int) -> int:
     if nl >= 0:
         return nl + 1
     found = -1
-    for m in _NOT_WORD.finditer(text, low, pos):
+    for m in _EDGE_BREAK.finditer(text, low, pos):
         found = m.end()
     if found > 0:
         return found

@@ -107,9 +107,13 @@ Until one of these is in place, review every pull request that edits a workflow.
   sessions. The bare prefix, the bare word, `claude.ai` alone, and a short commit id with no
   such word pass.
 - **Private terms**: a private list of words, such as private project names. The list is
-  never committed (see [Private terms](#private-terms)). A term matches in any case, with one
-  `-`, `_`, `.` or space, or nothing, between its words. It does not match inside a longer run
-  of letters and digits; `_` and other marks count as breaks, so `term_client` matches.
+  never committed (see [Private terms](#private-terms)). Terms are compared after Unicode
+  compatibility and case folding (STRASSE matches straße; full-width letters and Turkish İ
+  match), with up to three of `-`, `_`, `.` or space, or nothing, between their words. A term
+  is part of a longer word when a letter of a cased script (Latin, Greek, Cyrillic and others),
+  a digit, or a mark on such a letter touches it; letters of scripts without case (Han, Kana,
+  Thai, Arabic and others), punctuation and symbols are breaks, so a term next to them is
+  reported. `_` counts as a break, so `term_client` matches.
 
 The public rules live in [`public-content/gitleaks-public.toml`](../public-content/gitleaks-public.toml).
 Secrets and the public rules run as two separate gitleaks passes. One layered config does not
@@ -241,13 +245,19 @@ that holds one (a `curl` command with a blank line in it, a PGP key block). So:
   length is wholly inside some window. A longer match that crosses a window edge can be
   missed. Where a window edge falls inside a run of letters and digits with no break within
   2 000 bytes, a rule that needs a word boundary can match there although it would not match
-  in the whole text (this can only add a finding).
+  in the whole text (this can only add a finding). Likewise, a window can start just after a
+  mark that is not a letter or digit (for example the `//` of a URL), so a rule that looks at
+  the character before a match can match there although it would not in the whole text; this
+  can only add a finding, never hide one.
 - The private-key rule has no length limit. So in a text longer than one piece, each key
-  block (from the line of its BEGIN marker to the first END marker after it; a BEGIN marker
-  inside the block before starts no new one) is also read as a piece of its own. A key block
-  longer than 90 000 bytes blocks the check with a fixed message ("a private key block
-  crosses a scan window"); a BEGIN marker with no END marker after it is not a key and is not
-  reported.
+  block that no window already holds is also read as a piece of its own; a block a window
+  holds is not read again. A block runs from its BEGIN marker to the first END marker at
+  least 64 characters after it. The END marker is any `KEY-----` or `KEY BLOCK-----`,
+  including the end of a later key's own BEGIN line; a BEGIN marker with none of these after
+  it is not a key. The Kelvin sign and the long s count as k and s, as they do in gitleaks. A
+  key block longer than 90 000 bytes blocks the check and names the file ("a private key
+  block crosses a scan window", and the fix: remove the key from the commits). The pieces of
+  one text add up to at most 2.25 times its size plus 180 000 bytes.
 - Private terms are matched on the whole text, never on windows, so a window edge never
   changes whether a term is inside a longer word.
 
