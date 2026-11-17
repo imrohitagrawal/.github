@@ -133,9 +133,37 @@ WINDOW = 90_000
 OVERLAP = 16_000
 EDGE = 2_000
 _NOT_WORD = re.compile(rb"[^A-Za-z0-9\x80-\xff]")
-_KEY_BEGIN = re.compile(rb"(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----")
-_KEY_END = re.compile(rb"(?i)KEY(?: BLOCK)?-----")
-KEY_MIN_BODY = 64  # the rule's [\s\S-]{64,}? between the markers
+# gitleaks 8.30.1's private-key rule, read from its binary:
+#   (?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\s\S-]{64,}?KEY(?: BLOCK)?-----
+# copied as two byte regexes, one per marker. Go's (?i) also folds U+212A (Kelvin sign) to k
+# and U+017F (long s) to s, and folds nothing else onto these letters (measured on 8.30.1:
+# U+0130, capital I with a dot, does not match I). Python's (?i) on bytes folds ASCII only, and
+# a str regex with (?i) also matches U+0130, so neither is used: each letter is written out.
+_KELVIN = "\u212a".encode()
+_LONG_S = "\u017f".encode()
+
+
+def _folded(word: str) -> bytes:
+    """WORD as a byte regex matching it the way Go's (?i) does: each ASCII letter as [Xx], and
+    K also as the Kelvin sign (no marker word holds an s; the long s matters only in the header
+    class)."""
+    out = b""
+    for c in word.encode():
+        ch = bytes([c])
+        if ch == b"K":
+            out += b"(?:[Kk]|" + _KELVIN + b")"
+        elif ch.isalpha():
+            out += b"[" + ch.upper() + ch.lower() + b"]"
+        else:
+            out += re.escape(ch)
+    return out
+
+
+_KEY_TAIL = b"(?: " + _folded("BLOCK") + b")?-----"
+_KEY_BEGIN = re.compile(b"-----" + _folded("BEGIN") + b"(?:[ A-Za-z0-9_-]|" + _LONG_S + b"|" + _KELVIN
+                        + b"){0,100}" + _folded("PRIVATE KEY") + _KEY_TAIL)
+_KEY_END = re.compile(_folded("KEY") + _KEY_TAIL)
+KEY_MIN_BODY = 64  # the rule's [\s\S-]{64,}? between the markers, in characters (Go counts runes)
 NOTES_KEY = "public-content.notesDir"
 TERMS_FILE = Path("scanner") / "private-terms.txt"
 SHA_RE = r"[0-9a-f]{40}|[0-9a-f]{64}"
@@ -789,28 +817,35 @@ def _windows(text: bytes) -> list[tuple[int, int]]:
         start = _edge(text, start + WINDOW - OVERLAP)
 
 
-def _key_blocks(text: bytes) -> list[tuple[int, int]]:
-    """(start, end) of each private-key block of TEXT: from the start of the line holding a
-    BEGIN marker to the end of the first END marker at least KEY_MIN_BODY bytes after it (the
-    rule's own shape). A BEGIN marker with no END marker after it is no key and is skipped, and
-    so is one inside the block before (gitleaks' matches do not overlap either), so blocks never
-    overlap and their chunks are never larger than TEXT. A block longer than WINDOW cannot be
-    read in one piece: ScanError, a fixed message."""
-    ends = [m for m in _KEY_END.finditer(text)]
+def _body_end(text: bytes, at: int) -> int:
+    """The offset KEY_MIN_BODY characters after AT, counted as Go's regexp counts them: one per
+    UTF-8 character, and one per byte that is not part of a valid one (surrogateescape gives each
+    such byte a character of its own, as Go's DecodeRune does; measured at 63 and 64)."""
+    head = text[at:at + 4 * KEY_MIN_BODY].decode("utf-8", "surrogateescape")
+    return at + len(head[:KEY_MIN_BODY].encode("utf-8", "surrogateescape"))
+
+
+def _key_spans(text: bytes) -> list[tuple[int, int]]:
+    """(start, end) of each private-key match of TEXT, as gitleaks finds them: from a BEGIN
+    marker to the end of the first END marker that starts at least KEY_MIN_BODY characters
+    after the BEGIN marker ends. A BEGIN marker with no such END marker is no key; the search
+    then goes on one byte after its start, as Go's FindAll goes on one character later (a
+    finditer would go on after its greedy header, which can hold the next real BEGIN marker).
+    After a match the search goes on at its end, so spans never overlap."""
+    ends = list(_KEY_END.finditer(text))
     starts = [m.start() for m in ends]
     out: list[tuple[int, int]] = []
-    for m in _KEY_BEGIN.finditer(text):
-        if out and m.start() < out[-1][1]:
-            continue  # inside the block before, whose match gitleaks finds first
-        i = bisect.bisect_left(starts, m.end() + KEY_MIN_BODY)
+    pos = 0
+    while True:
+        m = _KEY_BEGIN.search(text, pos)
+        if m is None:
+            return out
+        i = bisect.bisect_left(starts, _body_end(text, m.end()))
         if i == len(ends):
+            pos = m.start() + 1
             continue
-        begin = text.rfind(b"\n", 0, m.start()) + 1
-        if ends[i].end() - begin > WINDOW:
-            raise ScanError("a private key block crosses a scan window and is too long to be read in one "
-                            "piece, so it could not be checked")
-        out.append((begin, ends[i].end()))
-    return out
+        out.append((m.start(), ends[i].end()))
+        pos = ends[i].end()
 
 
 FIX_UNREADABLE = (
@@ -938,7 +973,10 @@ class Scanner:
             last = at
             self._write(meta, text[at:end], nl, terms=whole if n == 0 else False)
         nl, last = 0, 0
-        for at, end in _key_blocks(text):
+        for at, end in _key_spans(text):
+            if end - at > WINDOW:
+                raise ScanError("a private key block crosses a scan window and is too long to be read in one "
+                                "piece, so it could not be checked")
             nl += text.count(b"\n", last, at)
             last = at
             self._write(meta, text[at:end], nl, terms=False)
