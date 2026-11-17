@@ -225,32 +225,41 @@ class Terms:
     mark after it. Marks at the start of a line, or right after an ignorable character, form a
     unit with no base. An ignorable character (category Cf, and the other default-ignorable
     characters in _IGNORABLE) is a unit of its own and folds to nothing.
-    Fold. Each unit is folded on its own with Unicode's compatibility caseless match (D146):
-    NFKD(casefold(NFKD(casefold(NFD(unit))))), after U+0130 and U+0131 (Turkish capital I with a
-    dot, dotless i) become i and a U+0307 (dot above) on an i is dropped. Folding a whole unit
-    puts its marks in canonical order, so NFC and NFD spellings fold the same. A term is folded
-    the same way, then split into words on [-_. ]+; its pattern joins the words with up to three
-    separators.
-    Word test. A hit counts only when it starts and ends at unit edges and the nearest unit on
-    each side that is not ignorable is not a word unit: one whose base is a letter of a cased
-    script (Lu, Ll, Lt) or a decimal digit (Nd), with or without marks. Letters of scripts with
-    no case (Lo) even with marks, modifier letters (Lm), other numbers (Nl, No), punctuation,
-    symbols, spaces and units with no base are breaks: text in many caseless scripts has no
-    spaces between words, so a term glued to it is reported (fail closed). The test reads the
-    original units, never folded ones (a symbol can fold to letters).
+    Fold. A line is folded as one stream, so the result is Unicode's compatibility caseless match
+    (D146) of the whole line, NFKD(casefold(NFKD(casefold(NFD(line))))), by construction: each
+    character is decomposed and folded on its own, carrying the unit it came from (its owner),
+    and after each decomposition every run of combining marks is put in canonical order (a stable
+    sort on the combining class), as Unicode normalization does. Then U+0131 (dotless i) becomes
+    i, and a U+0307 (dot above) right after an i is dropped, so Turkish capital I with a dot and
+    dotless i fold to i. Ignorable characters are left out first. NFC and NFD spellings fold the
+    same. A term is folded the same way, then split into words on [-_. ]+; its pattern joins the
+    words with up to three separators.
+    Word test. A hit counts only when it starts and ends at unit edges (the owner changes there)
+    and the nearest unit on each side that is not ignorable is not a word unit: one whose base
+    character's own Unicode category is Lu, Ll, Lt (a letter of a cased script) or Nd (a decimal
+    digit), with or without marks. Letters of scripts with no case (Lo) even with marks, modifier
+    letters (Lm), other numbers (Nl, No), punctuation, symbols, spaces and units with no base are
+    breaks: text in many caseless scripts has no spaces between words, so a term glued to it is
+    reported (fail closed). The test reads the original units, never folded ones (a symbol can
+    fold to letters).
     Lines are split on \n only; no fold of another character holds a \n."""
 
     _IGNORABLE = re.compile("[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2065\u3164\ufe00-\ufe0f\uffa0"
                             "\ufff0-\ufff8\U000e0000-\U000e0fff]")
     _SEPARATORS = re.compile("[-_. ]+")
     _WORD = ("Lu", "Ll", "Lt", "Nd")
+    _SKIP, _MARK, _OTHER = 0, 1, 2  # what a character is to the unit split (_kind)
+    # The steps of D146 after NFD, in order: a decomposition (then reordering) or a case fold.
+    _STEPS = ("NFD", "casefold", "NFKD", "casefold", "NFKD")
 
     def __init__(self, terms: list[str], warning: str | None) -> None:
         self.warning = warning
-        self._folds: dict[str, str] = {}
+        self._kinds: dict[str, int] = {}
+        self._starters: dict[str, bool] = {}
+        self._segments: dict[str, tuple[str, list[int]]] = {}
         self.patterns: list[re.Pattern[str]] = []
         for term in terms:
-            folded = "".join(self._fold(u) for u in self._units(term))
+            folded = self._line(term)[1]
             words = [w for w in self._SEPARATORS.split(folded) if w]
             if words:
                 self.patterns.append(re.compile("[-_. ]{0,3}".join(re.escape(w) for w in words)))
@@ -258,62 +267,157 @@ class Terms:
     def _ignorable(self, ch: str) -> bool:
         return unicodedata.category(ch) == "Cf" or self._IGNORABLE.match(ch) is not None
 
-    def _units(self, line: str) -> list[str]:
-        units: list[str] = []
-        takes_marks = False
-        for ch in line:
-            if self._ignorable(ch):
-                units.append(ch)
-                takes_marks = False
-            elif takes_marks and unicodedata.category(ch)[0] == "M":
-                units[-1] += ch
-            else:
-                units.append(ch)
-                takes_marks = True
-        return units
-
-    def _fold(self, unit: str) -> str:
-        got = self._folds.get(unit)
+    def _kind(self, ch: str) -> int:
+        got = self._kinds.get(ch)
         if got is None:
-            if self._ignorable(unit[0]):
-                got = ""
+            if self._ignorable(ch):
+                got = self._SKIP
             else:
-                u = unicodedata.normalize("NFD", unit.replace("\u0130", "i").replace("\u0131", "i"))
-                if u[:1] in ("i", "I"):
-                    u = u[0] + u[1:].replace("\u0307", "")
-                got = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", u.casefold()).casefold())
-            self._folds[unit] = got
+                got = self._MARK if unicodedata.category(ch)[0] == "M" else self._OTHER
+            self._kinds[ch] = got
         return got
+
+    def _starts_segment(self, ch: str) -> bool:
+        """True when no reordering pass of the fold can move anything across CH: after each step,
+        the first character of what CH has become has combining class 0. So the text before CH
+        and the text from CH on fold independently."""
+        got = self._starters.get(ch)
+        if got is None:
+            got, first = True, ch
+            for step in self._STEPS:
+                first = (first.casefold() if step == "casefold" else unicodedata.normalize(step, first))[:1]
+                if not first or unicodedata.combining(first):
+                    got = False
+                    break
+            self._starters[ch] = got
+        return got
+
+    @staticmethod
+    def _reorder(chars: list[str], src: list[int]) -> None:
+        """Canonical ordering, in place: each run of characters with a combining class above 0
+        stably sorted by that class, SRC moved along."""
+        ccc = [unicodedata.combining(c) for c in chars]
+        i, n = 0, len(chars)
+        while i < n:
+            if not ccc[i]:
+                i += 1
+                continue
+            j = i + 1
+            while j < n and ccc[j]:
+                j += 1
+            if j - i > 1:
+                order = sorted(range(i, j), key=ccc.__getitem__)
+                chars[i:j] = [chars[k] for k in order]
+                src[i:j] = [src[k] for k in order]
+            i = j
+
+    def _fold_segment(self, seg: str) -> tuple[str, list[int]]:
+        """(folded SEG, for each folded character the index in SEG of the character it came
+        from). A step that would change nothing is skipped (checked on the whole text)."""
+        chars, src = list(seg), list(range(len(seg)))
+        for step in self._STEPS:
+            text = "".join(chars)
+            if step == "casefold":
+                if text.casefold() == text:
+                    continue
+            elif unicodedata.is_normalized(step, text):
+                continue
+            out_c: list[str] = []
+            out_s: list[int] = []
+            for c, k in zip(chars, src):
+                got = c.casefold() if step == "casefold" else unicodedata.normalize(step, c)
+                out_c.extend(got)
+                out_s.extend([k] * len(got))
+            chars, src = out_c, out_s
+            if step != "casefold":
+                self._reorder(chars, src)
+        if "\u0131" in chars or "\u0307" in chars:
+            out_c, out_s = [], []
+            for c, k in zip(chars, src):
+                if c == "\u0131":
+                    c = "i"
+                elif c == "\u0307" and out_c and out_c[-1] == "i":
+                    continue
+                out_c.append(c)
+                out_s.append(k)
+            chars, src = out_c, out_s
+        return "".join(chars), src
 
     def _line(self, line: str) -> tuple[Sequence[str], str, Sequence[int]]:
         """(units, folded line, owner): owner[k] is the unit that folded character k came from.
         A pure-ASCII line takes a fast path with the same results (one unit per character)."""
         if line.isascii():
             return line, line.lower(), range(len(line))
-        units = self._units(line)
-        parts = [self._fold(u) for u in units]
-        return units, "".join(parts), [k for k, f in enumerate(parts) for _ in f]
+        return self._general(line)
+
+    def _general(self, line: str) -> tuple[list[str], str, list[int]]:
+        """_line for any line. The stream is folded in segments, each starting at a character
+        no reordering can cross (_starts_segment), so each segment folds on its own."""
+        starts: list[int] = []  # where each unit starts in LINE
+        folded: list[str] = []
+        owner: list[int] = []
+        seg: list[str] = []
+        seg_owner: list[int] = []
+
+        def flush() -> None:
+            text = "".join(seg)
+            got = self._segments.get(text)
+            if got is None:
+                got = self._fold_segment(text)
+                if len(text) <= 32:
+                    self._segments[text] = got
+            folded.append(got[0])
+            owner.extend([seg_owner[k] for k in got[1]])
+
+        kinds, starters = self._kinds, self._starters  # read directly: this loop runs per character
+        takes_marks = False
+        for i, ch in enumerate(line):
+            kind = kinds.get(ch)
+            if kind is None:
+                kind = self._kind(ch)
+            if kind == self._SKIP:
+                starts.append(i)
+                takes_marks = False
+                continue
+            if not (takes_marks and kind == self._MARK):
+                starts.append(i)
+                takes_marks = True
+            if seg:
+                starter = starters.get(ch)
+                if starter is None:
+                    starter = self._starts_segment(ch)
+                if starter:
+                    flush()
+                    seg, seg_owner = [], []
+            seg.append(ch)
+            seg_owner.append(len(starts) - 1)
+        if seg:
+            flush()
+        bounds = starts + [len(line)]
+        return [line[a:b] for a, b in zip(bounds, bounds[1:])], "".join(folded), owner
 
     def _word(self, unit: str) -> bool:
         return unicodedata.category(unit[0]) in self._WORD
 
-    def _alone(self, units: Sequence[str], owner: Sequence[int], s: int, e: int) -> bool:
-        """The hit [s, e) of the folded line starts and ends at unit edges, with no word unit
-        next to it (ignorable units skipped)."""
+    def _alone(self, units: Sequence[str], owner: Sequence[int], s: int, e: int, lo: int, hi: int) -> bool:
+        """The hit [s, e) of the folded line, covering units [lo, hi), starts and ends at unit
+        edges, with no word unit next to it (ignorable units skipped)."""
         if (s > 0 and owner[s - 1] == owner[s]) or (e < len(owner) and owner[e] == owner[e - 1]):
             return False
-        k = owner[s] - 1
+        k = lo - 1
         while k >= 0 and self._ignorable(units[k][0]):
             k -= 1
         if k >= 0 and self._word(units[k]):
             return False
-        k = owner[e - 1] + 1
+        k = hi
         while k < len(units) and self._ignorable(units[k][0]):
             k += 1
         return not (k < len(units) and self._word(units[k]))
 
     def _hits(self, line: str, edges: bool) -> tuple[Sequence[str], list[tuple[int, int]]]:
-        """(units, hits) of LINE: each hit is a range of units [first, last + 1), sorted. With
+        """(units, hits) of LINE: each hit is a range of units [first, last + 1), sorted (the
+        units its folded characters came from; reordering can move a mark's folded character
+        past another unit's, so the range runs from the least owner to the greatest). With
         EDGES, a hit must pass the word test, and the search goes on at a counted hit's end, or
         one past a rejected hit's start. Without (masking), every match counts and the search
         always goes on one past its start, so overlapping matches are all found."""
@@ -326,10 +430,12 @@ class Terms:
                 if m is None:
                     break
                 s, e = m.span()
-                if edges and not self._alone(units, owner, s, e):
+                span = owner[s:e]
+                lo, hi = min(span), max(span) + 1
+                if edges and not self._alone(units, owner, s, e, lo, hi):
                     pos = s + 1
                     continue
-                out.append((owner[s], owner[e - 1] + 1))
+                out.append((lo, hi))
                 pos = e if edges else s + 1
         return units, sorted(out)
 
