@@ -74,7 +74,7 @@ _u() {
 # _term_notes DIR TERMS: a private notes folder at DIR whose term list is TERMS (escaped as for
 # _u; terms separated by \n).
 _term_notes() {
-  mkdir -p "$1/scanner" && _u "$2" >"$1/scanner/private-terms.txt" || die "term notes $1"
+  if ! { mkdir -p "$1/scanner" && _u "$2" >"$1/scanner/private-terms.txt"; }; then die "term notes $1"; fi
 }
 
 # ---------------------------------------------------------------- throwaway world
