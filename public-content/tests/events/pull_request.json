@@ -1,0 +1,16 @@
+{
+  "action": "edited",
+  "number": 12,
+  "pull_request": {
+    "number": 12,
+    "html_url": "https://github.com/acme/pub/pull/12",
+    "title": "@@title@@",
+    "body": "@@body@@",
+    "draft": true,
+    "base": {"ref": "main", "sha": "1111111111111111111111111111111111111111"},
+    "head": {"ref": "feature", "sha": "2222222222222222222222222222222222222222"}
+  },
+  "changes": {},
+  "repository": {"full_name": "acme/pub", "private": false, "html_url": "https://github.com/acme/pub", "default_branch": "main"},
+  "sender": {"login": "octo-person", "type": "User"}
+}

@@ -33,6 +33,14 @@ For every target repo, in order:
    ```
    This is the small caller that triggers the reusable quality-gate workflow from `imrohitagrawal/.github`.
 
+   For a **public** repository, also copy `templates/caller-public-content.yml` to
+   `.github/workflows/public-content.yml` once a tag of `imrohitagrawal/.github` holds
+   `reusable-public-content.yml` (until then its pinned commit is a placeholder). The two
+   callers together are the pull request caller and the public-content caller; require the
+   check `public-content / public-content` as well as the quality gate. See
+   [Adding the caller](public-content-guard.md#adding-the-caller). Cutting the tag and changing
+   rulesets are owner actions.
+
 4. **Copy `templates/dependabot.yml`** to `.github/dependabot.yml`.
    ```bash
    cp templates/dependabot.yml /path/to/target-repo/.github/dependabot.yml

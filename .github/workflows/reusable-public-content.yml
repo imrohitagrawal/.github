@@ -1,0 +1,184 @@
+name: Public-content guard (reusable)
+
+# Reusable public-content guard, called by each public repository's
+# caller-public-content.yml (templates/caller-public-content.yml). It runs
+# public-content/scan.py from THIS workflow's own commit (never from the
+# caller's tree) on every event the caller template triggers on.
+#
+# Two jobs, two names. Both run on every event; each decides inside its steps
+# whether the event is its own:
+#   - public-content: pull_request (every action, `edited` included, runs the
+#     FULL scan: new commits, title and body, so a text edit can never replace
+#     a red commit result with a green text-only one) and push (what the push
+#     introduced). This is the name a ruleset may require.
+#   - public-content-text: every other text event (issues, comments, reviews,
+#     discussions, releases), scanned from the event file. Never a required
+#     check. Its run attaches to the default branch's latest commit, so a red
+#     mark there can come from a comment, not from code.
+# An event a job does not own ends that job with a one-line notice and
+# success. An event neither job handles turns public-content-text red with
+# "not handled ... nothing was scanned" (fail closed).
+#
+# Shape rules (scripts/test-public-content-workflow-shape.sh checks them): no
+# job- or step-level `if:` before the scan (a skipped required job reports
+# success), no continue-on-error, no needs, no cancel-in-progress
+# concurrency, read-only permissions, no pull_request_target. Event text
+# never goes through env (a step's env block is printed in the public log)
+# and no `run:` interpolates `${{ }}`: the scanner reads GITHUB_EVENT_PATH
+# itself. A private repository passes with a notice (scan.py reads the event
+# file's repository.private), the same rule as reusable-pr-quality.yml.
+#
+# Push and text events are already public when this runs: a red run is an
+# alarm after publication, not a block. See docs/public-content-guard.md.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  public-content:
+    name: public-content
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: push mode refuses a shallow repository, and both modes
+      # tell new commits from published ones by history.
+      - name: Check out the repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # If either context were empty, actions/checkout would fall back to the
+      # caller's own repository and ref, so the caller would supply its own
+      # scanner. This step stops the job first. The block is the same as
+      # reusable-pr-quality.yml's (scripts/check-pin-consistency.sh compares
+      # them).
+      - name: Check the public-content scanner's repository and commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          # BEGIN public-content-ref-check
+          check_public_content_ref() { # $1 = repository (owner/name), $2 = commit sha
+            if ! printf '%s\n' "$1" | grep -Eqx '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'; then
+              echo "::error::job.workflow_repository is empty or not owner/name; refusing to check out the scanner" >&2
+              return 1
+            fi
+            if ! printf '%s\n' "$2" | grep -Eqx '[0-9a-f]{40}'; then
+              echo "::error::job.workflow_sha is empty or not a 40-character commit sha; refusing to check out the scanner" >&2
+              return 1
+            fi
+          }
+          # END public-content-ref-check
+          check_public_content_ref "$WORKFLOW_REPOSITORY" "$WORKFLOW_SHA"
+
+      - name: Check out the public-content scanner (this workflow's own commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .public-content-scanner
+          persist-credentials: false
+
+      # gitleaks comes from the release tarball, verified against the published
+      # checksum, the same version and checksum as reusable-pr-quality.yml
+      # (scripts/check-pin-consistency.sh compares them).
+      - name: Public-content scan (pull request or push)
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/public-content-scanner"
+          rm -rf "$scanner"
+          mv "$GITHUB_WORKSPACE/.public-content-scanner" "$scanner"
+          tarball=gitleaks_8.30.1_linux_x64.tar.gz
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$tarball"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/public-content-bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/public-content-bin" gitleaks
+          export PATH="$RUNNER_TEMP/public-content-bin:$PATH"
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              # Title and body come from the event file; base and head too.
+              # scan.py prints the clean line itself, only after a real scan (a
+              # private repository gets its notice and no clean line).
+              python3 -I "$scanner/public-content/scan.py" ci \
+                --repo "$GITHUB_WORKSPACE" --event-path "$GITHUB_EVENT_PATH"
+              ;;
+            push)
+              # Every branch and tag as the remote has them after the push.
+              git -C "$GITHUB_WORKSPACE" fetch --quiet origin \
+                '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+              # A force push leaves `before` unreachable, so no ref fetch brings
+              # it: fetch it by sha. If that fails, scan.py checks the push as a
+              # new ref (more, never less) and says so.
+              before="$(python3 -I -c 'import json, os, re; v = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8")).get("before"); print(v if isinstance(v, str) and re.fullmatch("[0-9a-f]{40}", v) and v.strip("0") else "")')"
+              if [ -n "$before" ] && ! git -C "$GITHUB_WORKSPACE" cat-file -e "$before^{commit}" 2>/dev/null; then
+                if ! git -C "$GITHUB_WORKSPACE" fetch --quiet origin "$before"; then
+                  echo "public-content guard: note: the previous commit of the pushed ref could not be fetched"
+                fi
+              fi
+              python3 -I "$scanner/public-content/scan.py" push \
+                --repo "$GITHUB_WORKSPACE" --event-path "$GITHUB_EVENT_PATH"
+              ;;
+            *)
+              echo "public-content guard: $GITHUB_EVENT_NAME is not this job's event (public-content-text scans it)"
+              ;;
+          esac
+
+  public-content-text:
+    name: public-content-text
+    runs-on: ubuntu-latest
+    steps:
+      # The same check as in the public-content job (see there); its marked block
+      # is compared with reusable-pr-quality.yml's by scripts/check-pin-consistency.sh.
+      - name: Check the public-content scanner's repository and commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          # BEGIN public-content-ref-check-text
+          check_public_content_ref() { # $1 = repository (owner/name), $2 = commit sha
+            if ! printf '%s\n' "$1" | grep -Eqx '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'; then
+              echo "::error::job.workflow_repository is empty or not owner/name; refusing to check out the scanner" >&2
+              return 1
+            fi
+            if ! printf '%s\n' "$2" | grep -Eqx '[0-9a-f]{40}'; then
+              echo "::error::job.workflow_sha is empty or not a 40-character commit sha; refusing to check out the scanner" >&2
+              return 1
+            fi
+          }
+          # END public-content-ref-check-text
+          check_public_content_ref "$WORKFLOW_REPOSITORY" "$WORKFLOW_SHA"
+
+      - name: Check out the public-content scanner (this workflow's own commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .public-content-scanner
+          persist-credentials: false
+
+      - name: Public-content scan (event text)
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/public-content-scanner"
+          rm -rf "$scanner"
+          mv "$GITHUB_WORKSPACE/.public-content-scanner" "$scanner"
+          case "$GITHUB_EVENT_NAME" in
+            pull_request | push)
+              echo "public-content guard: $GITHUB_EVENT_NAME is not this job's event (the public-content job scans it)"
+              exit 0
+              ;;
+          esac
+          tarball=gitleaks_8.30.1_linux_x64.tar.gz
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$tarball"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/public-content-bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/public-content-bin" gitleaks
+          # An event or action outside the scanner's field map exits 2: not handled,
+          # nothing scanned (fail closed).
+          PATH="$RUNNER_TEMP/public-content-bin:$PATH" python3 -I "$scanner/public-content/scan.py" event \
+            --name "$GITHUB_EVENT_NAME" --path "$GITHUB_EVENT_PATH"

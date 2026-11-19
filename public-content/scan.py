@@ -7,12 +7,23 @@ session transcript names, agent tool and session ids, session links (rules in
 gitleaks-public.toml), and private terms (read at run time from a private list, never
 committed).
 
-Used by hooks/pre-push (what a push publishes) and by the CI step (a PR's title, body and
-commits). CLI modes:
+Used by hooks/pre-push (what a push publishes), by the CI step (a PR's title, body and
+commits) and by reusable-public-content.yml (what a push to GitHub introduced, and the text of
+every text-bearing GitHub event). CLI modes:
 
     scan.py text --label LABEL                       scan stdin
     scan.py pre-push REMOTE URL                      git's pre-push protocol (refs on stdin)
     scan.py ci [--repo DIR] --base REV --head REV    PR_TITLE, PR_BODY and the new content
+               [--event-path FILE]                   (title and body read from the event file
+                                                     instead; --base/--head default to it)
+    scan.py event --name EVENT --path FILE           the fixed text fields of one GitHub event
+    scan.py push [--repo DIR] --before SHA --after SHA --ref REF [--default-tip SHA]
+                 [--default-branch NAME] [--event-path FILE]
+                                                     what a push already made introduced
+
+The event, push and ci --event-path modes read the event file themselves (a step's env block
+is printed in the public log, so event text never goes through env), and pass a repository
+whose event file says it is private with a notice, scanning nothing.
 
 Everything a change publishes is checked whole: each file a new commit adds or changes
 (content and path name, even when the same content exists elsewhere), the path of each
@@ -53,10 +64,16 @@ plain text:
 gitleaks skips a file it sniffs as a binary format, logging only at debug level, and passes a
 file it could not open; so every chunk carries a canary line that proves it was read, and a
 chunk without its canary is read once more behind newlines, or the check blocks.
+gitleaks also cuts a text longer than its read, so such a text is scanned as overlapping windows,
+each read whole and each with its own canary, and the key blocks no window holds whole as
+pieces of their own (see WINDOW).
 
 Exit status: 0 clean, 1 findings, 2 error. Every caller treats an error as a block: a check
 that could not run never counts as a pass. Reports name the rule and the place, never the
-matched text. Lines that look like reported speech print a WARNING and never block (not
+matched text. A name this scanner did not write (a file path, an archive's path, a --label)
+reaches the output only through Scanner.render, which scans the raw name with every rule and
+prints it only when it matches none and is plain (SAFE_NAME); otherwise a fixed placeholder.
+Ref names and event payload strings are never printed; commit ids only as validated hex. Lines that look like reported speech print a WARNING and never block (not
 raised from a binary's printable runs).
 
 Standard library only (Python 3.9+), plus the gitleaks binary and, for visibility, gh.
@@ -65,8 +82,10 @@ Standard library only (Python 3.9+), plus the gitleaks binary and, for visibilit
 from __future__ import annotations
 
 import argparse
+import bisect
 import bz2
 import io
+import itertools
 import json
 import lzma
 import math
@@ -80,10 +99,11 @@ import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 import zipfile
 import zlib
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 HERE = Path(__file__).resolve().parent
 PUBLIC_RULES = HERE / "gitleaks-public.toml"
@@ -95,9 +115,79 @@ UNPACK_LIMIT = 512 * 1024 * 1024  # bytes unpacked from one file, counted at eve
 STREAM_COST = 4096  # budget each compressed stream costs besides its output
 MIN_RUN = 12  # characters in a printable run of a binary that the rules read
 RETRY_PREFIX = b"\n" * 100_000  # put before a chunk gitleaks skipped, so it cannot sniff a format
+# How gitleaks 8.30.1 reads a file (measured): pieces of 100 000 bytes, each extended to the next
+# blank line (two line breaks with only spaces or tabs between them; a CRLF line end counts too),
+# but by at most 25 000 bytes. A match across a piece's end is cut in two and missed: in a long
+# line, or in short lines with no blank line near, at an arbitrary byte; and at a blank line, a
+# match that holds one (a curl command with a blank line, a PGP key block).
+# So a text that fits in one piece is one chunk; any longer text is read as overlapping windows
+# (_windows), each its own chunk with its own canary and small enough for one piece. Each window
+# starts at most WINDOW - OVERLAP bytes after the one before, moved back by up to EDGE bytes to a
+# line start or to just after a byte that is not a letter or digit, and ends the same way, so
+# windows overlap by at least OVERLAP - EDGE bytes, and a rule's word boundary at a window edge
+# is real wherever such a byte is near. Every match of up to that many bytes lies wholly inside
+# some window. A window can start just after a byte that is not a letter or digit (the // of a
+# URL), so a rule that looks at the character before a match can match there although it would
+# not in the whole text; this can only add a finding, never hide one.
+# Some matches can be longer than the overlap: the private-key rule has no upper length, and
+# gitleaks decodes encoded text before it matches. So in a long text the planner (_plan) also
+# reads whole each key span (_key_spans: as gitleaks finds them, a shorter header retried when
+# the longest has no END marker) and each run of encoded text longer than OVERLAP - 2 * EDGE
+# bytes, in the shapes gitleaks 8.30.1 decodes (base64, hex, percent and Unicode escapes),
+# also where a window holds them. Spans that overlap are merged into their union (spans that
+# only touch stay apart). The merged spans are packed in order into groups of at most WINDOW
+# bytes, each starting at a merged span's start, and each group is one chunk. In a merged span
+# longer than WINDOW, its key spans are grouped the same way and each of its encoded runs is a
+# chunk of its own (such chunks may overlap). A key span longer than WINDOW blocks the check,
+# naming the place. Windows add up to at most 5n/4 + WINDOW bytes, groups (disjoint) to at most
+# n, and runs read on their own to at most 4n; the size check is 25n/4 + WINDOW. Private terms
+# are matched in Python on the whole text, never on windows.
+GITLEAKS_PIECE = 100_000
+WINDOW = 90_000
+OVERLAP = 16_000
+EDGE = 2_000
+# Where a window edge may sit: just after a byte that is not part of a word. It serves gitleaks'
+# rules, whose \b and character classes are ASCII, so only ASCII letters and digits are word
+# bytes for them; bytes of 0x80 and above count as part of a word only so that an edge never
+# splits a UTF-8 character or a non-ASCII path name.
+_EDGE_BREAK = re.compile(rb"[^A-Za-z0-9\x80-\xff]")
+# gitleaks 8.30.1's private-key rule, read from its binary:
+#   (?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\s\S-]{64,}?KEY(?: BLOCK)?-----
+# copied as two byte regexes, one per marker. Go's (?i) also folds U+212A (Kelvin sign) to k
+# and U+017F (long s) to s, and folds nothing else onto these letters (measured on 8.30.1:
+# U+0130, capital I with a dot, does not match I). Python's (?i) on bytes folds ASCII only, and
+# a str regex with (?i) also matches U+0130, so neither is used: each letter is written out.
+_KELVIN = "\u212a".encode()
+_LONG_S = "\u017f".encode()
+
+
+def _folded(word: str) -> bytes:
+    """WORD as a byte regex matching it the way Go's (?i) does: each ASCII letter as [Xx], and
+    K also as the Kelvin sign (no marker word holds an s; the long s matters only in the header
+    class)."""
+    out = b""
+    for c in word.encode():
+        ch = bytes([c])
+        if ch == b"K":
+            out += b"(?:[Kk]|" + _KELVIN + b")"
+        elif ch.isalpha():
+            out += b"[" + ch.upper() + ch.lower() + b"]"
+        else:
+            out += re.escape(ch)
+    return out
+
+
+_KEY_TAIL = b"(?: " + _folded("BLOCK") + b")?-----"
+_KEY_BEGIN = re.compile(b"-----" + _folded("BEGIN") + b"(?:[ A-Za-z0-9_-]|" + _LONG_S + b"|" + _KELVIN
+                        + b"){0,100}" + _folded("PRIVATE KEY") + _KEY_TAIL)
+_KEY_END = re.compile(_folded("KEY") + _KEY_TAIL)
+KEY_MIN_BODY = 64  # the rule's [\s\S-]{64,}? between the markers, in characters (Go counts runes)
 NOTES_KEY = "public-content.notesDir"
 TERMS_FILE = Path("scanner") / "private-terms.txt"
 SHA_RE = r"[0-9a-f]{40}|[0-9a-f]{64}"
+# The only names the report may print: no space, colon, percent, CR, LF, other control or
+# non-ASCII character, so a name can neither start a line nor form a workflow command.
+SAFE_NAME = re.compile(r"[A-Za-z0-9._/-]{1,4096}")
 TESTED_GITLEAKS = "8.30.1"  # the version whose log lines the parser below expects
 FIX_PUSH = (
     "Fix: amend or rebase the commits to remove it, then push again. "
@@ -110,33 +200,350 @@ class ScanError(Exception):
     """A check that could not be completed. Every caller blocks on it (fail closed)."""
 
 
+class NotHandled(ScanError):
+    """An event or action the guard has no field map for: exit 2 with its own message, which
+    says that nothing was scanned (not that something leaked)."""
+
+
 def _zero(sha: str) -> bool:
     return re.fullmatch(r"0+", sha) is not None
+
+
+def _short(sha: str) -> str:
+    """The first 12 characters of an object id, for a report; ScanError when SHA is not one."""
+    if not re.fullmatch(SHA_RE, sha):
+        raise ScanError("git returned an object name that is not a hex object id")
+    return sha[:12]
+
+
+def _finding(rule: str, place: str) -> str:
+    """One report line: a rule id (checked when read from gitleaks) and a place built from
+    fixed labels, numbers and Scanner.render output."""
+    return "%s at %s" % (rule, place)
 
 
 # --------------------------------------------------------------------------- private terms
 
 
 class Terms:
-    """The private terms, and how to find and mask them."""
+    """The private terms, and how to find and mask them: one fold, one word test, one pattern per
+    term, used by find and mask alike.
+
+    Strip. Invisible characters (every character of category Cf, and every other character of
+    Unicode's Default_Ignorable_Code_Point, listed in _DEFAULT_IGNORABLE as escapes; together
+    _IGNORABLE) are removed from a line, and from each term, first (fail closed: a format
+    character inside a term never hides it). Every offset maps back to the original line,
+    so find and mask report and cover the text as written. A line gives the same result with and
+    without them.
+    Units. The stripped line is split into units: a character that is not attached, with every
+    attached character after it. An attached character is one of category M, or one whose first
+    folded character is of category M (U+0E33, U+0EB3, U+FF9E, U+FF9F; pinned by a test).
+    Attached characters at the start of a line form a unit with no base. In the original line an
+    invisible character stays in the unit before it.
+    Fold. Each unit is folded whole: Unicode's compatibility caseless match (D146),
+    NFKD(casefold(NFKD(casefold(NFD(unit))))), plus one Turkish adjustment: U+0131 (dotless i)
+    becomes i, and a U+0307 (dot above) that follows an i with only combining characters between
+    is dropped. No reordering crosses a unit, so the units' folds joined are D146 of the whole
+    stripped line with that adjustment. Precomposed and decomposed spellings fold the same.
+    Separators. A term is folded the same way, then split into words on [-_. ]+. Its words match
+    with nothing between them or up to N separators, where N is the term's longest run of
+    separator characters as written, and at least 1. Separators are counted as written, in the
+    line and in the term: a character whose fold is made only of separators (an ellipsis, a wide
+    space) counts as one.
+    Word test. A hit starts on a unit boundary. It ends on a unit boundary, or inside its last
+    unit where everything after the hit in that unit is attached or combining: written after the
+    base, or produced by decomposing a precomposed letter; never where the rest holds a letter of
+    the base's own fold (the term s is not found in U+00DF). A hit is part of a longer word, and
+    is not reported, only when the unit just before it, or the unit just after its last unit,
+    read in NFC, starts with an ASCII letter or digit. Everything else is a break, so a term glued
+    to it is reported (fail closed): accented, Greek and Cyrillic letters in either storage form,
+    letters of caseless scripts, other digits, punctuation, symbols, spaces and units with no
+    base. The test reads the original units, never folded ones (a symbol can fold to letters).
+    Lines are split on \n only; no fold of another character holds a \n."""
+
+    # Default_Ignorable_Code_Point (Unicode 16.0; the same in 15.0), as escapes. Category Cf is
+    # added from unicodedata when the first Terms is built (_invisible).
+    _DEFAULT_IGNORABLE = ("\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
+                          "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+                          "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff")
+    _IGNORABLE: re.Pattern[str]
+    _SEPARATORS = re.compile("[-_. ]+")
+    _INVISIBLE, _ATTACHED, _BASE = 0, 1, 2  # what a character is to the unit split (_kind)
+    # Folded units are cached by their text. A line of many distinct units would grow the cache
+    # without end, so it is emptied when it reaches this many entries (a miss only costs a fold).
+    SEGMENT_CACHE_LIMIT = 4096
+
+    @classmethod
+    def _invisible(cls) -> re.Pattern[str]:
+        """The invisible characters as one regex class: _DEFAULT_IGNORABLE and every code point
+        of category Cf in this Python's Unicode data (built once, about 0.1 s)."""
+        got = cls.__dict__.get("_IGNORABLE")
+        if got is None:
+            cf = "".join(chr(cp) for cp in range(0x110000) if unicodedata.category(chr(cp)) == "Cf")
+            got = re.compile("[" + cls._DEFAULT_IGNORABLE + re.escape(cf) + "]")
+            cls._IGNORABLE = got
+        return got
 
     def __init__(self, terms: list[str], warning: str | None) -> None:
         self.warning = warning
-        parts = []
+        self._IGNORABLE = self._invisible()
+        self._kinds: dict[str, int] = {}
+        self._segments: dict[str, str] = {}
+        self._parts: dict[str, list[tuple[int, int, str]]] = {}
+        self.patterns: list[re.Pattern[str]] = []
+        self._most: list[int] = []  # per pattern: the separators allowed between two words
         for term in terms:
-            words = [w for w in re.split(r"[-_. ]+", term) if w]
+            _units, folded, owner = self._line(term)
+            words = [w for w in self._SEPARATORS.split(folded) if w]
             if words:
-                parts.append("[-_. ]?".join(re.escape(w) for w in words))
-        self.alternation = "|".join(parts)
-        self.mask_re = re.compile("(?:" + self.alternation + ")", re.IGNORECASE) if parts else None
-        # Not inside a longer word of letters and digits; `_` and other marks are breaks. The
-        # look-around consumes nothing, so two terms side by side are both found.
-        self.find_re = (re.compile("(?<![A-Za-z0-9])(?:" + self.alternation + ")(?![A-Za-z0-9])", re.IGNORECASE)
-                        if parts else None)
+                self.patterns.append(re.compile("[-_. ]*".join(self._word_pattern(w) for w in words)))
+                self._most.append(max([1] + [owner[r.end() - 1] - owner[r.start()] + 1
+                                             for r in self._SEPARATORS.finditer(folded)]))
+
+    _LOWER: dict[int, str] = {}  # combining class -> regex class of the marks of a lower class
+
+    @classmethod
+    def _word_pattern(cls, word: str) -> str:
+        """WORD (folded) as a regex. Before each combining character of the word, marks of a
+        lower combining class may stand in the text: canonical reordering puts a mark the text
+        adds after an accented letter (a grave below after an e-acute) between the letter and
+        its own accent."""
+        out = []
+        for ch in word:
+            ccc = unicodedata.combining(ch)
+            if ccc:
+                if not cls._LOWER:
+                    marks = [chr(cp) for cp in range(0x110000) if unicodedata.combining(chr(cp))]
+                    for c in sorted({unicodedata.combining(m) for m in marks}):
+                        lower = "".join(m for m in marks if unicodedata.combining(m) < c)
+                        cls._LOWER[c] = "[" + re.escape(lower) + "]*" if lower else ""
+                out.append(cls._LOWER[ccc])
+            out.append(re.escape(ch))
+        return "".join(out)
+
+    def _ignorable(self, ch: str) -> bool:
+        return self._IGNORABLE.match(ch) is not None
+
+    def _kind(self, ch: str) -> int:
+        got = self._kinds.get(ch)
+        if got is None:
+            if self._ignorable(ch):
+                got = self._INVISIBLE
+            elif unicodedata.category(ch)[0] == "M" or unicodedata.category(self._fold(ch)[0])[0] == "M":
+                got = self._ATTACHED  # no character outside _IGNORABLE folds to nothing (pinned by a test)
+            else:
+                got = self._BASE
+            self._kinds[ch] = got
+        return got
+
+    def _fold(self, unit: str) -> str:
+        """D146 of UNIT plus the Turkish adjustment (see the class text)."""
+        got = self._segments.get(unit)
+        if got is None:
+            n = unicodedata.normalize
+            got = n("NFKD", n("NFKD", n("NFD", unit).casefold()).casefold())
+            if "\u0131" in got:
+                got = got.replace("\u0131", "i")
+            if "\u0307" in got and "i" in got:
+                out, after_i = [], False
+                for c in got:
+                    if c == "\u0307" and after_i:
+                        continue
+                    if unicodedata.category(c)[0] != "M":
+                        after_i = c == "i"
+                    out.append(c)
+                got = "".join(out)
+            if len(unit) <= 32:
+                if len(self._segments) >= self.SEGMENT_CACHE_LIMIT:
+                    self._segments.clear()
+                self._segments[unit] = got
+        return got
+
+    def _line(self, line: str) -> tuple[Sequence[str], str, Sequence[int]]:
+        """(units, folded line, owner): units are the original line cut where each unit's first
+        kept character is (an invisible character stays in the unit before it, or in the first
+        unit), and owner[k] is the unit folded character k came from. A pure-ASCII line takes a
+        fast path with the same results (one unit per character)."""
+        if line.isascii():
+            return line, line.lower(), range(len(line))
+        return self._general(line)
+
+    def _general(self, line: str) -> tuple[list[str], str, list[int]]:
+        """_line for any line. Each distinct character of the line is classed once (_kind); a
+        regex over the line's own invisible and attached characters then cuts it into units."""
+        special = [ch for ch in set(line) if self._kind(ch) != self._BASE]
+        if not special:
+            units = list(line)
+            kept: list[str] = units
+        else:
+            cls = "[" + "".join(re.escape(ch) for ch in special) + "]"
+            lead = re.match(cls + "*", line).group()  # type: ignore[union-attr]
+            units = re.findall("[^" + cls[1:] + cls + "*", line[len(lead):])
+            if lead:
+                if units and all(self._kind(ch) == self._INVISIBLE for ch in lead):
+                    units[0] = lead + units[0]  # invisible characters before the first unit join it
+                else:
+                    units.insert(0, lead)  # attached characters at the start form a unit with no base
+            invisible = any(self._kind(ch) == self._INVISIBLE for ch in special)
+            kept = [self._IGNORABLE.sub("", u) for u in units] if invisible else units
+        cache = self._segments
+        folds = [cache.get(u) or self._fold(u) for u in kept]
+        lens = list(map(len, folds))
+        if len(lens) == sum(lens):
+            owner = list(range(len(lens)))
+        else:
+            owner = list(itertools.chain.from_iterable(map(itertools.repeat, range(len(lens)), lens)))
+        return units, "".join(folds), owner
+
+    def _word(self, unit: str) -> bool:
+        """True when UNIT, read in NFC with its invisible characters removed, starts with an
+        ASCII letter or digit."""
+        first = unit[:1] if unit.isascii() else unicodedata.normalize("NFC", self._IGNORABLE.sub("", unit))[:1]
+        return first.isascii() and first.isalnum()
+
+    def _base_parts(self, unit: str) -> list[tuple[int, int, str]]:
+        """The parts of UNIT's base (its first kept character, unless that is attached): its
+        canonical decomposition (NFD) cut before each character that is not a combining one, so
+        a Hangul syllable is cut into its jamo. For each part: the length of its fold, how many
+        letters it holds (its fold, with combining characters left out before folding, minus
+        the combining characters of that fold) and its text. A unit with no base has no parts."""
+        kept = next((ch for ch in unit if not self._ignorable(ch)), "")
+        if not kept or self._kind(kept) != self._BASE:
+            return []
+        got = self._parts.get(kept)
+        if got is None:
+            got, cut = [], []
+            for ch in unicodedata.normalize("NFD", kept):
+                if cut and (unicodedata.combining(ch) or unicodedata.category(ch)[0] == "M"):
+                    cut[-1] += ch
+                else:
+                    cut.append(ch)
+            for part in cut:
+                core = "".join(ch for ch in part if unicodedata.category(ch)[0] != "M")
+                letters = sum(1 for c in self._fold(core) if unicodedata.category(c)[0] != "M")
+                got.append((len(self._fold(part)), letters, part))
+            self._parts[kept] = got
+        return got
+
+    def _hits(self, line: str, edges: bool) -> tuple[Sequence[str], list[tuple[int, int]]]:
+        """(units, hits) of LINE: each hit is a range of units [first, last + 1), sorted. A hit's
+        separator runs each span at most the pattern's allowance of units. With EDGES, a hit must
+        also pass the word test (see the class text), and the search goes on at a counted hit's
+        end, or one past a rejected hit's start. Without (masking), every match counts and the
+        search always goes on one past its start, so overlapping matches are all found."""
+        units, folded, owner = self._line(line)
+        n, count = len(folded), len(units)
+        words: dict[int, bool] = {}
+
+        def word(k: int) -> bool:
+            got = words.get(k)
+            if got is None:
+                got = words[k] = self._word(units[k])
+            return got
+
+        out = []
+        for pattern, most in zip(self.patterns, self._most):
+            pos = 0
+            while True:
+                m = pattern.search(folded, pos)
+                if m is None:
+                    break
+                s, e = m.span()
+                lo, hi = owner[s], owner[e - 1] + 1
+                good = all(owner[r.end() - 1] - owner[r.start()] < most
+                           for r in self._SEPARATORS.finditer(folded, s, e))
+                if good and edges:
+                    good = self._edges(units, folded, owner, s, e, word)
+                if not good:
+                    pos = s + 1
+                    continue
+                out.append((lo, hi))
+                pos = e if edges else s + 1
+        return units, sorted(out)
+
+    def _edges(self, units: Sequence[str], folded: str, owner: Sequence[int], s: int, e: int,
+               word: Callable[[int], bool]) -> bool:
+        """The word test of the hit [S, E) of FOLDED (see the class text). A hit may also start or
+        end between two parts of a unit's base (_base_parts: the jamo of a Hangul syllable), as
+        it can in the text's decomposed spelling; the part next to it is then its neighbour."""
+        n, lo, hi = len(folded), owner[s], owner[e - 1] + 1
+        if s and owner[s - 1] == lo:  # the hit starts inside a unit
+            start = bisect.bisect_left(owner, lo)
+            at, before = 0, ""
+            for size, _letters, text in self._base_parts(units[lo]):
+                if start + at == s:
+                    break
+                at, before = at + size, text
+            else:
+                return False
+            if start + at != s or self._word(before):
+                return False
+        elif lo and word(lo - 1):
+            return False
+        if e < n and owner[e] == hi - 1:  # the hit ends inside a unit
+            start = bisect.bisect_left(owner, hi - 1)
+            parts = self._base_parts(units[hi - 1])
+            at = 0
+            for k, (size, letters, _text) in enumerate(parts):
+                if start + at + size >= e or k == len(parts) - 1:
+                    if start + at + size == e and k < len(parts) - 1:
+                        return not self._word(parts[k + 1][2])  # it ends between two parts
+                    # Every letter of this part must be inside the hit (its letters come first
+                    # among the unit's folded characters that are not combining).
+                    if sum(1 for c in folded[start + at:e] if unicodedata.category(c)[0] != "M") < letters:
+                        return False
+                    if k < len(parts) - 1:
+                        return not self._word(parts[k + 1][2])
+                    break
+                at += size
+        return not (hi < len(units) and word(hi))
+
+    def _spans(self, line: str, units: Sequence[str], hits: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Each hit as (start, end) in LINE: from its first unit's first kept character to just
+        after its last unit's last kept character (invisible characters at either end of a hit
+        are not part of it)."""
+        if isinstance(units, str):  # the ASCII fast path: one unit per character
+            return hits
+        at = [0, *itertools.accumulate(map(len, units))]
+        out = []
+        for a, b in hits:
+            s, e = at[a], at[b]
+            while s < e and self._ignorable(line[s]):
+                s += 1
+            while e > s and self._ignorable(line[e - 1]):
+                e -= 1
+            out.append((s, e))
+        return out
+
+    def find(self, text: str) -> list[tuple[int, str]]:
+        """(line number, matched original text) of each term in TEXT."""
+        out: list[tuple[int, str]] = []
+        if self.patterns:
+            for n, line in enumerate(text.split("\n"), 1):
+                units, hits = self._hits(line, True)
+                if hits:
+                    out.extend((n, line[s:e]) for s, e in self._spans(line, units, hits))
+        return out
 
     def mask(self, text: str) -> str:
-        if self.mask_re is not None:
-            text = self.mask_re.sub("<private>", text)
+        """TEXT with every match of a term (word test left out) replaced by <private>, overlapping
+        or touching matches as one; then every public rule's match by <redacted>."""
+        if self.patterns:
+            lines = []
+            for line in text.split("\n"):
+                units, hits = self._hits(line, False)
+                merged: list[list[int]] = []
+                for a, b in hits:
+                    if merged and a <= merged[-1][1]:
+                        merged[-1][1] = max(merged[-1][1], b)
+                    else:
+                        merged.append([a, b])
+                parts, k = [], 0
+                for s, e in self._spans(line, units, [(a, b) for a, b in merged]):
+                    parts += [line[k:s], "<private>"]
+                    k = e
+                lines.append("".join(parts) + line[k:])
+            text = "\n".join(lines)
         for rx in _public_regexes():
             text = rx.sub("<redacted>", text)
         return text
@@ -166,7 +573,11 @@ def load_terms() -> Terms:
     """Where the list lives: PRIVATE_NOTES_DIR, else the folder recorded in global git config.
     Both set and naming different folders: ScanError (the variable must not silently replace
     the recorded list). Neither set: no private terms, with a warning (CI, other machines).
-    A folder whose list is missing, unreadable or empty: ScanError (fail closed)."""
+    A folder whose list is missing, unreadable or empty: ScanError (fail closed); so is a list
+    holding a term that yields no pattern (only separators), does not find its own text, or
+    starts with a combining mark or a character that attaches to the one before it (its first
+    visible character is attached: see Terms). The
+    error names the line, never the term."""
     env = os.environ.get("PRIVATE_NOTES_DIR") or None
     recorded = _recorded_notes_dir()
     if env and recorded and not _same_folder(env, recorded):
@@ -182,22 +593,31 @@ def load_terms() -> Terms:
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         raise ScanError(f"the private term list ({where}) could not be read ({type(exc).__name__})") from None
-    terms = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
-    found = Terms(terms, None)
-    if not found.alternation:
+    numbered = [(n, ln.strip()) for n, raw in enumerate(text.split("\n"), 1) for ln in raw.splitlines()
+                if ln.strip() and not ln.lstrip().startswith("#")]
+    for n, term in numbered:
+        one = Terms([term], None)
+        visible = one._IGNORABLE.sub("", term)
+        if visible and one._kind(visible[0]) == one._ATTACHED:
+            raise ScanError(f"the private term list ({where}) could not be used: the term on line {n} "
+                            "starts with a combining mark or a character that attaches to the one before it")
+        if not one.patterns or not one.find(term):
+            raise ScanError(f"the private term list ({where}) could not be used: the term on line {n} "
+                            "does not match its own text")
+    found = Terms([term for _n, term in numbered], None)
+    if not found.patterns:
         raise ScanError(f"the private term list ({where}) is empty")
     return found
 
 
 _PUBLIC_CACHE: list[re.Pattern[str]] | None = None
-_PUBLIC_IDS: set[str] | None = None
 
 
 def _public_regexes() -> list[re.Pattern[str]]:
     """The public rules' regexes, for masking places (over-masking is harmless). Compiled with
     ASCII meanings for \\b and \\w, as gitleaks' engine reads them. A regex Python cannot
     compile is a ScanError: masking must not quietly do nothing."""
-    global _PUBLIC_CACHE, _PUBLIC_IDS
+    global _PUBLIC_CACHE
     if _PUBLIC_CACHE is None:
         text = PUBLIC_RULES.read_text(encoding="utf-8")
         regs = []
@@ -207,13 +627,7 @@ def _public_regexes() -> list[re.Pattern[str]]:
             except re.error:
                 raise ScanError("a public rule's regex cannot be used to mask the report") from None
         _PUBLIC_CACHE = regs
-        _PUBLIC_IDS = set(re.findall(r'(?m)^id\s*=\s*"([^"]+)"', text))
     return _PUBLIC_CACHE
-
-
-def _public_ids() -> set[str]:
-    _public_regexes()
-    return set(_PUBLIC_IDS or ()) | {"private-term"}
 
 
 def allowed_addresses() -> set[str]:
@@ -247,7 +661,8 @@ _SPEECH = (
 def speech_warnings(place: str, data: bytes | str) -> list[str]:
     """Lines that look like someone's words quoted (reported speech about "the owner", a
     common way for an agent to name the person it works for, or a Markdown quote line). A
-    warning only: such a line may be fine, so it never blocks."""
+    warning only: such a line may be fine, so it never blocks. PLACE is printed: a fixed
+    label or Scanner.render output, never a raw name."""
     if isinstance(data, bytes):
         data = data.decode("utf-8", "replace")
     out = []
@@ -277,6 +692,20 @@ _RUNS = tuple((re.compile(rb"(?:%s){%d,}" % (unit, MIN_RUN)), first, step) for u
     (_RUN + rb"\x00\x00\x00", 0, 4),
     (rb"\x00\x00\x00" + _RUN, 3, 4),
 ))
+
+
+# Any UTF-16 surrogate: event text from JSON has each replaced (see _field_text).
+_SURROGATE = re.compile("[\ud800-\udfff]")
+# A lone UTF-16 surrogate that is not one of surrogateescape's (U+DC80..U+DCFF: a byte of a name
+# that is not UTF-8). It cannot be encoded as UTF-8; text from git or the environment, read with
+# surrogateescape, holds none, so this only keeps any other text from stopping the scan.
+_LONE_SURROGATE = re.compile("[\ud800-\udc7f\udd00-\udfff]")
+
+
+def _encode(text: str) -> bytes:
+    """TEXT as the bytes the rules read: a byte that surrogateescape carried is that byte again,
+    and any other lone surrogate is U+FFFD, the way it is shown."""
+    return _LONE_SURROGATE.sub("\ufffd", text).encode("utf-8", "surrogateescape")
 
 
 def _utf8(data: bytes) -> bool:
@@ -686,6 +1115,149 @@ class UnreadableFile(ScanError):
     be read to its last byte). The report names the file and says what to do."""
 
 
+def _edge(text: bytes, pos: int) -> int:
+    """POS moved back by up to EDGE bytes: to a line start, else to just after a byte that is
+    not a letter or digit, else to the start of a whole UTF-8 character."""
+    if pos <= 0 or pos >= len(text):
+        return max(0, min(pos, len(text)))
+    low = max(0, pos - EDGE)
+    nl = text.rfind(b"\n", low, pos)
+    if nl >= 0:
+        return nl + 1
+    found = -1
+    for m in _EDGE_BREAK.finditer(text, low, pos):
+        found = m.end()
+    if found > 0:
+        return found
+    at = pos
+    while 0 < at and pos - at < 3 and 0x80 <= text[at] < 0xC0:
+        at -= 1
+    return at
+
+
+def _windows(text: bytes) -> list[tuple[int, int]]:
+    """(start, end) of each window of TEXT (see WINDOW): at most WINDOW bytes each, every window
+    after the first starting before the one before it ends by at least OVERLAP - EDGE bytes."""
+    out = []
+    start = 0
+    while True:
+        if start + WINDOW >= len(text):
+            out.append((start, len(text)))
+            return out
+        out.append((start, _edge(text, start + WINDOW)))
+        start = _edge(text, start + WINDOW - OVERLAP)
+
+
+def _body_end(text: bytes, at: int) -> int:
+    """The offset KEY_MIN_BODY characters after AT, counted as Go's regexp counts them: one per
+    UTF-8 character, and one per byte that is not part of a valid one (surrogateescape gives each
+    such byte a character of its own, as Go's DecodeRune does; measured at 63 and 64)."""
+    head = text[at:at + 4 * KEY_MIN_BODY].decode("utf-8", "surrogateescape")
+    return at + len(head[:KEY_MIN_BODY].encode("utf-8", "surrogateescape"))
+
+
+def _key_spans(text: bytes) -> list[tuple[int, int]]:
+    """(start, end) of each private-key match of TEXT, as gitleaks finds them. TEXT and the
+    offsets are bytes. A match runs from a BEGIN marker to the end of the first END marker that
+    starts at least KEY_MIN_BODY characters after the header ends (just after its closing
+    dashes). The longest header is tried first; when it has no such END marker, each shorter
+    header the BEGIN line allows is tried in turn, as Go's backtracking does. A BEGIN marker with
+    no END marker for any header is no key, and the search goes on one byte after its start (Go's
+    FindAll goes on one character later; a BEGIN marker is ASCII, so no match can start inside a
+    character). After a match the search goes on at its end, so key spans never overlap each
+    other; encoded runs can overlap them, and _plan merges those."""
+    ends = list(_KEY_END.finditer(text))
+    starts = [m.start() for m in ends]
+    out: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        begin = _KEY_BEGIN.search(text, pos)
+        if begin is None:
+            return out
+        m: re.Match[bytes] | None = begin
+        while m is not None:
+            i = bisect.bisect_left(starts, _body_end(text, m.end()))
+            if i < len(ends):
+                break
+            # A shorter header can end at an earlier marker (the header class holds every letter
+            # of PRIVATE KEY and the dash), so its END marker can be nearer.
+            m = _KEY_BEGIN.match(text, m.start(), m.end() - 1)
+        if m is None:
+            pos = begin.start() + 1
+            continue
+        out.append((m.start(), ends[i].end()))
+        pos = ends[i].end()
+
+
+# The encoded shapes gitleaks 8.30.1 decodes before it matches (its own patterns): base64,
+# hex, percent escapes (from the first escape of a line to its last) and Unicode escapes
+# (\uXXXX with one or two backslashes, or U+XXXX followed by a space).
+_ENCODED = (re.compile(rb"[A-Za-z0-9_/+-]{16,}={0,2}"), re.compile(rb"[0-9A-Fa-f]{32,}"),
+            re.compile(rb"%[0-9A-Fa-f]{2}(?:[^\n]*%[0-9A-Fa-f]{2})?"),
+            re.compile(rb"(?:U\+[0-9A-Fa-f]{4}(?:[\t\n\f\r ]|$))+|(?:\\{1,2}[Uu][0-9A-Fa-f]{4})+"))
+
+
+def _plan(text: bytes) -> tuple[list[tuple[int, int]], bool]:
+    """The chunks of TEXT as (start, end), sorted by start, and whether a span was too long to be
+    read in one piece. A text that fits in one gitleaks piece is one chunk. A longer text has its
+    windows, plus groups of long spans. The long spans are each key span (_key_spans) and each
+    run of encoded text longer than OVERLAP - 2 * EDGE and at most WINDOW bytes, also where a
+    window holds them. Spans that overlap are merged into their union; spans that only touch
+    stay apart. The merged spans are packed in order into groups: a group starts at a merged
+    span's start and takes each next merged span while that span still ends within WINDOW bytes
+    of the group's start; the next span starts a new group. Each group, from its first span's
+    start to its last span's end, is one chunk. A key span longer than WINDOW is not added and
+    sets the flag (the caller blocks, naming the place); a longer encoded run is left to the
+    windows. In a merged span longer than WINDOW, its key spans are grouped the same way and each
+    of its encoded runs is a piece of its own, not grouped (such pieces may overlap). Windows add
+    up to at most 5n/4 + WINDOW bytes, groups (disjoint) to at most n, and the runs read on their
+    own to at most 4n (the runs of one shape never overlap; four shapes). The size check is
+    25n/4 + WINDOW; a plan over that is a ScanError (it cannot happen; the check guards later
+    edits)."""
+    n = len(text)
+    if n <= GITLEAKS_PIECE - 100:
+        return [(0, n)], False
+    raw = [(at, end, True) for at, end in _key_spans(text)]
+    raw += sorted({(m.start(), m.end(), False) for rx in _ENCODED for m in rx.finditer(text)
+                   if OVERLAP - 2 * EDGE < m.end() - m.start() <= WINDOW})
+    raw.sort()
+    merged: list[list[tuple[int, int, bool]]] = []  # each merged span, as the spans it holds
+    reach = -1
+    for span in raw:
+        if merged and span[0] < reach:
+            merged[-1].append(span)
+            reach = max(reach, span[1])
+        else:
+            merged.append([span])
+            reach = span[1]
+    pieces: list[tuple[int, int]] = []
+    alone: list[tuple[int, int]] = []  # encoded runs of a merged span longer than WINDOW
+    too_long = False
+    for held in merged:
+        at, last = held[0][0], max(span[1] for span in held)
+        if last - at <= WINDOW:
+            pieces.append((at, last))
+            continue
+        for s, e, key in held:
+            if key and e - s > WINDOW:
+                too_long = True
+            elif key:
+                pieces.append((s, e))
+            else:
+                alone.append((s, e))
+    chunks: list[tuple[int, int]] = []
+    for at, end in pieces:
+        if chunks and end - chunks[-1][0] <= WINDOW:
+            chunks[-1] = (chunks[-1][0], end)
+        else:
+            chunks.append((at, end))
+    spans = _windows(text) + chunks + alone
+    spans.sort(key=lambda span: span[0])  # stable: the first window stays first
+    if sum(end - at for at, end in spans) > 25 * n // 4 + WINDOW:
+        raise ScanError("the scan plan for a long text exceeds its size bound")
+    return spans, too_long
+
+
 FIX_UNREADABLE = (
     "Fix: remove it from the commits and push again; or commit its contents unpacked; or repack it "
     "as zip, tar.gz or tar.xz, which the guard reads completely; or keep it in a private repository. "
@@ -716,8 +1288,11 @@ class Scanner:
     only when its canary is reported. A chunk that was skipped or lost its canary is scanned
     once more behind RETRY_PREFIX (so no format can be sniffed); if that fails too, ScanError.
 
-    Every path shown in a place is scanned too, whether or not that name is new in this
-    change: a path a secret rule matches is never shown, and other matches are masked."""
+    Names (render): every name a place may show (a file path, a --label) is scanned raw, as
+    its own chunk, before anything is escaped, whether or not that name is new in this change.
+    It is shown only when it is plain (SAFE_NAME) and no public rule and no secret rule
+    matches it; a private term in a shown name is masked. Anything else is replaced by a fixed
+    placeholder. render is the only way such a name reaches the output."""
 
     def __init__(self, terms: Terms) -> None:
         self.terms = terms
@@ -728,6 +1303,11 @@ class Scanner:
         self.run_id = secrets.token_hex(8)
         # Files that could not be read completely: (place, path, reason).
         self.unreadable: list[tuple[str, str | None, str]] = []
+        # Texts holding a key block too long to be read in one piece: (place, path).
+        self.too_long: list[tuple[str, str | None]] = []
+        # Every raw name a place may show, and (after run) those render may print.
+        self.names: set[str] = set()
+        self.clear: set[str] = set()
         # Given addresses (lowercased), returns those already in use as author or committer
         # addresses (None: none). Applies on identity lines only.
         self.known: Callable[[set[str]], set[str]] | None = None
@@ -740,13 +1320,17 @@ class Scanner:
 
     def add(self, place: str, data: bytes | str, lines: bool = True, names: list[str] | None = None,
             path: str | None = None, kind: str = "content", file: bool = False) -> None:
-        """place: what the report calls it (masked when shown). lines: append :LINE. names: one
-        path per line of data (a file-name chunk). path: the raw path a place is built from.
-        file: DATA is a file's content, so an archive is unpacked and each file in it checked;
-        one that cannot be read completely blocks the run, naming the place (see run)."""
+        """place: a fixed label the report calls it; with PATH, what it says when PATH is not
+        shown. lines: append :LINE. names: the raw name each line of data belongs to (a
+        file-name chunk). path: the raw name the place shows, through render. file: DATA is a
+        file's content, so an archive is unpacked and each file in it checked; one that cannot
+        be read completely blocks the run, naming the place (see run)."""
         if isinstance(data, str):
-            data = data.encode("utf-8", "surrogateescape")
-        for view in [data] if names is not None else as_text(data):
+            data = _encode(data)
+        if path is not None:
+            self.names.add(path)
+        views = [data] if _utf8(data) else [data, data.decode("utf-8", "replace").encode("utf-8")]
+        for view in views if names is not None else as_text(data):
             self._chunk(place, view, lines, names, path, kind, False)
         if file:
             try:
@@ -758,6 +1342,26 @@ class Scanner:
                 for view in as_text(f):
                     self._chunk(place, view, lines, None, path, kind, True)
 
+    def add_names(self, place: str, names: list[str]) -> None:
+        """Scan NAMES (raw file names) as content: the names with no newline one per line of one
+        chunk, each other name as a chunk of its own, so no name is escaped before the scan and
+        every line maps back to its name."""
+        self.names.update(names)
+        plain = [n for n in names if "\n" not in n]
+        if plain:
+            self.add(place, "\n".join(plain) + "\n", names=plain)
+        for n in names:
+            if "\n" in n:
+                self.add(place, n + "\n", names=[n] * (n.count("\n") + 1))
+
+    def render(self, raw: str | None, shown_as: str, withheld_as: str) -> str:
+        """The one way a name the scanner did not write reaches the output: SHOWN_AS with the
+        name (private terms masked) when run found it plain and matched by no rule, else
+        WITHHELD_AS. Before run, every name is withheld."""
+        if raw is None or raw not in self.clear or not SAFE_NAME.fullmatch(raw):
+            return withheld_as
+        return shown_as % self.terms.mask(raw)
+
     def _name(self, idx: int) -> str:
         return "c%07d" % idx
 
@@ -766,12 +1370,34 @@ class Scanner:
 
     def _chunk(self, place: str, text: bytes, lines: bool, names: list[str] | None, path: str | None,
                kind: str, inside: bool) -> None:
+        """TEXT as one chunk when it fits in one gitleaks piece, else as the chunks _plan gives:
+        overlapping windows and each key block no window holds (see WINDOW). A key block too
+        long for one piece is recorded, and run blocks naming the place. The first chunk of a
+        text carries the private-term match for the whole text (see findings)."""
+        meta = {"place": place, "lines": lines, "names": names, "path": path, "archive": inside, "kind": kind}
+        spans, too_long = _plan(text)
+        if too_long:
+            self.too_long.append((place, path))
+        if len(text) <= GITLEAKS_PIECE - 100:
+            self._write(meta, text, 0, terms=None)
+            return
+        whole = self.work / ("whole-%07d" % len(self.chunks))
+        whole.write_bytes(text)
+        nl, last = 0, 0  # a running count of the line breaks before each chunk (spans are sorted)
+        for n, (at, end) in enumerate(spans):
+            nl += text.count(b"\n", last, at)
+            last = at
+            self._write(meta, text[at:end], nl, terms=whole if n == 0 else False)
+
+    def _write(self, meta: dict[str, object], text: bytes, shift: int, terms: Path | bool | None) -> None:
         # The leading newline keeps gitleaks from reading the first bytes as a binary file's
         # signature; line numbers are shifted back when read. The canary line ends the chunk.
+        # shift: the lines of the whole text before this chunk's first line. terms: None, match
+        # the private terms on this chunk's text; a path, on the whole text saved there; False,
+        # not on this chunk (a later window or a key block of a text matched elsewhere).
         idx = len(self.chunks)
         (self.src / self._name(idx)).write_bytes(b"\n" + text + b"\n" + self._canary(idx).encode())
-        self.chunks.append({"place": place, "lines": lines, "names": names, "path": path,
-                            "archive": inside, "kind": kind})
+        self.chunks.append(dict(meta, shift=shift, terms=terms))
 
     def _text(self, idx: int) -> bytes:
         """A chunk's text, without the leading newline and the canary line."""
@@ -780,31 +1406,42 @@ class Scanner:
 
     def run(self) -> list[str]:
         """The report: one line per new finding (rule and place), never the matched text. A
-        file that could not be read completely is a ScanError (UnreadableFile) naming it."""
+        file that could not be read completely is a ScanError (UnreadableFile) naming it. Every
+        name in it comes from render."""
         if not self.chunks:
             return []
-        shown = sorted({str(c["path"]) for c in self.chunks if c["path"] is not None})
+        # Only a plain name can be shown, so only plain names need the display scan; one per
+        # line, raw (a plain name holds no line break, so nothing is escaped).
+        shown = sorted(n for n in self.names if SAFE_NAME.fullmatch(n))
         if shown:
-            self.add("", "\n".join(p.replace("\n", "\\n") for p in shown) + "\n", names=shown, kind="display")
+            self.add("", "\n".join(shown) + "\n", names=shown, kind="display")
         raw = self.findings()
-        public = _public_ids()
         withheld: set[str] = set()
         for rule, idx, line, text in raw:
             chunk = self.chunks[idx]
             names = chunk["names"]
             if not isinstance(names, list) or not 0 < line <= len(names):
                 continue
-            # A path is never shown when a secret rule matches it (the masks cannot mask a
-            # secret), nor when masking leaves the matched text in it.
+            # Allowlist: a name is shown only when no public rule and no secret rule matches
+            # it. A private term (masked as <private>) is the one match a shown name may hold,
+            # and only when masking removes it.
             name = names[line - 1]
-            if rule not in public or not text or text in self.terms.mask(name):
+            if rule != "private-term" or not text or self.terms.find(self.terms.mask(name)):
                 withheld.add(name)
+        self.clear = set(shown) - withheld
         if self.unreadable:
             where = []
-            for place, path, reason in self.unreadable:
-                shown_as = "a file whose name is withheld" if path in withheld else self.terms.mask(place)
-                where.append("%s: %s" % (shown_as, reason))
+            for fixed, path, reason in self.unreadable:
+                where.append("%s: %s" % (self.render(path, "%s", fixed), reason))
             raise UnreadableFile("; ".join(dict.fromkeys(where)))
+        if self.too_long:
+            where = []
+            for fixed, path in self.too_long:
+                where.append(self.render(path, "%s", fixed))
+            raise ScanError("a private key block (or text shaped like one) crosses a scan window and is too long "
+                            "to be read in one piece, "
+                            "so %s could not be checked. Fix: remove the key from the commits and push again; "
+                            "a private key never belongs in a public repository" % "; ".join(dict.fromkeys(where)))
         allowed = allowed_addresses()
         raw = [f for f in raw if self.chunks[f[1]]["kind"] != "display" and f[3].lower() not in allowed]
         if self.known is not None:
@@ -813,20 +1450,21 @@ class Scanner:
             in_use = self.known(emails) if emails else set()
             raw = [f for f in raw if not (f in ident and f[3].lower() in in_use)]
         out: list[str] = []
+        seen: set[str] = set()  # beside the list, so the duplicate test is not a list search
         for rule, idx, line, _text in raw:
             chunk = self.chunks[idx]
             names = chunk["names"]
+            suffix = " (inside the archive)" if chunk["archive"] else (":%d" % line if chunk["lines"] else "")
             if isinstance(names, list):
-                name = names[line - 1] if 0 < line <= len(names) else "?"
-                place = "a file name (withheld)" if name in withheld else "the file name " + self.terms.mask(name)
-            elif chunk["path"] is not None and chunk["path"] in withheld:
-                place = "a file whose name is withheld"
-            elif chunk["archive"]:
-                place = self.terms.mask(str(chunk["place"])) + " (inside the archive)"
+                name = names[line - 1] if 0 < line <= len(names) else None
+                place = self.render(name, "the file name %s", "a file name (withheld)")
+            elif chunk["path"] is not None:
+                place = self.render(str(chunk["path"]), "%s" + suffix, str(chunk["place"]))
             else:
-                place = self.terms.mask(str(chunk["place"])) + (":%d" % line if chunk["lines"] else "")
-            item = f"{rule} at {place}"
-            if item not in out:
+                place = str(chunk["place"]) + suffix
+            item = _finding(rule, place)
+            if item not in seen:
+                seen.add(item)
                 out.append(item)
         return out
 
@@ -843,12 +1481,16 @@ class Scanner:
         raw: list[tuple[str, int, int, str]] = []
         for n, cfg in enumerate((secrets_cfg, public_cfg)):
             raw += self._pass(exe, cfg, n)
-        if self.terms.find_re is not None:
-            for idx in range(len(self.chunks)):
-                text = self._text(idx).decode("utf-8", "surrogateescape")
-                for m in self.terms.find_re.finditer(text):
-                    raw.append(("private-term", idx, text.count("\n", 0, m.start()) + 1, m.group(0)))
-        return raw
+        if self.terms.patterns:
+            for idx, chunk in enumerate(self.chunks):
+                source = chunk["terms"]
+                if source is False:
+                    continue
+                raw_text = source.read_bytes() if isinstance(source, Path) else self._text(idx)
+                for line, matched in self.terms.find(raw_text.decode("utf-8", "surrogateescape")):
+                    raw.append(("private-term", idx, line, matched))
+        # Line numbers of the whole text, not of a window.
+        return [(rule, idx, line + int(self.chunks[idx]["shift"]), text) for rule, idx, line, text in raw]
 
     def _pass(self, exe: str, cfg: Path, n: int) -> list[tuple[str, int, int, str]]:
         """One gitleaks pass: every chunk, then the chunks it skipped or did not prove it read
@@ -903,6 +1545,8 @@ class Scanner:
                 text = f.get("Secret") or f.get("Match") or ""
                 if not isinstance(text, str):
                     raise ValueError("matched text is not a string")
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", str(f["RuleID"])):
+                    raise ValueError("a rule id that is not a plain word")  # it is printed
                 # Line 1 is the leading newline every chunk starts with.
                 out.append((str(f["RuleID"]), int(m.group(1)), max(int(f.get("StartLine") or 0) - 1 - shift, 0), text))
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -921,7 +1565,7 @@ class Scanner:
             m = _LOG_LINE.match(ln.strip())
             if not m:
                 raise ScanError("gitleaks printed something that is not a log line (%s), so not everything "
-                                "was checked" % self._unexpected(ln))
+                                "was checked" % self._unexpected())
             level, message = m.groups()
             if message.startswith("skipping finding"):
                 continue  # an allowlisted match (trace level in 8.30.1): the file itself was read
@@ -934,21 +1578,25 @@ class Scanner:
                 skipped.add(int(name.group(1)))
             elif level in ("WRN", "ERR", "FTL", "PNC") and not re.fullmatch(r"leaks found: \d+", message.strip()):
                 raise ScanError("gitleaks reported a problem (%s), so not everything was checked"
-                                % self._unexpected(level + " " + message))
+                                % self._unexpected())
         return skipped
 
-    def _unexpected(self, line: str) -> str:
-        """An unexpected gitleaks log line for a block message: masked, cut short, and with the
-        installed and the tested gitleaks versions, since a new version's log is the usual cause."""
-        shown = self.terms.mask(line.strip())[:100]
+    def _unexpected(self) -> str:
+        """The block message's note on an unexpected gitleaks log line: a fixed text with the
+        installed and the tested gitleaks versions, since a new version's log is the usual cause.
+        It never quotes the line: gitleaks' log can repeat what it read, so an excerpt could
+        put scanned content in the log. The installed version is shown only as a plain version
+        number."""
         try:
             r = subprocess.run([shutil.which("gitleaks") or "gitleaks", "version"], stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=20)
-            have = r.stdout.strip() or "unknown"
+            have = r.stdout.strip()
         except (OSError, subprocess.SubprocessError):
+            have = ""
+        if not re.fullmatch(r"v?[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}", have):
             have = "unknown"
-        return "it printed %r; gitleaks %s is installed, the guard is tested with %s" % (
-            shown, have, TESTED_GITLEAKS)
+        return "the line is not shown; gitleaks %s is installed, the guard is tested with %s" % (
+            have, TESTED_GITLEAKS)
 
 
 # --------------------------------------------------------------------------- visibility
@@ -1311,7 +1959,8 @@ def add_new_objects(sc: Scanner, repo: str | None, positives: list[str], negativ
     data = "".join(p + "\n" for p in positives) + "".join("^" + n + "\n" for n in negatives)
     listing = _git(["rev-list", "--objects", "--stdin"], repo, data=data.encode()).stdout
     paths: dict[str, str] = {}
-    for line in listing.decode("utf-8", "surrogateescape").splitlines():
+    # Split on LF only: a path may hold CR or U+2028, which splitlines() would also break on.
+    for line in listing.decode("utf-8", "surrogateescape").split("\n"):
         sha, _, path = line.partition(" ")
         if sha:
             paths.setdefault(sha, path)
@@ -1327,7 +1976,7 @@ def add_new_objects(sc: Scanner, repo: str | None, positives: list[str], negativ
     names: set[str] = set()
     commit_roots: set[str] = set()
     for sha, kind, body in _cat_objects(repo, commits + tags):
-        _add_object_text(sc, "%s %s" % (kind if kind == "commit" else "tag object", sha[:12]), body)
+        _add_object_text(sc, "%s %s" % ("commit" if kind == "commit" else "tag object", _short(sha)), body)
         if kind == "commit":
             commit_roots.update(_headers(body, b"tree"))
     changed, links = _changed_files(repo, commits)
@@ -1349,10 +1998,12 @@ def add_new_objects(sc: Scanner, repo: str | None, positives: list[str], negativ
 
     for blob, _kind, body in _cat_objects(repo, sorted(files)):
         for path in files[blob]:
-            sc.add(path or "a blob pushed to a ref (%s)" % blob[:12], body, path=path or None, file=True)
+            if path:
+                sc.add("a file whose name is withheld", body, path=path, file=True)
+            else:
+                sc.add("a blob pushed to a ref (%s)" % _short(blob), body, file=True)
     if names:
-        ordered = sorted(names)
-        sc.add("file names", "\n".join(n.replace("\n", "\\n") for n in ordered) + "\n", names=ordered)
+        sc.add_names("file names", sorted(names))
 
 
 # --------------------------------------------------------------------------- pre-push
@@ -1472,7 +2123,8 @@ def cmd_pre_push(remote: str, url: str, refs: str) -> int:
     with Scanner(terms) as sc:
         add_new_objects(sc, None, positives, existing(None, sorted(set(tips + known))))
         # Destination ref names are published too; the report says only "ref".
-        sc.add("ref", "\n".join(n.replace("\n", "\\n") for n in ref_names) + "\n", lines=False)
+        # One per line of git's input, so a name holds no line break; never shown.
+        sc.add("ref", "\n".join(ref_names) + "\n", lines=False)
         found = sc.run()
     if not found:
         return 0
@@ -1510,15 +2162,53 @@ def ci_exclusions(repo: str, head: str) -> list[str]:
     return sorted({ln.strip() for ln in out.splitlines() if re.fullmatch(SHA_RE, ln.strip())})
 
 
-def cmd_ci(repo: str, base: str, head: str) -> int:
+def _pr_from_event(path: str) -> tuple[dict[str, object], str, str] | None:
+    """(pull_request object, title, body) of a pull_request event file; None for a private
+    repository (after its notice). A null title or body is empty; any other non-text value, or
+    no pull_request object, is a ScanError."""
+    data = load_event(path)
+    if not public_event(data):
+        return None
+    pr = data.get("pull_request")
+    if not isinstance(pr, dict):
+        raise ScanError("the event file holds no pull request")
+    title, body = (_field_text(pr, f, "the PR " + f) for f in ("title", "body"))
+    return pr, title, body
+
+
+def _pr_sha(pr: dict[str, object], side: str) -> str:
+    """The base or head sha a pull_request object names; ScanError when it names none."""
+    obj = pr.get(side)
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or not re.fullmatch(SHA_RE, sha):
+        raise ScanError(f"the event file names no {side} commit")
+    return sha
+
+
+def cmd_ci(repo: str, base: str | None, head: str | None, event_path: str | None = None) -> int:
+    """The PR title and body come from the event file when EVENT_PATH is given (and --base and
+    --head default to its shas), else from PR_TITLE and PR_BODY, which must both be set. Every
+    action, `edited` included, runs this whole scan: a text edit never replaces the commit
+    result with a text-only one."""
+    if event_path is not None:
+        found_pr = _pr_from_event(event_path)
+        if found_pr is None:
+            return 0
+        pr, title, body = found_pr
+        base = base if base is not None else _pr_sha(pr, "base")
+        head = head if head is not None else _pr_sha(pr, "head")
+    if base is None or head is None:
+        raise ScanError("--base and --head are needed when no --event-path is given")
     base, head = _commit(repo, "base", base), _commit(repo, "head", head)
     terms = load_terms()
     if terms.warning:
         print(terms.warning, file=sys.stderr)
-    missing = [k for k in ("PR_TITLE", "PR_BODY") if k not in os.environ]
-    if missing:
-        raise ScanError(" and ".join(missing) + " not set, so the PR text could not be checked")
-    texts = (("the PR title", os.environ["PR_TITLE"]), ("the PR body", os.environ["PR_BODY"]))
+    if event_path is None:
+        missing = [k for k in ("PR_TITLE", "PR_BODY") if k not in os.environ]
+        if missing:
+            raise ScanError(" and ".join(missing) + " not set, so the PR text could not be checked")
+        title, body = os.environ["PR_TITLE"], os.environ["PR_BODY"]
+    texts = (("the PR title", title), ("the PR body", body))
     with Scanner(terms) as sc:
         for place, text in texts:
             sc.add(place, text)
@@ -1532,21 +2222,306 @@ def cmd_ci(repo: str, base: str, head: str) -> int:
         print(f"::warning title=public-content guard::this pull request changes {listed}, the addresses "
               "that are public on purpose; check that every address in it is meant to be public", file=sys.stderr)
     if not found:
+        print("public-content guard: scanned this pull request: clean for the public rules (private terms are not checked in CI)")
         return 0
     _report("this pull request would publish content that must not be public", found)
-    print("Fix: edit the PR title or body, or amend or rebase the commits, then push again. "
+    print("Fix: edit the PR title or body, then delete the old version from the edit history; or amend or "
+          "rebase the commits, then push again. "
           "If this is a false positive, open an issue in the guard's repository (describe it; do not "
           "paste the matched text).", file=sys.stderr)
+    return 1
+
+
+# --------------------------------------------------------------------------- GitHub events
+
+# event name -> (the actions handled, the payload object, its (field, label) pairs). Only these
+# fields are scanned, and a report names them by these fixed labels, never by event text. The
+# actions are the ones templates/caller-public-content.yml triggers on. commit_comment has no
+# workflow trigger, so no caller sends it; its entry serves a scan of a saved event file.
+EVENT_MAP: dict[str, tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]]] = {
+    "pull_request": (("opened", "synchronize", "reopened", "edited", "ready_for_review"), "pull_request",
+                     (("title", "title"), ("body", "body"))),
+    "issues": (("opened", "edited"), "issue", (("title", "title"), ("body", "body"))),
+    "issue_comment": (("created", "edited"), "comment", (("body", "comment.body"),)),
+    "pull_request_review": (("submitted", "edited"), "review", (("body", "review.body"),)),
+    "pull_request_review_comment": (("created", "edited"), "comment", (("body", "comment.body"),)),
+    "commit_comment": (("created",), "comment", (("body", "comment.body"),)),
+    "discussion": (("created", "edited"), "discussion", (("title", "title"), ("body", "body"))),
+    "discussion_comment": (("created", "edited"), "comment", (("body", "comment.body"),)),
+    "release": (("published", "edited"), "release", (("name", "name"), ("body", "body"), ("tag_name", "tag_name"))),
+}
+# payload object key -> (its fixed label, the numeric field that names it). A place prints only
+# these labels and that integer, never html_url or any other payload string: any of them may
+# hold the matched text (a token in the repository path, a tag name in a release URL).
+EVENT_OBJECTS: dict[str, tuple[str, str]] = {
+    "pull_request": ("pull request", "number"),
+    "issue": ("issue", "number"),
+    "discussion": ("discussion", "number"),
+    "comment": ("comment", "id"),
+    "review": ("review", "id"),
+    "release": ("release", "id"),
+}
+NOT_HANDLED = ("is not handled by the public-content guard; nothing was scanned and nothing is known to have "
+               "leaked. Update the caller or the event map; check the text by hand meanwhile")
+
+
+def _word(value: object) -> str:
+    """An event or action name for a message: shown only when it is a plain lower-case word."""
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z_]{1,64}", value) else "(unreadable)"
+
+
+def load_event(path: str) -> dict[str, object]:
+    """The parsed event file; ScanError when it cannot be read or is not a JSON object."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ScanError(f"the event file could not be read ({type(exc).__name__})") from None
+    if not isinstance(data, dict):
+        raise ScanError("the event file does not hold an event")
+    return data
+
+
+def public_event(data: dict[str, object]) -> bool:
+    """True when the event's repository is public. A private one prints a notice and gives
+    False (the same rule as the CI step: CI scans public repositories only). An event without
+    a repository, or whose `private` is not true or false, is a ScanError: unknown visibility
+    never passes."""
+    repo = data.get("repository")
+    private = repo.get("private") if isinstance(repo, dict) else None
+    if not isinstance(private, bool):
+        raise ScanError("the event file names no repository, so its visibility is unknown")
+    if private:
+        print("public-content guard: not a public repository: nothing scanned", file=sys.stderr)
+        return False
+    return True
+
+
+def _field_text(obj: dict[str, object], field: str, label: str) -> str:
+    """A text field of an event object: absent or null is empty (GitHub sends null for an
+    empty body); any other non-text value is a ScanError."""
+    value = obj.get(field)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ScanError(f"the {label} field of the event is not text")
+    # JSON can hold lone UTF-16 surrogates (\ud800, \udc80). None of them stands for a byte:
+    # each is U+FFFD, the way it is shown, so two of them never spell another character.
+    return _SURROGATE.sub("\ufffd", value)
+
+
+def _object_label(key: str, obj: dict[str, object]) -> str:
+    """The fixed label and number of an event's object (see EVENT_OBJECTS): "issue #7",
+    "comment 1001", or "issue (no number)" when the payload holds no integer there."""
+    label, field = EVENT_OBJECTS[key]
+    n = obj.get(field)
+    if not isinstance(n, int) or isinstance(n, bool):
+        return "%s (no %s)" % (label, field)
+    return "%s #%d" % (label, n) if field == "number" else "%s %d" % (label, n)
+
+
+def cmd_event(name: str, path: str) -> int:
+    """Scan the fixed fields EVENT_MAP lists for event NAME in the event file at PATH. A place
+    is the event name, the object's fixed label and number (see EVENT_OBJECTS) and the field
+    label: nothing in it comes from the payload's text."""
+    data = load_event(path)
+    if not public_event(data):
+        return 0
+    spec = EVENT_MAP.get(name)
+    if spec is None:
+        raise NotHandled(f"event {_word(name)} {NOT_HANDLED}")
+    actions, key, fields = spec
+    action = data.get("action")
+    if action not in actions:
+        raise NotHandled(f"event {name} with action {_word(action)} {NOT_HANDLED}")
+    obj = data.get(key)
+    if not isinstance(obj, dict):
+        raise ScanError(f"the {name} event file holds no {key} object")
+    texts = [(label, _field_text(obj, field, label)) for field, label in fields]
+    terms = load_terms()
+    if terms.warning:
+        print(terms.warning, file=sys.stderr)
+    link = _object_label(key, obj)
+    with Scanner(terms) as sc:
+        for label, text in texts:
+            sc.add("%s %s %s" % (name, link, label), text)
+        found = sc.run()
+    for label, text in texts:
+        for w in speech_warnings("%s %s %s" % (name, link, label), text):
+            print(w, file=sys.stderr)
+    if not found:
+        print(f"public-content guard: scanned the {name} event: clean for the public rules (private terms are not checked in CI)")
+        return 0
+    _report(f"this {name} event published content that must not be public", found)
+    print("Fix: the text is already public. If you wrote it, delete it, or edit it and delete the old version "
+          "from the edit history; rotate any secret it holds. If someone else wrote it, do not edit or delete it: "
+          "report the rule, place and run link to the repository owner. Do not edit the guard or re-run this "
+          "check to get a green result. See docs/public-content-guard.md, \"When a text event goes red\".",
+          file=sys.stderr)
+    return 1
+
+
+# --------------------------------------------------------------------------- push events
+
+
+def _checkout_ref(ref: str) -> str:
+    """Where the workflow's checkout keeps a remote ref: a branch under refs/remotes/origin/, a
+    tag under refs/tags/, anything else under its own name."""
+    if ref.startswith("refs/heads/"):
+        return "refs/remotes/origin/" + ref[len("refs/heads/"):]
+    return ref
+
+
+def _deleted(repo: str, ref: str) -> bool:
+    """True when REF is gone both from the checkout (as fetched after the push) and from the
+    remote (`git ls-remote origin`). A remote that cannot be asked is a ScanError."""
+    r = _git(["rev-parse", "--verify", "--quiet", "--end-of-options", _checkout_ref(ref)], repo, check=False)
+    if r.returncode == 0:
+        return False
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    ls = _git(["ls-remote", "origin", ref], repo, check=False, timeout=60, env=env)
+    if ls.returncode != 0:
+        raise ScanError("the remote could not be asked whether the ref was deleted")
+    return not any(ln.partition("\t")[2] == ref for ln in ls.stdout.decode("utf-8", "surrogateescape").splitlines())
+
+
+def _tag_chain(repo: str, sha: str, types: dict[str, str]) -> list[tuple[str, bytes]]:
+    """(sha, body) of each tag object from SHA down to the object it finally tags."""
+    out: list[tuple[str, bytes]] = []
+    while types.get(sha) == "tag" and len(out) < 16:
+        body = _git(["cat-file", "tag", sha], repo).stdout
+        out.append((sha, body))
+        target = _headers(body, b"object")
+        if not target or not re.fullmatch(SHA_RE, target[0]):
+            raise ScanError("a tag object names no object")
+        sha = target[0]
+        types.update(_types(repo, [sha]))
+    return out
+
+
+def _push_inputs(path: str, before: str | None, after: str | None, ref: str | None,
+                 default_branch: str | None) -> tuple[str | None, str | None, str | None, str | None] | None:
+    """before, after, ref and the default branch from a push event file, each flag given
+    winning over the file; None for a private repository (after its notice)."""
+    data = load_event(path)
+    if not public_event(data):
+        return None
+    repo = data.get("repository")
+    vals = []
+    for flag, key in ((before, "before"), (after, "after"), (ref, "ref")):
+        v = data.get(key)
+        vals.append(flag if flag is not None else (v if isinstance(v, str) else None))
+    branch = repo.get("default_branch") if isinstance(repo, dict) else None
+    vals.append(default_branch if default_branch is not None else (branch if isinstance(branch, str) else None))
+    return vals[0], vals[1], vals[2], vals[3]
+
+
+def cmd_push(repo: str, before: str | None, after: str | None, ref: str | None, default_tip: str | None,
+             default_branch: str | None, event_path: str | None) -> int:
+    """What a push that already happened introduced, judged by the history that existed before
+    it (never "every other current ref": two refs pushed at once to one new commit would hide
+    each other):
+    - after all zeros: a delete; it passes only when the ref is gone from the checkout and the
+      remote;
+    - before present: the commits in `after ^before`;
+    - before all zeros and the ref is the default branch (--default-branch, or the event's
+      repository.default_branch): all of after's history, whatever the checkout's default tip
+      is now (a later push may already have moved it past after, hiding after's commits);
+    - before all zeros (any other new ref), or before not in the checkout (a force push whose
+      old tip could not be fetched; said in a note): the commits in `after ^default-tip`, or
+      all of after's history when after is the default tip of the default branch (a first push);
+    - always: the ref name, and for a tag every tag object it points through.
+    Refused (ScanError): a shallow repository; a missing or malformed input; an after or
+    default-tip object that is not in the checkout."""
+    if event_path is not None:
+        got = _push_inputs(event_path, before, after, ref, default_branch)
+        if got is None:
+            return 0
+        before, after, ref, default_branch = got
+    for flag, v in (("before", before), ("after", after)):
+        if not isinstance(v, str) or not re.fullmatch(SHA_RE, v):
+            raise ScanError(f"--{flag} is not an object name")
+    assert before is not None and after is not None
+    if not ref or not ref.startswith("refs/") or re.search(r"[\s\x00-\x1f\x7f]", ref):
+        raise ScanError("--ref is not a full ref name")
+    if default_branch is not None and (not default_branch or default_branch.startswith("-")
+                                       or re.search(r"[\s\x00-\x1f\x7f]", default_branch)):
+        raise ScanError("--default-branch is not a branch name")
+    if default_tip is None and default_branch is not None:
+        r = _git(["rev-parse", "--verify", "--quiet", "--end-of-options",
+                  "refs/remotes/origin/" + default_branch + "^{commit}"], repo, check=False)
+        found_tip = r.stdout.decode().strip()
+        default_tip = found_tip if r.returncode == 0 and re.fullmatch(SHA_RE, found_tip) else None
+    if default_tip is not None and not re.fullmatch(SHA_RE, default_tip):
+        raise ScanError("--default-tip is not an object name")
+    shallow = _git(["rev-parse", "--is-shallow-repository"], repo).stdout.decode().strip()
+    if shallow != "false":
+        raise ScanError("the checkout is a shallow repository, so the commits a push introduced cannot be "
+                        "told apart from older ones")
+    if _zero(after):
+        if not _deleted(repo, ref):
+            raise ScanError("after is all zeros but the ref still exists, so this is not a delete")
+        print("public-content guard: ref deleted: nothing to scan", file=sys.stderr)
+        return 0
+    types = _types(repo, [s for s in (before, after, default_tip) if s and not _zero(s)])
+    if after not in types:
+        raise ScanError("the pushed object is not in this checkout")
+    if default_tip is not None and default_tip not in types:
+        raise ScanError("the default branch's tip is not in this checkout")
+    if not _zero(before) and before in types:
+        negatives = [before]
+    elif _zero(before) and default_branch is not None and ref == "refs/heads/" + default_branch:
+        negatives = []  # a new default branch: everything in it is published by this push
+    else:
+        if default_tip is None:
+            raise ScanError("the ref's previous object is not in this checkout" if not _zero(before)
+                            else "a new ref needs --default-tip (or --default-branch)")
+        if not _zero(before):
+            print("public-content guard: note: the ref's previous commit is not in the checkout (a force "
+                  "push whose old commits could not be fetched), so this push was checked as a new ref: "
+                  "against the default branch, or its whole history", file=sys.stderr)
+        first = after == default_tip and (default_branch is None or ref == "refs/heads/" + default_branch)
+        negatives = [] if first else [default_tip]
+    terms = load_terms()
+    if terms.warning:
+        print(terms.warning, file=sys.stderr)
+    with Scanner(terms) as sc:
+        add_new_objects(sc, repo, [after], negatives)
+        if ref.startswith("refs/tags/"):
+            for sha, body in _tag_chain(repo, after, types):
+                _add_object_text(sc, "tag object %s" % _short(sha), body)
+        sc.add("the ref name", ref + "\n", lines=False)
+        found = sc.run()
+    if not found:
+        print("public-content guard: scanned this push: clean for the public rules (private terms are not checked in CI)")
+        return 0
+    _report("this push published content that must not be public", found)
+    print("Fix: the content is already public. Rewrite or delete the commits, tag or branch, rotate any "
+          "secret, and treat the content as published. Do not edit the guard or re-run this check to get "
+          "a green result. See docs/public-content-guard.md, \"When a push goes red\".", file=sys.stderr)
     return 1
 
 
 # --------------------------------------------------------------------------- CLI
 
 
+def _annotation(text: str) -> str:
+    """TEXT escaped as a workflow command's message (% and line breaks)."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def _report(what: str, found: list[str]) -> None:
+    """Each finding ("RULE at PLACE", the place built from fixed labels, numbers and checked
+    names, never the match) on stderr; under GitHub Actions also one ::error line per finding
+    on stdout, so the run's summary names the rule and place, not only an exit code."""
     print(f"public-content guard: {what} (matched text hidden):", file=sys.stderr)
     for item in found:
         print("  - " + item, file=sys.stderr)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        for item in found:
+            # "RULE at PLACE" -> "RULE in PLACE": a rule id holds no space, so the first " at "
+            # is the separator.
+            print("::error title=public-content guard::" + _annotation(item.replace(" at ", " in ", 1)), flush=True)
 
 
 def cmd_text(label: str, data: bytes) -> int:
@@ -1554,10 +2529,11 @@ def cmd_text(label: str, data: bytes) -> int:
     if terms.warning:
         print(terms.warning, file=sys.stderr)
     with Scanner(terms) as sc:
-        sc.add(label, data, file=True)
+        sc.add("the input (label withheld)", data, path=label, file=True)
         found = sc.run()
+        shown = sc.render(label, "%s", "the input (label withheld)")
     # A binary's printable runs are not someone's words: no warnings from them.
-    for w in speech_warnings(label, data) if is_text(data) else []:
+    for w in speech_warnings(shown, data) if is_text(data) else []:
         print(w, file=sys.stderr)
     if not found:
         return 0
@@ -1577,15 +2553,35 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("url", nargs="?", default="")
     c = sub.add_parser("ci", help="scan a pull request")
     c.add_argument("--repo", default=".")
-    c.add_argument("--base", required=True)
-    c.add_argument("--head", required=True)
+    c.add_argument("--base")
+    c.add_argument("--head")
+    c.add_argument("--event-path")
+    e = sub.add_parser("event", help="scan the text fields of one GitHub event")
+    e.add_argument("--name", required=True)
+    e.add_argument("--path", required=True)
+    u = sub.add_parser("push", help="scan what a push to GitHub introduced")
+    u.add_argument("--repo", default=".")
+    u.add_argument("--before")
+    u.add_argument("--after")
+    u.add_argument("--ref")
+    u.add_argument("--default-tip")
+    u.add_argument("--default-branch")
+    u.add_argument("--event-path")
     args = ap.parse_args(argv)
     try:
         if args.mode == "text":
             return cmd_text(args.label, sys.stdin.buffer.read())
         if args.mode == "pre-push":
             return cmd_pre_push(args.remote, args.url, sys.stdin.read())
-        return cmd_ci(args.repo, args.base, args.head)
+        if args.mode == "event":
+            return cmd_event(args.name, args.path)
+        if args.mode == "push":
+            return cmd_push(args.repo, args.before, args.after, args.ref, args.default_tip,
+                            args.default_branch, args.event_path)
+        return cmd_ci(args.repo, args.base, args.head, args.event_path)
+    except NotHandled as exc:
+        print(f"public-content guard: {exc}.", file=sys.stderr)
+        return 2
     except ScanError as exc:
         print(f"public-content guard: could not check this ({exc}); blocked.", file=sys.stderr)
         if isinstance(exc, UnreadableFile):
@@ -1600,5 +2596,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def run(argv: list[str] | None = None) -> int:
+    """main, with its output flushed, on every way out: a return, or the SystemExit of the
+    argument parser (--help, a usage error). A reader that closed the output early
+    (BrokenPipeError, here or caught inside main) is an error, 2: what could not be written was
+    not reported. The output is then pointed at the null device, so Python's own flush at exit
+    cannot fail again and exit 120."""
+    try:
+        try:
+            rc = main(argv)
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 2)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return rc
+    except BrokenPipeError:
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, sys.stdout.fileno())
+        os.dup2(null, sys.stderr.fileno())
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())

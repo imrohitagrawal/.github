@@ -10,7 +10,7 @@ Global GitHub defaults, reusable CI gates, and Codex review guidance for `@imroh
 - **Reusable GitHub Actions workflows** — see `.github/workflows/`.
 - **Templates** that every target repo can copy: `AGENTS.md` (Codex review guidance), `CODEOWNERS`, dependabot config, language Makefiles.
 - **Documentation** for onboarding, branch protection, and Codex review setup.
-- **Public-content guard** — a git pre-push hook and a CI step that stop secrets, home-folder paths, email addresses, transcript names, agent ids and private terms (pushes only) from being pushed to, or proposed in a pull request on, a public repository. Text already public is no reason to pass. `gh` and GitHub MCP calls are not covered yet. See [`docs/public-content-guard.md`](docs/public-content-guard.md).
+- **Public-content guard** — a git pre-push hook and a CI step that stop secrets, home-folder paths, email addresses, transcript names, agent ids and private terms (pushes only) from being pushed to, or proposed in a pull request on, a public repository; and a reusable workflow that raises an alarm, after publication, on pushes and on the text of issues, comments, reviews, discussions and releases (whichever client posted them). Text already public is no reason to pass. See [`docs/public-content-guard.md`](docs/public-content-guard.md).
 
 ## What this repository does NOT do
 
@@ -67,6 +67,7 @@ Two things shrink the manual part considerably (WP10):
     show-and-tell.yml
   workflows/
     reusable-pr-quality.yml      # The reusable quality-gate workflow
+    reusable-public-content.yml  # The reusable public-content workflow (pushes and text events)
     self-test.yml                # WP1: exercises reusable-pr-quality.yml against real fixtures
     self-lint.yml                # WP1: actionlint/shellcheck/markdownlint on this repo's own content
   self-test-fixtures/            # WP1: real fixture scenarios self-test.yml calls the reusable workflow against
@@ -87,6 +88,7 @@ templates/
   AGENTS.md                      # Codex review guidance
   CODEOWNERS
   caller-pr-quality.yml          # Caller workflow for each target repo
+  caller-public-content.yml      # Public-content caller for each public repo
   Makefile.python
   Makefile.node
   dependabot.yml
