@@ -227,9 +227,10 @@ class Terms:
     """The private terms, and how to find and mask them: one fold, one word test, one pattern per
     term, used by find and mask alike.
 
-    Strip. Invisible characters (Unicode's Default_Ignorable_Code_Point, listed in _IGNORABLE as
-    escapes; not all of category Cf: U+0600 and the other visible format characters stay) are
-    removed from a line, and from each term, first. Every offset maps back to the original line,
+    Strip. Invisible characters (every character of category Cf, and every other character of
+    Unicode's Default_Ignorable_Code_Point, listed in _DEFAULT_IGNORABLE as escapes; together
+    _IGNORABLE) are removed from a line, and from each term, first (fail closed: a format
+    character inside a term never hides it). Every offset maps back to the original line,
     so find and mask report and cover the text as written. A line gives the same result with and
     without them.
     Units. The stripped line is split into units: a character that is not attached, with every
@@ -258,18 +259,32 @@ class Terms:
     base. The test reads the original units, never folded ones (a symbol can fold to letters).
     Lines are split on \n only; no fold of another character holds a \n."""
 
-    # Default_Ignorable_Code_Point (Unicode 16.0; the same in 15.0), as escapes.
-    _IGNORABLE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
-                            "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
-                            "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
+    # Default_Ignorable_Code_Point (Unicode 16.0; the same in 15.0), as escapes. Category Cf is
+    # added from unicodedata when the first Terms is built (_invisible).
+    _DEFAULT_IGNORABLE = ("\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
+                          "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+                          "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff")
+    _IGNORABLE: re.Pattern[str]
     _SEPARATORS = re.compile("[-_. ]+")
     _INVISIBLE, _ATTACHED, _BASE = 0, 1, 2  # what a character is to the unit split (_kind)
     # Folded units are cached by their text. A line of many distinct units would grow the cache
     # without end, so it is emptied when it reaches this many entries (a miss only costs a fold).
     SEGMENT_CACHE_LIMIT = 4096
 
+    @classmethod
+    def _invisible(cls) -> re.Pattern[str]:
+        """The invisible characters as one regex class: _DEFAULT_IGNORABLE and every code point
+        of category Cf in this Python's Unicode data (built once, about 0.1 s)."""
+        got = cls.__dict__.get("_IGNORABLE")
+        if got is None:
+            cf = "".join(chr(cp) for cp in range(0x110000) if unicodedata.category(chr(cp)) == "Cf")
+            got = re.compile("[" + cls._DEFAULT_IGNORABLE + re.escape(cf) + "]")
+            cls._IGNORABLE = got
+        return got
+
     def __init__(self, terms: list[str], warning: str | None) -> None:
         self.warning = warning
+        self._IGNORABLE = self._invisible()
         self._kinds: dict[str, int] = {}
         self._segments: dict[str, str] = {}
         self._letters: dict[str, int] = {}
