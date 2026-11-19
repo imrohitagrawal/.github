@@ -137,7 +137,9 @@ Until one of these is in place, review every pull request that edits a workflow.
     letter or digit (`A` to `Z`, `a` to `z`, `0` to `9`, with or without marks on it) is
     written directly before the hit, or directly after it and the attached characters that end
     it. Each neighbouring character is read in its composed form (NFC), so an `e` followed by
-    a combining acute reads as an e with an acute, which is not ASCII. Everything else is a
+    a combining acute reads as an e with an acute, which is not ASCII. So an ASCII letter with
+    an accent is a break when the two compose into one letter (`z` and an acute: a z with an
+    acute), and part of the word when they do not (`x` and an acute). Everything else is a
     break, so a term next to it is reported. That includes a combining accent after the term,
     accented, Greek and Cyrillic letters in either storage form, letters of scripts without
     case (Han, Kana, Thai, Arabic and others), other digits, punctuation and symbols. `_`
@@ -271,8 +273,8 @@ that holds one (a `curl` command with a blank line in it, a PGP key block). So:
   before, moved back by up to 2 000 bytes to a line start or to just after a character that is
   not a letter or digit, so windows overlap by at least 14 000 bytes. A match of up to that
   length is wholly inside some window. A longer match that crosses a window edge can be
-  missed. Key blocks and long runs of encoded text are the exception: they are read whole,
-  or, if too long, block the check (below). Where a window edge falls inside a run of letters and digits with no break within
+  missed. Key blocks and runs of encoded text of up to 90 000 bytes are the exception: they
+  are read whole (below), and a key block longer than that blocks the check. Where a window edge falls inside a run of letters and digits with no break within
   2 000 bytes, a rule that needs a word boundary can match there although it would not match
   in the whole text (this can only add a finding). Likewise, a window can start just after a
   character that is not a letter or digit (for example the `//` of a URL), so a rule that
@@ -291,22 +293,22 @@ that holds one (a `curl` command with a blank line in it, a PGP key block). So:
     gitleaks' own pattern does; a BEGIN marker with none of these after any of its headers is
     not a key. The Kelvin sign and the long s count as k and s, as they do in gitleaks.
   - Each run of encoded text longer than 12 000 bytes (the 16 000-byte overlap, less twice the
-    2 000 bytes an edge may move back), in a shape gitleaks 8.30.1 decodes: base64 (letters,
-    digits, `+`, `/`, `-` and `_`, then up to two `=`), hex, percent escapes (from the first
-    `%XX` of a line to its last one) and Unicode escapes (`\uXXXX` with one or two
-    backslashes, or `U+XXXX` followed by a space).
+    2 000 bytes an edge may move back) and at most 90 000 bytes, in a shape gitleaks 8.30.1
+    decodes: base64 (letters, digits, `+`, `/`, `-` and `_`, then up to two `=`), hex, percent
+    escapes (from the first `%XX` of a line to its last one) and Unicode escapes (`\uXXXX` with
+    one or two backslashes, or `U+XXXX` followed by a space).
 
-  Spans that overlap or touch (one ends where the next starts) are merged into one span. The
-  merged spans are read in groups, in order. A group starts at the start of a merged span and
-  takes each next merged span while the group, from its first span's start to its last span's
-  end, fits in 90 000 bytes. The next span starts a new group, and each group is read as one
-  piece. A merged span longer than 90 000 bytes blocks the check and names the place (the
-  file, commit or message), saying "a private key block (or text shaped like one) crosses a
-  scan window", with the fix: remove the key from the commits. The text of the pieces of one
-  text adds up to at most 3.25 times its size plus 180 000 bytes (the guard's own size check:
-  the windows add up to at most 1.25 times the size plus 90 000 bytes, and the groups, which
-  never overlap, to at most the size). Each piece's file adds 37 bytes to that: a line break
-  before the text, and a line break and a 35-byte proof-of-reading line after it.
+  Spans that overlap are merged into one span; spans that only touch (one ends where the next
+  starts) stay apart. The merged spans are read in groups, in order. A group starts at the start
+  of a merged span and takes each next merged span while the group, from its first span's start
+  to its last span's end, fits in 90 000 bytes. The next span starts a new group, and each group
+  is read as one piece. A key block longer than 90 000 bytes blocks the check and names the
+  place (the file, commit or message), saying "a private key block (or text shaped like one)
+  crosses a scan window", with the fix: remove the key from the commits. The text of the pieces
+  of one text adds up to at most 3.25 times its size plus 180 000 bytes (the guard's own size
+  check: the windows add up to at most 1.25 times the size plus 90 000 bytes, and the groups,
+  which never overlap, to at most the size). Each piece's file adds 37 bytes to that: a line
+  break before the text, and a line break and a 35-byte proof-of-reading line after it.
 - Private terms are matched on the whole text, never on windows, so a window edge never
   changes whether a term is inside a longer word.
 

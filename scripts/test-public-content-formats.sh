@@ -32,9 +32,10 @@
 #     that is not a letter or digit when one is near, each with its own canary. Key blocks (a
 #     shorter header retried when the longest has no END marker, as Go does) and runs of
 #     encoded text over 12 000 bytes (OVERLAP - 2 * EDGE, in the shapes gitleaks 8.30.1
-#     decodes) are also read whole, also where a window holds them: spans that overlap or touch
-#     are merged, then packed in order into groups of at most 90 000 bytes, each group starting
-#     at a merged span's start. A merged span over 90 000 bytes -> 2, naming the place.
+#     decodes, up to 90 000 bytes) are also read whole, also where a window holds them: spans
+#     that overlap are merged (spans that only touch are not), then packed in order into groups
+#     of at most 90 000 bytes, each group starting at a merged span's start. A key block over
+#     90 000 bytes -> 2, naming the place; a longer encoded run is read in the windows (never 2).
 #     Private terms are matched on the whole text. Findings keep the text's line numbers.
 # (b) A file that starts like a zip, tar, gzip, bzip2 or xz is read completely, or exit 2.
 #     zip: one end record, ending exactly at the end of the file; entries back to back from byte
@@ -1644,10 +1645,31 @@ for label, run in (("base64", b"QUJD" * 3000 + b"QQ=="), ("hex", b"0a1B" * 3001)
     report("D6: a %d-byte %s run from byte 71 999 lies inside a chunk of its own" % (len(run), label),
            len(run) > 12000 and inside((at, at + len(run)), extra) and not too_long,
            "extra chunks %s, too long %s" % (extra[:4], too_long))
-# D6 partner. RED WHEN: an encoded run longer than WINDOW is read in windows instead of blocking.
+# D6 partner (O8). RED WHEN: an encoded run longer than WINDOW sets the too-long flag (it must
+# never block: it is read in the ordinary windows), or its windows stop covering the text.
+# (Changed after the owner's answer O8: this case expected the flag at ef72028.)
 text = words_text(50000, b"QUJD" * 22501)
-report("D6 partner: a 90 004-byte base64 run sets the too-long flag", extra_chunks(text)[2] is True,
+spans, extra, too_long = extra_chunks(text)
+wins = scan._windows(text)
+report("D6 partner: a 90 004-byte base64 run does not set the too-long flag and is read in the windows",
+       too_long is False and wins[0][0] == 0 and wins[-1][1] == len(text) and all(w in spans for w in wins),
+       "too long %s, %d windows" % (too_long, len(wins)))
+# D6 partner. RED WHEN: a raw key block longer than WINDOW no longer sets the flag (it still blocks).
+big = (dash + "BEGIN PRIVATE KEY" + dash + "\n").encode() + (b"QUJD" * 16 + b"\n") * 1400 \
+    + (dash + "END PRIVATE KEY" + dash).encode()
+text = words_text(50000, big)
+report("D6 partner: a %d-byte raw key block sets the too-long flag" % len(big), len(big) > W and extra_chunks(text)[2] is True,
        "too long %s" % extra_chunks(text)[2])
+# E1. RED WHEN: spans that only touch (one ends where the next starts) are merged: two
+# back-to-back key blocks of about 48 000 bytes then form one span over WINDOW and the text blocks.
+half = (dash + "BEGIN PRIVATE KEY" + dash + "\n").encode() + (b"QUJD" * 16 + b"\n") * 735 \
+    + (dash + "END PRIVATE KEY" + dash).encode()
+text = words_text(50000, half + half)
+spans, extra, too_long = extra_chunks(text)
+k0 = (50000, 50000 + len(half))
+k1 = (k0[1], k0[1] + len(half))
+report("E1: two touching key blocks of %d bytes are read whole, apart, with no flag" % len(half),
+       too_long is False and inside(k0, extra) and inside(k1, extra), "too long %s, extra %s" % (too_long, extra[:4]))
 EOF
 # py_verdicts PY ARGS...: run a Python check and turn its `ok NAME` / `bad NAME - DETAIL` lines into verdicts.
 py_verdicts() {
@@ -1795,6 +1817,11 @@ for shape in base64 hex percent; do
   # D6 partner. RED WHEN: the encoded key is no longer found where a window holds it whole.
   expect_rc "D6 partner: the $shape-encoded key from byte 99 999 is found" 1 "private-key at demo:$eline" @scanned
 done
+"$REAL_PY" -I -c 'import sys; sys.stdout.write("some words of text\n" * 2632 + "QUJD" * 22501 + "\n" + "more words of text\n" * 5000)' >"$WORK/longrun.txt"
+_text "$WORK/longrun.txt"
+# D6 partner (O8). RED WHEN: an encoded run longer than 90 000 bytes blocks the check (exit 2)
+# instead of being read in the ordinary windows.
+expect_rc "D6 partner: a clean text holding a 90 004-byte base64 run is not blocked" 0 @scanned
 
 echo "== (l) private terms: one fold, one word test"
 TERMPY="$WORK/terms.py"
