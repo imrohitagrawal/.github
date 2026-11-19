@@ -34,8 +34,10 @@
 #     encoded text over 12 000 bytes (OVERLAP - 2 * EDGE, in the shapes gitleaks 8.30.1
 #     decodes, up to 90 000 bytes) are also read whole, also where a window holds them: spans
 #     that overlap are merged (spans that only touch are not), then packed in order into groups
-#     of at most 90 000 bytes, each group starting at a merged span's start. A key block over
-#     90 000 bytes -> 2, naming the place; a longer encoded run is read in the windows (never 2).
+#     of at most 90 000 bytes, each group starting at a merged span's start. In a merged span
+#     over 90 000 bytes, its key blocks are grouped the same way and each of its encoded runs is
+#     a piece of its own (such pieces may overlap). A key block over 90 000 bytes -> 2, naming
+#     the place; a longer encoded run is read in the windows (never 2).
 #     Private terms are matched on the whole text. Findings keep the text's line numbers.
 # (b) A file that starts like a zip, tar, gzip, bzip2 or xz is read completely, or exit 2.
 #     zip: one end record, ending exactly at the end of the file; entries back to back from byte
@@ -1316,7 +1318,7 @@ elif kind == "swallow":  # swallow AT: key A, its END line holding two BEGIN mar
     pre = b"!" * (at - 1) + b"\n" + key_a + b" "
     data = pre + begin(label=b"RSA ") + b"\n" + body(25000) + b"\n" + end() + b"\n" + b"!" * 100000
     line = pre.count(b"\n") + 1
-elif kind in ("decoy", "header", "header-alone"):  # R1 / R2 texts; prints the line of the last key
+elif kind in ("decoy", "header", "header-alone"):  # texts with unpaired BEGIN lines; prints the line of the last key
     def filler(n):  # numbered lines of ordinary text, exactly N bytes, the last one ending in a line break
         out, i, size = [], 0, 0
         while size < n:
@@ -1324,7 +1326,7 @@ elif kind in ("decoy", "header", "header-alone"):  # R1 / R2 texts; prints the l
             size += len(out[-1])
             i += 1
         return b"".join(out)[:n - 1] + b"\n"
-    # R2's block: its longest header ends at a second label, and only the shorter header has an
+    # The shorter-header block: its longest header ends at a second label, and only the shorter header has an
     # END marker 64 or more characters after it.
     short = begin() + b"Q" * 20 + b" PRIVATE " + b"KEY" + dash + b"x" * 40 + b"KEY" + dash
     word = b"fal" + b"se"
@@ -1338,7 +1340,7 @@ elif kind in ("decoy", "header", "header-alone"):  # R1 / R2 texts; prints the l
         raw = bytes(rnd.choice(al) for _ in range(20000))
         real = (begin(label=b"RSA ") + b"\n" + b"\n".join(raw[i:i + 64] for i in range(0, len(raw), 64)) + b"\n"
                 + dash + b"END RSA PRIVATE " + b"KEY" + dash)
-    elif kind == "header":  # R2's block from byte 89 950, so the first window's edge cuts it
+    elif kind == "header":  # the shorter-header block from byte 89 950, so the first window's edge cuts it
         head += filler(89950 - len(head))
         real = short
     else:
@@ -1347,6 +1349,13 @@ elif kind in ("decoy", "header", "header-alone"):  # R1 / R2 texts; prints the l
     data = head + real + b"\n"
     if kind != "header-alone":
         data += filler(200000 - len(data))
+elif kind == "overlap":  # overlap SPACES: a percent run whose last escape starts a base64 run holding a key
+    rnd = random.Random(3)
+    raw = bytes(rnd.choice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") for _ in range(3000))
+    pem = (begin(label=b"RSA ") + b"\n" + b"\n".join(raw[i:i + 64] for i in range(0, len(raw), 64)) + b"\n"
+           + dash + b"END RSA PRIVATE " + b"KEY" + dash + b"\n")
+    block = b"aCAg" + base64.b64encode(b"x" * 30000 + pem + b"x" * 30000)
+    data = b"%41" + b" " * int(args[0]) + b"%" + block + b"\n"
 elif kind == "encoded":  # encoded AT SHAPE: a 15 KB key written as SHAPE on one line from byte AT of 200 KB
     at, shape = int(args[0]), args[1]
     rnd = random.Random(3)
@@ -1381,7 +1390,7 @@ gl_finds() { gl_rules - <"$1" | grep -q -x -F "$2"; }
 # T1, T8 and T15 call the planner directly (pure Python, no gitleaks).
 KEYPY="$WORK/keyplan.py"
 cat >"$KEYPY" <<'EOF'
-import random, re, sys
+import base64, random, re, sys
 sys.path.insert(0, sys.argv[1])
 import scan
 W, OV, E = scan.WINDOW, scan.OVERLAP, scan.EDGE
@@ -1406,7 +1415,7 @@ texts = (("32 lines of back-to-back blocks", b"\n".join([line] * 32)),
          ("one 2.8 MB line of back-to-back blocks", blk * (2800000 // len(blk))))
 # T1. RED WHEN: a key block starts at its line start (rfind: the spans then overlap and the
 # chunk bytes grow far past 2.25 times the text).
-# (Changed in R11: every key block now gets a chunk, also one a window holds; the old wording
+# (Changed: every key block now gets a chunk, also one a window holds; the old wording
 # named that skip as the cause.)
 for label, text in texts:
     written = []
@@ -1435,15 +1444,18 @@ for label, text in texts:
     report(name, good, "%d spans, %d key spans, %d bytes, too long %s" % (
         len(spans), len(keys), sum(e - s for s, e in spans), too_long))
 
-# T8. RED WHEN: the planner's size check is removed, or its bound is not 13n/4 + 2 * WINDOW
-# (C1): nine full windows over 200 000 bytes (810 000) must pass it, ten (900 000) must not.
-# (Changed in R11: overlapping key spans are now merged into one span, so the old fixture, 100
+# T8. RED WHEN: the planner's size check is removed, or its bound is not 25n/4 + WINDOW (the
+# derived bound below, now that encoded runs inside a long merged span are read as pieces of
+# their own): fourteen full windows over 200 000 bytes (1 260 000) must pass it, fifteen
+# (1 350 000) must not.
+# (Changed: the bound was 13n/4 + 2 * WINDOW before such runs got pieces of their own.)
+# (Changed: overlapping key spans are now merged into one span, so the old fixture, 100
 # copies of one span, no longer reaches the check; the windows are patched instead.)
 text = b"!" * 200000
 n = len(text)
 real_w = scan._windows
-for k, want_error in ((13 * n // 4 + 2 * W) // W + 1, True), ((13 * n // 4 + 2 * W) // W, False):
-    name = "T8: the planner %s %d full windows over %d bytes (bound 13n/4 + 2W)" % (
+for k, want_error in ((25 * n // 4 + W) // W + 1, True), ((25 * n // 4 + W) // W, False):
+    name = "T8: the planner %s %d full windows over %d bytes (bound 25n/4 + W)" % (
         "refuses" if want_error else "accepts", k, n)
     try:
         scan._windows = lambda t, k=k: [(0, W)] * k
@@ -1455,7 +1467,7 @@ for k, want_error in ((13 * n // 4 + 2 * W) // W + 1, True), ((13 * n // 4 + 2 *
         report(name, False, "no planner (%s)" % exc)
     finally:
         scan._windows = real_w
-# T8b (C1). RED WHEN: overlapping spans are each chunked instead of merged into their union (a
+# T8b. RED WHEN: overlapping spans are each chunked instead of merged into their union (a
 # span is then counted once per copy and the plan fails its own size check).
 real = scan._key_spans
 try:
@@ -1496,12 +1508,12 @@ pieces = [p.encode("utf-8", "surrogateescape") for p in (
     dash + "begin rsa private key" + dash, dash + "end private key" + dash, "key" + dash, "key block" + dash,
     dash + "Begin Private Key Block" + dash)] + [b"\xe2\x84"]
 # T15. RED WHEN: _windows advances by more than WINDOW - OVERLAP + EDGE, the chunks beside the
-# windows overlap, body_end counts bytes, a key match is left to the windows alone (I-K2: every
-# match of at most WINDOW bytes lies inside a chunk of its own group), or a chunk is cut inside a
-# match (I-K3: the rule on each such chunk finds exactly the whole text's matches inside it).
-# (Changed in R11: the clause "no window holds a key span whole" is removed; every key span now
+# windows overlap, body_end counts bytes, a key match is left to the windows alone (every
+# match of at most WINDOW bytes must lie inside a chunk of its own group), or a chunk is cut inside a
+# match (the rule on each such chunk finds exactly the whole text's matches inside it).
+# (Changed: the clause "no window holds a key span whole" is removed; every key span now
 # has a chunk, so that clause fails on the fixed planner. A text whose merged spans are too long
-# is left out of I-K2 and I-K3 and counted.)
+# is left out of these two checks and counted.)
 fails = []
 too_long_texts = 0
 for it in range(300):
@@ -1527,8 +1539,11 @@ for it in range(300):
     # WINDOW - OVERLAP - EDGE after the one before and at least OVERLAP - EDGE before it ends.
     wins_ok = (wins[0][0] == 0 and wins[-1][1] == n and all(e - s <= W for s, e in wins)
           and all(b[0] - a[0] >= W - OV - E and b[0] <= a[1] - (OV - E) for a, b in zip(wins, wins[1:])))
-    # The chunks beside the windows never overlap and are at most WINDOW bytes.
-    keys_ok = all(a[1] <= b[0] for a, b in zip(keys, keys[1:])) and all(e - s <= W for s, e in keys)
+    # The chunks beside the windows are at most WINDOW bytes, and all chunks keep the derived
+    # bounds (25n/4 + WINDOW bytes; see the derivation below). (Changed: these chunks had to be
+    # disjoint; encoded runs inside a long merged span are now pieces of their own and may overlap.)
+    keys_ok = (all(e - s <= W for s, e in keys) and sum(e - s for s, e in spans) <= 25 * n // 4 + W
+               and len(spans) <= n / 72000 + 2 * n / W + n / 3000 + 3)
     found = oracle(text)
     # A flagged text blocks whole, so a match inside a merged span over WINDOW needs no chunk.
     missed = [] if too_long else [m for m in found if m[1] - m[0] <= W and not any(s <= m[0] and m[1] <= e for s, e in spans)]
@@ -1550,10 +1565,10 @@ report("T15: 300 fuzz texts: every oracle match lies in a chunk of its own group
        "keep their bounds", not fails and too_long_texts <= 50,
        "; ".join(fails[:3]) + (" (%d texts)" % len(fails) if fails else "") + " (%d too long)" % too_long_texts)
 
-# R3. RED WHEN: _key_spans skips a BEGIN marker whose longest header has no END marker after it
-# instead of trying the shorter headers its line allows, as Go's regexp does (D7), or its END
+# Key spans. RED WHEN: _key_spans skips a BEGIN marker whose longest header has no END marker after it
+# instead of trying the shorter headers its line allows, as Go's regexp does, or its END
 # distance is off by a character. The oracle is the full rule above, which backtracks the same way.
-# The distance runs from the end of the header, just after its closing five dashes (W7).
+# The distance runs from the end of the header, just after its closing five dashes.
 pieces3 = pieces + [p.encode() for p in (
     dash + "BEGIN PRIVATE KEY" + dash + "Q" * 20 + " PRIVATE KEY" + dash, "x" * 40 + "KEY" + dash,
     "Q" * 50, " PRIVATE KEY" + dash, "x KEY" + dash, dash + "BEGIN RSA PRIVATE KEY" + dash + " PRIVATE KEY" + dash)]
@@ -1567,14 +1582,14 @@ for it in range(5000):
     text = b"".join(parts)
     if scan._key_spans(text) != oracle(text):
         diff3.append(it)
-report("R3: on 5 000 fuzz texts the key spans equal the full rule's matches", not diff3,
+report("Key spans: on 5 000 fuzz texts the key spans equal the full rule's matches", not diff3,
        "%d texts differ, first %s" % (len(diff3), diff3[:5]))
-# R3 partner. RED WHEN: the distance is measured from the BEGIN marker's start or from the end of
+# Key spans partner. RED WHEN: the distance is measured from the BEGIN marker's start or from the end of
 # its longest header: 64 characters from the header's closing dashes to the K of KEY is a key, 63 is not.
 for body_len, want in ((64, 1), (63, 0)):
     text = (dash + "BEGIN PRIVATE KEY" + dash + "a" * (body_len - len("x ")) + "x KEY" + dash).encode()
     got = scan._key_spans(text)
-    report("R3 partner: a %d-character body %s a key" % (body_len, "is" if want else "is not"),
+    report("Key spans partner: a %d-character body %s a key" % (body_len, "is" if want else "is not"),
            len(got) == want and len(oracle(text)) == want, "spans %s, oracle %s" % (got, oracle(text)))
 
 # The chunks beside the windows ("extra" chunks) of a plan.
@@ -1583,23 +1598,23 @@ def extra_chunks(text):
     return spans, keys_of(spans, scan._windows(text)), too_long
 def inside(span, chunks):
     return any(s <= span[0] and span[1] <= e for s, e in chunks)
-def count_bound(n):  # windows <= n/72 000 + 1; groups < 2n/WINDOW + 2 (C1, derived below)
+def count_bound(n):  # windows <= n/72 000 + 1; groups < 2n/WINDOW + 2 (derived below)
     return n / 72000 + 2 * n / W + 3
-# Derivation (C1): windows start at least WINDOW - OVERLAP - EDGE = 72 000 bytes apart, so there
+# Derivation: windows start at least WINDOW - OVERLAP - EDGE = 72 000 bytes apart, so there
 # are at most n/72 000 + 1, each at most WINDOW bytes: at most 5n/4 + WINDOW bytes. Groups are
 # disjoint, so they add up to at most n bytes. A group starts at a merged span's start and the
 # next group starts at the first span that would end more than WINDOW bytes after that start, so
 # group k + 2 starts more than WINDOW bytes after group k: fewer than 2n/WINDOW + 2 groups.
-# C1. RED WHEN: a long run of encoded text gets no chunk of its own (D6), a merged span is counted
+# Long spans. RED WHEN: a long run of encoded text gets no chunk of its own, a merged span is counted
 # twice, or groups are not packed (the dense case then needs one chunk per run).
 text = (b"Q" * 12004 + b"\n") * 100
 n = len(text)
 spans, extra, too_long = extra_chunks(text)
 runs = [(i * 12005, i * 12005 + 12004) for i in range(100)]
-report("C1: 100 encoded runs of 12 004 bytes each lie inside a chunk of their own",
+report("Long spans: 100 encoded runs of 12 004 bytes each lie inside a chunk of their own",
        all(inside(r, extra) for r in runs) and not too_long,
        "%d of 100 runs in an extra chunk, too long %s" % (sum(inside(r, extra) for r in runs), too_long))
-report("C1: the dense case keeps the byte and chunk bounds (extra chunks disjoint, at most n bytes)",
+report("Long spans: the dense case keeps the byte and chunk bounds (extra chunks disjoint, at most n bytes)",
        sum(e - s for s, e in spans) <= 9 * n // 4 + 2 * W and sum(e - s for s, e in extra) <= n
        and len(spans) <= count_bound(n) and all(a[1] <= b[0] for a, b in zip(extra, extra[1:])),
        "%d chunks (bound %.0f), %d bytes, %d extra bytes for %d" % (
@@ -1619,7 +1634,7 @@ for glued in (False, True):
     n = len(text)
     spans, extra, too_long = extra_chunks(text)
     label = "glued to its header" if glued else "on its own line"
-    report("C1: 100 key blocks whose 12 500-byte body (%s) is an encoded run: each read whole, counted once" % label,
+    report("Long spans: 100 key blocks whose 12 500-byte body (%s) is an encoded run: each read whole, counted once" % label,
            scan._key_spans(text) == keyspans and all(inside(k, extra) for k in keyspans) and not too_long
            and sum(e - s for s, e in extra) <= n and len(spans) <= count_bound(n)
            and sum(e - s for s, e in spans) <= 9 * n // 4 + 2 * W,
@@ -1627,7 +1642,7 @@ for glued in (False, True):
                sum(inside(k, extra) for k in keyspans), len(spans), count_bound(n),
                sum(e - s for s, e in extra), n, too_long))
 
-# D6. RED WHEN: a run of encoded text longer than OVERLAP - 2 * EDGE (12 000) bytes, in one of the
+# Encoded runs. RED WHEN: a run of encoded text longer than OVERLAP - 2 * EDGE (12 000) bytes, in one of the
 # shapes gitleaks 8.30.1 decodes, gets no chunk of its own: gitleaks decodes it before it matches,
 # so a match inside it is as long as the run. Shapes measured on 8.30.1 (its own patterns):
 # base64 [\w/+-]{16,}={0,2}, hex [0-9A-Fa-f]{32,}, percent %XX(.*%XX)? (first to last escape of a
@@ -1642,25 +1657,25 @@ for label, run in (("base64", b"QUJD" * 3000 + b"QQ=="), ("hex", b"0a1B" * 3001)
     text = words_text(71999, run)
     at = 71999
     spans, extra, too_long = extra_chunks(text)
-    report("D6: a %d-byte %s run from byte 71 999 lies inside a chunk of its own" % (len(run), label),
+    report("Encoded runs: a %d-byte %s run from byte 71 999 lies inside a chunk of its own" % (len(run), label),
            len(run) > 12000 and inside((at, at + len(run)), extra) and not too_long,
            "extra chunks %s, too long %s" % (extra[:4], too_long))
-# D6 partner (O8). RED WHEN: an encoded run longer than WINDOW sets the too-long flag (it must
+# Encoded runs partner. RED WHEN: an encoded run longer than WINDOW sets the too-long flag (it must
 # never block: it is read in the ordinary windows), or its windows stop covering the text.
-# (Changed after the owner's answer O8: this case expected the flag at ef72028.)
+# (Changed: this case expected the flag before the owner's answer on long encoded runs.)
 text = words_text(50000, b"QUJD" * 22501)
 spans, extra, too_long = extra_chunks(text)
 wins = scan._windows(text)
-report("D6 partner: a 90 004-byte base64 run does not set the too-long flag and is read in the windows",
+report("Encoded runs partner: a 90 004-byte base64 run does not set the too-long flag and is read in the windows",
        too_long is False and wins[0][0] == 0 and wins[-1][1] == len(text) and all(w in spans for w in wins),
        "too long %s, %d windows" % (too_long, len(wins)))
-# D6 partner. RED WHEN: a raw key block longer than WINDOW no longer sets the flag (it still blocks).
+# Encoded runs partner. RED WHEN: a raw key block longer than WINDOW no longer sets the flag (it still blocks).
 big = (dash + "BEGIN PRIVATE KEY" + dash + "\n").encode() + (b"QUJD" * 16 + b"\n") * 1400 \
     + (dash + "END PRIVATE KEY" + dash).encode()
 text = words_text(50000, big)
-report("D6 partner: a %d-byte raw key block sets the too-long flag" % len(big), len(big) > W and extra_chunks(text)[2] is True,
+report("Encoded runs partner: a %d-byte raw key block sets the too-long flag" % len(big), len(big) > W and extra_chunks(text)[2] is True,
        "too long %s" % extra_chunks(text)[2])
-# E1. RED WHEN: spans that only touch (one ends where the next starts) are merged: two
+# Touching spans. RED WHEN: spans that only touch (one ends where the next starts) are merged: two
 # back-to-back key blocks of about 48 000 bytes then form one span over WINDOW and the text blocks.
 half = (dash + "BEGIN PRIVATE KEY" + dash + "\n").encode() + (b"QUJD" * 16 + b"\n") * 735 \
     + (dash + "END PRIVATE KEY" + dash).encode()
@@ -1668,9 +1683,9 @@ text = words_text(50000, half + half)
 spans, extra, too_long = extra_chunks(text)
 k0 = (50000, 50000 + len(half))
 k1 = (k0[1], k0[1] + len(half))
-report("E1: two touching key blocks of %d bytes are read whole, apart, with no flag" % len(half),
+report("Touching spans: two touching key blocks of %d bytes are read whole, apart, with no flag" % len(half),
        too_long is False and inside(k0, extra) and inside(k1, extra), "too long %s, extra %s" % (too_long, extra[:4]))
-# E10. RED WHEN: a merged span longer than WINDOW sets the flag although each key block in it is
+# Long merged span. RED WHEN: a merged span longer than WINDOW sets the flag although each key block in it is
 # at most WINDOW bytes, or a key block in it gets no chunk of its own: here two 48 000-byte key
 # blocks whose bodies are one encoded run each, joined by a 13 000-byte encoded run overlapping both.
 def body_key(n):
@@ -1682,9 +1697,85 @@ k0 = (50000, 50000 + len(ka))
 k1 = (50000 + len(ka) + 13000, 50000 + len(ka) + 13000 + len(kb))
 spans, extra, too_long = extra_chunks(text)
 merged_len = k1[1] - k0[0]
-report("E10: a %d-byte merged span of two key blocks sets no flag and each block is read whole" % merged_len,
+report("Long merged span: a %d-byte merged span of two key blocks sets no flag and each block is read whole" % merged_len,
        merged_len > W and scan._key_spans(text) == [k0, k1] and too_long is False and inside(k0, extra)
        and inside(k1, extra), "key spans %s, too long %s, extra %s" % (scan._key_spans(text)[:3], too_long, extra[:4]))
+
+# The encoded runs a plan must read whole: the shapes gitleaks 8.30.1 decodes, each run longer
+# than OVERLAP - 2 * EDGE and at most WINDOW bytes (written here, apart from scan.py, as the test's
+# own copy of the measured patterns).
+SHAPES = (re.compile(rb"[A-Za-z0-9_/+-]{16,}={0,2}"), re.compile(rb"[0-9A-Fa-f]{32,}"),
+          re.compile(rb"%[0-9A-Fa-f]{2}(?:[^\n]*%[0-9A-Fa-f]{2})?"),
+          re.compile(rb"(?:(?:U\+[a-fA-F0-9]{4}(?:[\t\n\f\r ]|$))+|(?i:(?:\\{1,2}u[a-fA-F0-9]{4})+))"))
+def runs_of(text):
+    return sorted({m.span() for rx in SHAPES for m in rx.finditer(text) if OV - 2 * E < m.end() - m.start() <= W})
+# Derived bounds once encoded runs inside a merged span longer than WINDOW are read as pieces of
+# their own (pieces may then overlap). Windows: at most n/72 000 + 1 of them and 5n/4 + WINDOW
+# bytes. Groups (merged spans of at most WINDOW bytes, and the key blocks of longer ones) never
+# overlap: at most n bytes and fewer than 2n/WINDOW + 2 of them. Runs read on their own: the runs
+# of one shape never overlap, so each of the four shapes adds at most n bytes and, each run being
+# longer than 12 000 bytes, at most n/12 000 pieces. Total: at most 25n/4 + WINDOW bytes in fewer
+# than n/72 000 + 2n/WINDOW + n/3 000 + 3 chunks.
+def bound25(n):
+    return 25 * n // 4 + W
+def count25(n):
+    return n / 72000 + 2 * n / W + n / 3000 + 3
+def plan_report(name, text, must_hold, key=None):
+    try:
+        spans, extra, too_long = extra_chunks(text)
+    except scan.ScanError as exc:
+        report(name, False, "ScanError: %s" % exc)
+        return
+    n = len(text)
+    lost = [r for r in must_hold if not inside(r, extra)]
+    size = sum(e - s for s, e in spans)
+    report(name, not lost and not too_long and size <= bound25(n) and len(spans) <= count25(n),
+           "%d of %d runs or keys in no chunk of their own (first %s), too long %s, %d bytes (bound %d), %d chunks "
+           "(bound %.0f)" % (len(lost), len(must_hold), lost[:2], too_long, size, bound25(n), len(spans), count25(n)))
+# A synthetic key, assembled at run time: a 3 000-character random base64 body wrapped at 64, between
+# 30 000 x's on each side (its base64 run is about 84 000 bytes).
+rnd5 = random.Random(3)
+body5 = bytes(rnd5.choice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") for _ in range(3000))
+pem5 = ((dash + "BEGIN RSA PRIVATE KEY" + dash + "\n").encode()
+        + b"\n".join(body5[i:i + 64] for i in range(0, len(body5), 64)) + b"\n"
+        + (dash + "END RSA PRIVATE KEY" + dash + "\n").encode())
+blob5 = base64.b64encode(b"x" * 30000 + pem5 + b"x" * 30000)
+# Overlapping runs. RED WHEN: an encoded run of at most WINDOW bytes inside a merged span longer
+# than WINDOW is left to the windows (it then lies whole in none, and its key is missed): a
+# percent run from the first escape of a line to its last, whose last escape starts a base64 run
+# that holds a key. The space count moves the runs against the window edges.
+for spaces in (50000, 50001, 50002, 50003):
+    prefix = b"%41" + b" " * spaces + b"%"
+    text = prefix + b"aCAg" + blob5 + b"\n"
+    want = [(0, len(prefix) + 2), (len(prefix), len(prefix) + 4 + len(blob5))]
+    plan_report("Overlapping runs: with %d spaces the percent run and the %d-byte base64 run each lie whole in a chunk "
+                "of their own" % (spaces, len(blob5)), text, want)
+# Overlapping runs, dense. RED WHEN: the runs of a long merged span are left to the windows, or
+# the plan's size check is lower than the derived bound (it then refuses this text): every line
+# holds a 60 000-byte percent run whose last escape starts an 80 000-byte hex run, and hex runs are
+# base64 runs too, so every byte is in up to three runs.
+hexes = (b"0123456789abcdef" * 6000)
+line = b"%41" + hexes[:59990] + b"%aB" + hexes[:79990] + b"\n"
+text = line * 10
+plan_report("Overlapping runs, dense: 10 lines of a 60 000-byte percent run overlapping an 80 000-byte hex run",
+            text, runs_of(text))
+# Touching runs. RED WHEN: spans that only touch are merged (a 60 000-byte key block and the
+# 40 006-byte percent run starting where it ends then form one span over WINDOW, and the run
+# is read in no chunk of its own), or either span is not read whole.
+rnd6 = random.Random(6)
+body6 = bytes(rnd6.choice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") for _ in range(58000))
+key6 = ((dash + "BEGIN PRIVATE KEY" + dash + "\n").encode() + b"\n".join(body6[i:i + 64] for i in range(0, len(body6), 64))
+        + b"\n" + (dash + "END PRIVATE KEY" + dash).encode())
+pct6 = b"%41" + b"!" * 40000 + b"%41"
+text = b"words of text\n" * 100 + key6 + pct6 + b"\n" + b"more words\n" * 1000
+at6 = 1400
+plan_report("Touching runs: a %d-byte key block and the percent run touching it each lie whole in a chunk of their own"
+            % len(key6), text, [(at6, at6 + len(key6)), (at6 + len(key6), at6 + len(key6) + len(pct6))])
+# Touching runs partner. RED WHEN: touching encoded runs are merged: a 63 000-byte run of U+
+# escapes, then a 42 006-byte percent run starting where it ends.
+text = b"U+0041 " * 9000 + b"%41" + b"!" * 42000 + b"%41"
+plan_report("Touching runs: a U+ escape run and the percent run touching it each lie whole in a chunk of their own",
+            text, [(0, 63000), (63000, 105006)])
 EOF
 # py_verdicts PY ARGS...: run a Python check and turn its `ok NAME` / `bad NAME - DETAIL` lines into verdicts.
 py_verdicts() {
@@ -1794,49 +1885,60 @@ gl_whole() {
     --exit-code 0 >/dev/null 2>&1 || die "gitleaks dir"
   "$REAL_PY" -I -c 'import json,sys; [print(f["RuleID"], f["StartLine"]) for f in json.load(open(sys.argv[1]))]' "$WORK/glw.json"
 }
-# R1 and R2 use one text shape: two BEGIN lines that pair with no END of their own, the second one
+# The next two cases use one text shape: two BEGIN lines that pair with no END of their own, the second one
 # at the second window's start, then a key (measured with gitleaks 8.30.1 at the plan stage).
 dline="$(_kgen decoy "$WORK/decoy.txt")"
 # RED WHEN: the fixture stops being a key that gitleaks itself reports, on its BEGIN line, read whole.
-if gl_whole "$WORK/decoy.txt" | grep -q -x -F "private-key $dline"; then ok "R1: gitleaks reads the decoy text whole and reports line $dline"; else
-  bad "R1: gitleaks reads the decoy text whole and reports line $dline" "$(gl_whole "$WORK/decoy.txt" | tr '\n' ' ')"; fi
+if gl_whole "$WORK/decoy.txt" | grep -q -x -F "private-key $dline"; then ok "Unpaired BEGIN lines: gitleaks reads the text with unpaired BEGIN lines whole and reports line $dline"; else
+  bad "Unpaired BEGIN lines: gitleaks reads the text with unpaired BEGIN lines whole and reports line $dline" "$(gl_whole "$WORK/decoy.txt" | tr '\n' ' ')"; fi
 _text "$WORK/decoy.txt"
-# R1. RED WHEN: a key block that a window holds whole gets no chunk of its own (the held-span skip
+# Unpaired BEGIN lines. RED WHEN: a key block that a window holds whole gets no chunk of its own (the held-span skip
 # comes back): a window can read the text before a block differently from the whole text.
-expect_rc "R1: a 20 KB key after two unpaired BEGIN lines is found on its own line" 1 "private-key at demo:$dline" @scanned
+expect_rc "Unpaired BEGIN lines: a 20 KB key after two unpaired BEGIN lines is found on its own line" 1 "private-key at demo:$dline" @scanned
 hline="$(_kgen header "$WORK/header.txt")"
 # RED WHEN: the fixture stops being a key that gitleaks itself reports, on its BEGIN line, read whole.
-if gl_whole "$WORK/header.txt" | grep -q -x -F "private-key $hline"; then ok "R2: gitleaks reads the shorter-header text whole and reports line $hline"; else
-  bad "R2: gitleaks reads the shorter-header text whole and reports line $hline" "$(gl_whole "$WORK/header.txt" | tr '\n' ' ')"; fi
+if gl_whole "$WORK/header.txt" | grep -q -x -F "private-key $hline"; then ok "Shorter header: gitleaks reads the shorter-header text whole and reports line $hline"; else
+  bad "Shorter header: gitleaks reads the shorter-header text whole and reports line $hline" "$(gl_whole "$WORK/header.txt" | tr '\n' ' ')"; fi
 _text "$WORK/header.txt"
-# R2. RED WHEN: the shorter-header retry is removed from _key_spans (D7): the block is then no key
+# Shorter header. RED WHEN: the shorter-header retry is removed from _key_spans: the block is then no key
 # span, so it gets no chunk of its own, and the first window's edge cuts it.
-expect_rc "R2: a key whose longest header has no END marker is found from byte 89 950" 1 "private-key at demo:$hline" @scanned
+expect_rc "Shorter header: a key whose longest header has no END marker is found from byte 89 950" 1 "private-key at demo:$hline" @scanned
 _kgen header-alone "$WORK/header-alone.txt" >/dev/null
 _text "$WORK/header-alone.txt"
-# R2 partner. RED WHEN: the block stops being a key gitleaks reports (the case above would then test nothing).
-expect_rc "R2 partner: the same block alone in a small file is found" 1 "private-key at demo:1" @scanned
-# D6 (end to end). A 15 KB key written as one line of base64, hex or percent escapes, from byte
+# Shorter header partner. RED WHEN: the block stops being a key gitleaks reports (the case above would then test nothing).
+expect_rc "Shorter header partner: the same block alone in a small file is found" 1 "private-key at demo:1" @scanned
+# Encoded runs (end to end). A 15 KB key written as one line of base64, hex or percent escapes, from byte
 # 71 999 of 200 KB: the edges of the first two windows both cut it.
 for shape in base64 hex percent; do
   eline="$(_kgen encoded "$WORK/enc.txt" 71999 "$shape")"
   # RED WHEN: the fixture stops being a key gitleaks reports on that line when it reads the text whole.
-  if gl_whole "$WORK/enc.txt" | grep -q -x -F "private-key $eline"; then ok "D6: gitleaks reads the $shape key text whole and reports line $eline"; else
-    bad "D6: gitleaks reads the $shape key text whole and reports line $eline" "$(gl_whole "$WORK/enc.txt" | tr '\n' ' ')"; fi
+  if gl_whole "$WORK/enc.txt" | grep -q -x -F "private-key $eline"; then ok "Encoded runs: gitleaks reads the $shape key text whole and reports line $eline"; else
+    bad "Encoded runs: gitleaks reads the $shape key text whole and reports line $eline" "$(gl_whole "$WORK/enc.txt" | tr '\n' ' ')"; fi
   _text "$WORK/enc.txt"
-  # D6. RED WHEN: a long run of encoded text gets no chunk of its own, so a key gitleaks finds
+  # Encoded runs. RED WHEN: a long run of encoded text gets no chunk of its own, so a key gitleaks finds
   # only after decoding the whole run is cut by a window edge.
-  expect_rc "D6: a $shape-encoded key from byte 71 999 is found" 1 "private-key at demo:$eline" @scanned
+  expect_rc "Encoded runs: a $shape-encoded key from byte 71 999 is found" 1 "private-key at demo:$eline" @scanned
   eline="$(_kgen encoded "$WORK/enc.txt" 99999 "$shape")"
   _text "$WORK/enc.txt"
-  # D6 partner. RED WHEN: the encoded key is no longer found where a window holds it whole.
-  expect_rc "D6 partner: the $shape-encoded key from byte 99 999 is found" 1 "private-key at demo:$eline" @scanned
+  # Encoded runs partner. RED WHEN: the encoded key is no longer found where a window holds it whole.
+  expect_rc "Encoded runs partner: the $shape-encoded key from byte 99 999 is found" 1 "private-key at demo:$eline" @scanned
 done
 "$REAL_PY" -I -c 'import sys; sys.stdout.write("some words of text\n" * 2632 + "QUJD" * 22501 + "\n" + "more words of text\n" * 5000)' >"$WORK/longrun.txt"
 _text "$WORK/longrun.txt"
-# D6 partner (O8). RED WHEN: an encoded run longer than 90 000 bytes blocks the check (exit 2)
+for spaces in 50000 50001 50002 50003; do
+  _kgen overlap "$WORK/overlap.txt" "$spaces" >/dev/null
+  # RED WHEN: the fixture stops being a key gitleaks reports when it reads the base64 run alone.
+  if gl_finds "$WORK/overlap.txt.block" private-key; then ok "Overlapping runs: gitleaks reports the base64 run read alone ($spaces spaces)"; else
+    bad "Overlapping runs: gitleaks reports the base64 run read alone ($spaces spaces)" "not reported"; fi
+  _text "$WORK/overlap.txt"
+  # Overlapping runs (end to end). RED WHEN: an encoded run of at most 90 000 bytes inside a merged
+  # span longer than that is left to the windows, which cut it, so its key is missed.
+  expect_rc "Overlapping runs: the key in a base64 run overlapping a percent run is found ($spaces spaces)" 1 \
+    "private-key at demo:1" @scanned
+done
+# Encoded runs partner. RED WHEN: an encoded run longer than 90 000 bytes blocks the check (exit 2)
 # instead of being read in the ordinary windows.
-expect_rc "D6 partner: a clean text holding a 90 004-byte base64 run is not blocked" 0 @scanned
+expect_rc "Encoded runs partner: a clean text holding a 90 004-byte base64 run is not blocked" 0 @scanned
 
 echo "== (l) private terms: one fold, one word test"
 TERMPY="$WORK/terms.py"
@@ -1855,14 +1957,14 @@ def case(name, terms, text, want):
     CASES.append((name, terms, text, want))
 A = ["acme"]
 # T11. RED WHEN: a letter or digit that is not ASCII (here an accented letter or an Arabic-Indic
-# digit) next to the term makes it part of a longer word: such a term is reported (D2).
-# (Changed in R11: these cases were clean under R10's rule, which treated every cased letter or
-# decimal digit as part of a word. A combining acute on the last letter moved to D2 below.)
+# digit) next to the term makes it part of a longer word: such a term is reported.
+# (Changed: these cases were clean under the previous rule, which treated every cased letter or
+# decimal digit as part of a word. A combining acute on the last letter moved to the word-edge cases below.)
 case("T11: e-acute before the term", A, "\u00e9acme", ["acme"])
 case("T11: e-acute after the term", A, "acme\u00e9", ["acme"])
 case("T11: an Arabic-Indic digit before the term", A, "\u0663acme", ["acme"])
 # T11 partner. RED WHEN: a mark on one of the term's own letters (not its last) no longer hides
-# that spelling (only a term's last letter may carry marks; D2).
+# that spelling (only a term's last letter may carry marks).
 case("T11 partner: a-acute in place of the term's a", A, "\u00e1cme", [])
 case("T11 partner: a hyphen and an underscore are breaks", A, "x-acme_y", ["acme"])
 case("T11 partner: two hits on one line", A, "acme acme", ["acme", "acme"])
@@ -1922,10 +2024,10 @@ def run_report(terms, add):
 
 # The fold of a line is whole-string Unicode compatibility caseless match (D146) plus one Turkish
 # adjustment, with the invisible characters removed first: U+0131 (dotless i) is read as i, and a
-# U+0307 (dot above) that follows an i with only combining characters between is dropped (W1).
+# U+0307 (dot above) that follows an i with only combining characters between is dropped.
 # Dropping it before or after canonical reordering gives the same text, since reordering only
 # moves combining characters within their run.
-# The invisible characters (E7): every character of category Cf, and Unicode's
+# The invisible characters: every character of category Cf, and Unicode's
 # Default_Ignorable_Code_Point (16.0, the same in 15.0), written here as hex ranges.
 INVISIBLE = ((0xAD, 0xAD), (0x34F, 0x34F), (0x61C, 0x61C), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
              (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F),
@@ -1964,17 +2066,17 @@ for _ in range(20000):
     if folded != d146(s) or len(owner) != len(folded) or "".join(units) != s \
             or any(not 0 <= k < len(units) for k in owner) or any(a > b for a, b in zip(owner, owner[1:])):
         bad.append(s)
-# T16. RED WHEN: the fold works unit by unit instead of on the whole stripped line (U+1D6A4, a
-# dotless i that only NFKD reveals, then stays a dotless i), a fold step or reordering pass is
-# left out, invisible characters are not removed before the units are split, a dot above after
-# an i and a mark is kept (W1), or reordering moves a folded character into another unit (the
-# owners then decrease somewhere: I-T3).
-# (Changed in R11: the oracle removes the invisible characters by its own hex list, drops the
-# dot above as W1 says, and owners must never decrease. The units still join to the line as
+# T16. RED WHEN: a fold step is left out (the first NFKD: U+1D6A4, a dotless i only NFKD
+# reveals, then stays a dotless i; the second casefold; a canonical reordering pass), invisible
+# characters are not removed before the fold, a dot above that follows an i and a mark is kept,
+# or a folded character is owned by a unit other than its own (the owners then decrease).
+# (Changed: the oracle removes the invisible characters by its own hex list, drops the
+# dot above as described above, and owners must never decrease. The units still join to the line as
 # written: an invisible character stays in the unit before it.)
 report("T16: 20 000 random lines fold to whole-string D146 with owners that never decrease", not bad,
        "%d lines differ, first %s" % (len(bad), ascii(bad[:3])))
-# T16 partner. RED WHEN: as above (the reported case: a mathematical dotless i inside a term).
+# T16 partner. RED WHEN: an NFKD pass or the dotless-i step is left out (the reported case: a
+# mathematical dotless i inside a term).
 report("T16: the term pin is found in p + U+1D6A4 + n", found(["pin"], "p\U0001d6a4n") == ["p\U0001d6a4n"],
        ascii(found(["pin"], "p\U0001d6a4n")))
 # T16 partner. RED WHEN: the second casefold of D146 is left out (U+03D2 folds to upsilon only after NFKD).
@@ -2007,9 +2109,9 @@ report("T18: a term with four full stops in a row finds itself", found(["acme...
 report("T18 partner: the term with four full stops masks itself", scan.Terms(["acme....labs"], None).mask("acme....labs.txt")
        == "<private>.txt", scan.Terms(["acme....labs"], None).mask("acme....labs.txt"))
 # T18 partner. RED WHEN: a term written with one separator allows more than one between its
-# words, or its allowance is counted after folding (W8: the term written with an ellipsis then
+# words, or its allowance is counted after folding (the term written with an ellipsis then
 # allows three, and finds two spaces).
-# (Changed in R11: a term written with one separator was found across three; the owner's answer
+# (Changed: a term written with one separator was found across three; the owner's answer
 # on separators allows one.)
 for line, want in (("ab", ["ab"]), ("a_b", ["a_b"]), ("a-b", ["a-b"])):
     report("T18 partner: a term written with one hyphen is found with one or none (%s)" % line,
@@ -2072,7 +2174,7 @@ report("T24: a term whose first unit after an ignorable one has no base fails th
 # T24 partner. RED WHEN: the check rejects a term holding a mark after its first letter.
 got = load_error("acme\nacm\u00e9 labs\nx\u0301y\n")
 report("T24 partner: terms with a base letter first load", got is None, ascii(got))
-# W3. RED WHEN: the load check tests only category M, not the first folded character: a term
+# Load check. RED WHEN: the load check tests only category M, not the first folded character: a term
 # whose first visible character attaches to the character before it (U+FF9E and U+FF9F, the
 # half-width sound marks, fold to combining marks; so do the Thai and Lao sara am) loads and can
 # never be found after a space. Or the one check stops covering category M (U+0903 is Mc with
@@ -2080,11 +2182,11 @@ report("T24 partner: terms with a base letter first load", got is None, ascii(go
 for label, first in (("U+0903", "\u0903"), ("U+FF9E", "\uff9e"), ("U+FF9F", "\uff9f"), ("U+0E33", "\u0e33"),
                      ("U+0EB3", "\u0eb3"), ("a zero-width space, then U+FF9E", "\u200b\uff9e")):
     got = load_error("acme\n" + first + "acme\n")
-    report("W3: a term whose first visible character is attached (%s) fails the load, naming its line" % label,
+    report("Load check: a term whose first visible character is attached (%s) fails the load, naming its line" % label,
            got is not None and "line 2" in got and "acme" not in got, ascii(got))
-# W3 partner. RED WHEN: the check rejects a term whose attached characters follow a base.
+# Load check partner. RED WHEN: the check rejects a term whose attached characters follow a base.
 got = load_error("acme\nx\uff9eacme\nacme\u0e33\n")
-report("W3 partner: terms with attached characters after a base load", got is None, ascii(got))
+report("Load check partner: terms with attached characters after a base load", got is None, ascii(got))
 
 # T20. RED WHEN: a unit is grown one character at a time (each mark copies the unit so far:
 # quadratic in a run of marks). Run in a child process so a quadratic build cannot hang the suite.
@@ -2124,10 +2226,10 @@ got = run_report(["acme"], lambda sc: sc.add_names("a file name", ["acme-notes.t
 report("T23 partner: acme-notes.txt is shown masked", got == ["private-term at the file name <private>-notes.txt"], ascii(got))
 
 # T25. RED WHEN: a hit may not end inside its last unit where the rest of that unit is combining
-# characters (D16): written as accents after the letter, or produced by decomposing a
+# characters: written as accents after the letter, or produced by decomposing a
 # precomposed letter, also once the CGJ (an invisible character) between them is removed; or
 # invisible characters are removed after the unit split, so the CGJ splits the marks.
-# (Changed in R11: both cases were clean. The owner's answers report a term whose last letter
+# (Changed: both cases were clean. The owner's answers report a term whose last letter
 # carries a combining accent, in either storage form.)
 for label, line in (("acm + e-acute + CGJ + grave below", "acm\u00e9\u034f\u0316"),
                     ("acm + e + acute + CGJ + grave below", "acme\u0301\u034f\u0316")):
@@ -2138,11 +2240,12 @@ report("T25 partner: acme + CGJ + grave below finds acme", len(found(["acme"], "
        ascii(found(["acme"], "acme\u034f\u0316")))
 report("T25 partner: acme + acute + x is clean", found(["acme"], "acme\u0301x") == [],
        ascii(found(["acme"], "acme\u0301x")))
-# T26. RED WHEN: a hit's units run from its first folded character's owner to its last one's
-# instead of from the least owner to the greatest, or a hit is not mapped back to the original
-# text with its invisible characters: find returns too little and mask leaves part showing.
-# Case 2 builds Terms directly (a term of marks alone fails the load): RED WHEN a hit may start
-# inside a unit for find (the marks of a letter then match alone).
+# T26. Case 1 RED WHEN: invisible characters are removed after the units are split (the
+# zero-width joiner then parts the e-acute from its dot below, and the term is not found), or a
+# hit is not mapped back to the original text with the invisible character inside it (find then
+# returns too little, and mask leaves part showing).
+# Case 2 builds Terms directly (a term of marks alone fails the load). RED WHEN: find accepts a
+# hit that starts inside a unit (the marks of a letter then match alone).
 for label, term, line, want_find in (
         ("e with dot below and acute, in e-acute + ZWJ + dot below", "\u1eb9\u0301",
          "\u00e9\u200d\u0323", ["\u00e9\u200d\u0323"]),
@@ -2181,7 +2284,7 @@ except subprocess.TimeoutExpired:
 EOF
 py_verdicts "$UNITPY" "$ROOT/public-content"
 
-echo "== (m) private terms: invisible characters, attached characters, word edges, separators (R11)"
+echo "== (m) private terms: invisible characters, attached characters, word edges, separators"
 # Every character below is written as an escape, so this file holds no invisible or combining
 # character. All terms are made-up words.
 R11PY="$WORK/r11terms.py"
@@ -2216,10 +2319,10 @@ def chars():
     return (chr(cp) for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF)
 A = ["acme"]
 
-# D2 and D16. RED WHEN: a letter or digit that is not ASCII, a combining character, or a character
+# Word edges and storage forms. RED WHEN: a letter or digit that is not ASCII, a combining character, or a character
 # attached to the last letter (U+FF9E, the Thai sara am) next to a hit makes it part of a longer
 # word; or the two storage forms of one text (precomposed, or letter + combining accent) give
-# different results (O7). Each text is also checked in NFC and in NFD.
+# different results. Each text is also checked in NFC and in NFD.
 for label, texts in (
         ("a grave below after the last letter", ["acme\u0316"]),
         ("an accented last letter", ["acm\u00e9", "acme\u0301", "acm\u1ec7"]),
@@ -2235,41 +2338,41 @@ for label, texts in (
         ("marks on both sides of a CGJ after the last letter", ["acme\u0301\u034f\u0316", "acm\u00e9\u034f\u0316"])):
     for text in texts:
         got = [count(A, t) for t in (text, nfc(text), nfd(text))]
-        report("D2: the term is found next to %s (%s), in both storage forms" % (label, ascii(text)),
+        report("Word edges: the term is found next to %s (%s), in both storage forms" % (label, ascii(text)),
                got == [1, 1, 1], "counts %s for the text, NFC, NFD" % got)
-# D2 and W1. RED WHEN: the Turkish rule drops a dot above only when it directly follows an i (an
+# Turkish i. RED WHEN: the Turkish rule drops a dot above only when it directly follows an i (an
 # attached grave below then keeps the dot, and the spellings of one word differ), or an invisible
 # character between them acts as an edge.
 for spelling in ("ali", "al\u0130", "alI\u0307", "al\u0131", "al\u0131\u0307"):
     for suffix in ("", "\u200d", "\u0316", "\u200d\u0316", "\u0316\u0307"):
-        report("W1: the term ali is found in %s" % ascii(spelling + suffix), count(["ali"], spelling + suffix) == 1,
+        report("Turkish i: the term ali is found in %s" % ascii(spelling + suffix), count(["ali"], spelling + suffix) == 1,
                ascii(found(["ali"], spelling + suffix)))
-# D2 partners. RED WHEN: an ASCII letter or digit next to a hit, with or without marks on it, no
+# Word edges partners. RED WHEN: an ASCII letter or digit next to a hit, with or without marks on it, no
 # longer makes the hit part of a longer word (also after the marks that end the hit, or across
 # an invisible character).
 for text in ("acmex", "xacme", "acme1", "1acme", "acme\u0301x", "acm\u00e9x", "x\u0301acme", "acmex\u0301",
              "acme\uff9ex", "acme\u0e33x", "acme\u200bx", "acme\u034fx", "x\u200dacme", "acme\u0301\u200d1"):
     got = [count(A, t) for t in (text, nfc(text), nfd(text))]
-    report("D2 partner: the term is clean in %s, in both storage forms" % ascii(text), got == [0, 0, 0],
+    report("Word edges partner: the term is clean in %s, in both storage forms" % ascii(text), got == [0, 0, 0],
            "counts %s for the text, NFC, NFD" % got)
-# C3 and D16 partners. RED WHEN: a hit may end inside a letter's own fold (the term s in a sharp
+# Hit ends. RED WHEN: a hit may end inside a letter's own fold (the term s in a sharp
 # s, f in the ff ligature), or a hit no longer needs the rest of its last unit to be combining
 # characters only.
 for terms, text, want in ((["s"], "\u00df", 0), (["ss"], "\u00df", 1), (["f"], "\ufb00", 0), (["ff"], "\ufb00", 1),
                           (["acm"], "acme", 0), (["acm"], "acm\u00e9", 1), (["acme"], "acm\u00e9x", 0)):
-    report("C3: %s in %s gives %d" % (ascii(terms[0]), ascii(text), want), count(terms, text) == want,
+    report("Hit ends: %s in %s gives %d" % (ascii(terms[0]), ascii(text), want), count(terms, text) == want,
            ascii(found(terms, text)))
 
-# D4. RED WHEN: separators in a line are counted after folding (an ellipsis or a two-dot leader
+# Separators. RED WHEN: separators in a line are counted after folding (an ellipsis or a two-dot leader
 # then counts as two or three), a term written with one separator allows more than one, or an
-# invisible character between two separators keeps them apart (O4).
+# invisible character between two separators keeps them apart.
 L = ["acme labs"]
 for text in ("acme labs", "acme-labs", "acmelabs", "acme_labs", "acme.labs", "acme\u2026labs", "acme\u2025labs",
              "acme\u3000labs", "acme\u00a0labs", "acme\u200b labs"):
-    report("D4: acme labs is found in %s" % ascii(text), count(L, text) == 1, ascii(found(L, text)))
+    report("Separators: acme labs is found in %s" % ascii(text), count(L, text) == 1, ascii(found(L, text)))
 for text in ("acme. labs", "acme  labs", "acme \u200b labs", "acme--labs", "acme\u2026 labs", "acme\u2026\u2026labs"):
-    report("D4: acme labs is not found in %s" % ascii(text), count(L, text) == 0, ascii(found(L, text)))
-# C4. RED WHEN: a term's own allowance is counted after folding (a term written with one
+    report("Separators: acme labs is not found in %s" % ascii(text), count(L, text) == 0, ascii(found(L, text)))
+# Term separators. RED WHEN: a term's own allowance is counted after folding (a term written with one
 # ellipsis then allows three; one with two ellipses allows six), or is not its own longest run
 # of separators as written, mixed runs included.
 for term, text, want in (("acme\u2026labs", "acme  labs", 0), ("acme\u2026labs", "acme\u2026labs", 1),
@@ -2277,52 +2380,52 @@ for term, text, want in (("acme\u2026labs", "acme  labs", 0), ("acme\u2026labs",
                          ("a\u2026\u2026b", "a...b", 0), ("acme. labs", "acme -labs", 1),
                          ("acme. labs", "acme. labs", 1), ("acme. labs", "acme.  labs", 0),
                          ("acme -labs", "acme. labs", 1), ("acme -labs", "acme labs", 1)):
-    report("C4: the term %s in %s gives %d" % (ascii(term), ascii(text), want), count([term], text) == want,
+    report("Term separators: the term %s in %s gives %d" % (ascii(term), ascii(text), want), count([term], text) == want,
            ascii(found([term], text)))
 
-# E7 (replaces A2; fail closed). RED WHEN: a character of category Cf, or of
+# Format characters (fail closed). RED WHEN: a character of category Cf, or of
 # Default_Ignorable_Code_Point, is kept inside a term instead of removed (it then splits the term
 # and hides it).
 kept = [hex(ord(c)) for c in chars() if invisible(c) and count(A, "ac" + c + "me") != 1]
-report("E7: every invisible character inside the term is removed (%d code points)"
+report("Format characters: every invisible character inside the term is removed (%d code points)"
        % sum(1 for c in chars() if invisible(c)), not kept, "kept: %s" % kept[:10])
 every_cf = [c for c in chars() if unicodedata.category(c) == "Cf"]
 kept = [hex(ord(c)) for c in every_cf if count(A, "ac" + c + "me") != 1]
-report("E7: each of the %d characters of category Cf inside the term keeps it found" % len(every_cf),
+report("Format characters: each of the %d characters of category Cf inside the term keeps it found" % len(every_cf),
        len(every_cf) >= 160 and not kept, "kept: %s" % kept[:10])
-# E7 partner. RED WHEN: visible characters are removed too (a visible letter inside the term
+# Format characters partner. RED WHEN: visible characters are removed too (a visible letter inside the term
 # then no longer keeps it apart).
 for c in ("x", "\u00e9", "\u0600x"):
-    report("E7 partner: %s inside the term keeps it apart" % ascii(c), count(A, "ac" + c + "me") == 0,
+    report("Format characters partner: %s inside the term keeps it apart" % ascii(c), count(A, "ac" + c + "me") == 0,
            ascii(found(A, "ac" + c + "me")))
-# E7 partner. RED WHEN: a removed format character still acts as a break (x then U+0600 then the
+# Format characters partner. RED WHEN: a removed format character still acts as a break (x then U+0600 then the
 # term must read as xacme, part of a longer word).
-report("E7 partner: x + U+0600 + the term is clean", count(A, "x\u0600acme") == 0, ascii(found(A, "x\u0600acme")))
+report("Format characters partner: x + U+0600 + the term is clean", count(A, "x\u0600acme") == 0, ascii(found(A, "x\u0600acme")))
 
-# E10. RED WHEN: the word test reads a neighbouring Kelvin sign (U+212A) as it is written, not
+# Kelvin sign. RED WHEN: the word test reads a neighbouring Kelvin sign (U+212A) as it is written, not
 # as the letter K its NFC form is: it is an ASCII letter after the term, so the term is part of
 # a longer word.
 for text in ("acme\u212a", "\u212aacme"):
-    report("E10: the term next to a Kelvin sign is clean (%s)" % ascii(text), count(A, text) == 0, ascii(found(A, text)))
+    report("Kelvin sign: the term next to a Kelvin sign is clean (%s)" % ascii(text), count(A, text) == 0, ascii(found(A, text)))
 
-# R14 and W3. RED WHEN: Unicode data changes the attached characters that are not marks (the
+# Attached characters. RED WHEN: Unicode data changes the attached characters that are not marks (the
 # test then names the new set), or an attached character is not read as part of the unit before
 # it: after an ASCII letter it then becomes a break before the term, and after the term's last
 # letter it no longer ends the hit. Attached = category M, or a first folded character of category M.
 attached = [c for c in chars() if not invisible(c) and (unicodedata.category(c)[0] == "M"
             or (fold(c) and unicodedata.category(fold(c)[0])[0] == "M"))]
 not_marks = sorted(hex(ord(c)) for c in attached if unicodedata.category(c)[0] != "M")
-report("R14: the attached characters that are not marks are U+0E33, U+0EB3, U+FF9E and U+FF9F",
+report("Attached characters: the attached characters that are not marks are U+0E33, U+0EB3, U+FF9E and U+FF9F",
        not_marks == ["0xe33", "0xeb3", "0xff9e", "0xff9f"], str(not_marks))
 after_x = [c for c in attached if nfc("x" + c)[0] == "x"]
 left = [hex(ord(c)) for c in after_x if count(A, "x" + c + "acme") != 0]
-report("R14: x + each of %d attached characters before the term keeps it part of a word" % len(after_x),
+report("Attached characters: x + each of %d attached characters before the term keeps it part of a word" % len(after_x),
        len(after_x) > 2000 and not left, "found after: %s" % left[:10])
 right = [hex(ord(c)) for c in attached if count(A, "acme" + c) != 1]
-report("R14: the term is found before each of %d attached characters" % len(attached),
+report("Attached characters: the term is found before each of %d attached characters" % len(attached),
        len(attached) > 2000 and not right, "not found before: %s" % right[:10])
 
-# R6 (O4). RED WHEN: an invisible character changes a result: it acts as a unit edge, splits a
+# Invisible characters. RED WHEN: an invisible character changes a result: it acts as a unit edge, splits a
 # separator run, is removed after the units are split, or is left out of the original text a
 # hit maps back to. Each line gives the same findings (invisible characters left out) and the
 # same mask with and without them.
@@ -2338,15 +2441,65 @@ for _ in range(20000):
     b = [(n, strip(t)) for n, t in terms.find(strip(s))]
     if a != b or strip(terms.mask(s)) != terms.mask(strip(s)):
         diff.append(s)
-report("R6: 20 000 random lines give the same findings and mask with and without invisible characters", not diff,
+report("Invisible characters: 20 000 random lines give the same findings and mask with and without invisible characters", not diff,
        "%d lines differ, first %s" % (len(diff), ascii(diff[:3])))
 
-# D8. RED WHEN: a literal invisible or combining character (or any non-ASCII character other than
+# Greek iota subscript. RED WHEN: the letters of a unit are counted on its fold instead of on
+# its canonical decomposition with the marks removed: a precomposed letter with an iota subscript
+# (U+1F80-U+1FFC) then hides a Greek term ending in its base letter, while the same text written
+# as letter + U+0345 is found. Checked for every such code point, in both storage forms.
+iota = [c for c in chars() if "\u0345" in nfd(c) and len(nfd(c)) > 1 and unicodedata.category(nfd(c)[0])[0] == "L"]
+split = []
+for c in iota:
+    base = "".join(x for x in nfd(c) if unicodedata.category(x)[0] != "M")
+    term = ["\u03b2" + base]
+    got = [count(term, "\u03b2" + c), count(term, "\u03b2" + nfd(c))]
+    if got != [1, 1]:
+        split.append((hex(ord(c)), got))
+report("Greek iota subscript: each of %d letters with an iota subscript ends a Greek term in both forms" % len(iota),
+       len(iota) >= 60 and not split, "not found in both forms: %s" % split[:6])
+for text in ("\u03b2\u1fb3 x", "\u03b2\u03b1\u0345 y"):
+    report("Greek iota subscript: the term beta-alpha is found in %s" % ascii(text), count(["\u03b2\u03b1"], text) == 1,
+           ascii(found(["\u03b2\u03b1"], text)))
+# Greek iota subscript partner. RED WHEN: an ASCII letter after the letter with an iota subscript
+# no longer makes the hit part of a longer word.
+for text in ("\u03b2\u1fb3x", "\u03b2\u03b1\u0345x"):
+    report("Greek iota subscript partner: the term beta-alpha is clean in %s" % ascii(text),
+           count(["\u03b2\u03b1"], text) == 0, ascii(found(["\u03b2\u03b1"], text)))
+
+# Accent then a lower mark. RED WHEN: a mark of a lower combining class after a term's accented
+# last letter (U+0316, U+0323, U+0327, U+0E48, U+FF9E) is put between the letter and the term's own
+# accent by canonical reordering, so the term's folded text no longer matches: find misses it and
+# mask leaves it showing. Each case in both storage forms of the term and of the text.
+for term in ("caf\u00e9", "cafe\u0301"):
+    for follower in ("\u0316", "\u0323", "\u0327", "\u0e48", "\uff9e"):
+        for text in ("caf\u00e9" + follower, "cafe\u0301" + follower):
+            report("Accent then a lower mark: %s is found and masked in %s" % (ascii(term), ascii(text)),
+                   count([term], text) == 1 and built([term]).mask(text) == "<private>",
+                   "find %s, mask %s" % (ascii(found([term], text)), ascii(built([term]).mask(text))))
+            # Partner. RED WHEN: an ASCII letter after those marks no longer makes the hit part of a longer word.
+            report("Accent then a lower mark partner: %s is clean in %s" % (ascii(term), ascii(text + "x")),
+                   count([term], text + "x") == 0, ascii(found([term], text + "x")))
+
+# Hangul storage forms. RED WHEN: units are cut on the precomposed syllable instead of on its
+# canonical decomposition (conjoining jamo): a term that starts or ends inside a syllable then gets
+# a different answer for the syllable and for its jamo spelling. The sharp s and ff-ligature
+# cases above stay clean (compatibility, not canonical, decompositions).
+for term, pre in (("\u1100", "\uac00"), ("\u1161", "\uac00"), ("\uac00\u1100", "\uac00\uac00"),
+                  ("\u1161\uac00", "\uac00\uac00"), ("\u1100\u1161", "\uac01"), ("\u11a8", "\uac01")):
+    got = [count([term], pre), count([term], nfd(pre))]
+    report("Hangul storage forms: the term %s is found in %s and in its jamo spelling" % (ascii(term), ascii(pre)),
+           got == [1, 1], "counts %s for the syllables, the jamo" % got)
+for terms, text in ((["s"], "\u00df"), (["f"], "\ufb00")):
+    report("Hangul storage forms partner: %s stays clean in %s" % (ascii(terms[0]), ascii(text)),
+           count(terms, text) == 0, ascii(found(terms, text)))
+
+# Escapes only. RED WHEN: a literal invisible or combining character (or any non-ASCII character other than
 # the right single quote U+2019 of one reported-speech pattern) is written into scan.py: write
 # escapes instead, so a reader sees every character.
 with open(SRC, encoding="utf-8") as f:
     got = sorted({hex(ord(c)) for c in f.read() if ord(c) > 127})
-report("D8: the only non-ASCII character of scan.py is U+2019", got == ["0x2019"], str(got))
+report("Escapes only: the only non-ASCII character of scan.py is U+2019", got == ["0x2019"], str(got))
 EOF
 py_verdicts "$R11PY" "$ROOT/public-content" "$SCAN"
 

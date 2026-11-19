@@ -1,4 +1,4 @@
-"""public-content-census.py - the private-term reduction census (R11, decision D9).
+"""public-content-census.py - the private-term reduction census, a check before merge.
 
 Compares which lines a private-term matcher reports, between older builds of the guard's
 scan.py and a newer one. It prints counts only: never a term, never a line. Every term is a
@@ -13,7 +13,7 @@ Each class changes one thing about a line around one term (the text before the t
 after it, how the term is spelled, or the separators between its words). For each older build
 and each class it prints: lines, found by the older build, found by the new build, found before
 and clean now ("lost"), and found now and not before ("gained"). A class with lost lines must
-name the decision that allows it (DECISIONS below; ids from the R11 plan). A class with lost
+name the decision that allows it (DECISIONS below; see docs/DECISIONS.md). A class with lost
 lines and no decision is UNMAPPED, and the census exits 1: that is a blocker before merge.
 """
 
@@ -27,9 +27,10 @@ PER_CLASS = 40  # lines per class and term (each a fresh random choice from the 
 
 # Made-up terms of every shape: one word, two words with each separator, a run of two
 # separators, three words, a digit, a sharp-s word, a ligature word, a Turkish-i word, a k word,
-# and a word with an accented letter.
+# a word with an accented letter, and terms ending in an accented letter (precomposed,
+# decomposed, and two words).
 TERMS = ["acme", "acme labs", "acme-labs", "acme.labs", "acme_labs", "acme. labs", "zebra corn labs", "acme2",
-         "strasse", "office", "istanbul", "kayak", "caf\u00e9 labs"]
+         "strasse", "office", "istanbul", "kayak", "caf\u00e9 labs", "caf\u00e9", "cafe\u0301", "acme caf\u00e9"]
 
 ASCII_LETTERS = list("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 MARKS = ["\u0301", "\u0300", "\u0316", "\u0323", "\u0302", "\u0308", "\u0331"]
@@ -119,21 +120,21 @@ def lines():
 
 
 # Each class whose lines may be found before and clean now, with the decision that allows it
-# (R11 plan ids; restated in docs/DECISIONS.md and docs/public-content-guard.md).
+# (restated in docs/DECISIONS.md and docs/public-content-guard.md).
 DECISIONS = {
-    "spelling: separator: run of two": "answer 3 (2026-11-17): one separator unless the term holds more (D4)",
-    "spelling: separator: run of three": "answer 3 (2026-11-17): one separator unless the term holds more (D4)",
-    "spelling: separator: invisible between two spaces": "O4 + D4: an invisible character is absent, so two spaces",
-    "spelling: visible format character inside": "E7: every format character is removed before folding",
-    "after: combining mark, then ASCII letter": "D2: an ASCII letter after the marks ending a hit joins it",
-    "after: attached character, then ASCII letter": "D2 + W3: an ASCII letter after attached characters joins",
-    "before: ASCII letter with a mark": "D2: an ASCII letter, with or without marks, joins the term",
-    "after: ASCII letter with a mark": "D2: an ASCII letter, with or without marks, joins the term",
-    "before: ASCII letter, then attached character": "W3: the attached character belongs to the letter",
-    "before: invisible, then ASCII letter": "O4: an invisible character is absent",
-    "after: invisible, then ASCII letter": "O4: an invisible character is absent",
-    "before: visible format character, then ASCII letter": "E7: the format character is removed, so the letter joins (as O4)",
-    "after: visible format character, then ASCII letter": "E7: the format character is removed, so the letter joins (as O4)",
+    "spelling: separator: run of two": "one separator between words, unless the term holds more",
+    "spelling: separator: run of three": "one separator between words, unless the term holds more",
+    "spelling: separator: invisible between two spaces": "invisible characters are absent, so this is two spaces",
+    "spelling: visible format character inside": "every format character is removed before folding",
+    "after: combining mark, then ASCII letter": "an ASCII letter after the marks that end a hit joins it",
+    "after: attached character, then ASCII letter": "an ASCII letter after attached characters joins the hit",
+    "before: ASCII letter with a mark": "an ASCII letter whose composed form stays ASCII joins the term",
+    "after: ASCII letter with a mark": "an ASCII letter whose composed form stays ASCII joins the term",
+    "before: ASCII letter, then attached character": "an attached character belongs to the letter before it",
+    "before: invisible, then ASCII letter": "invisible characters are absent, so the letter joins",
+    "after: invisible, then ASCII letter": "invisible characters are absent, so the letter joins",
+    "before: visible format character, then ASCII letter": "format characters are removed, so the letter joins",
+    "after: visible format character, then ASCII letter": "format characters are removed, so the letter joins",
 }
 
 
