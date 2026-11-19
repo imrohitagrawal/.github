@@ -108,10 +108,10 @@ Until one of these is in place, review every pull request that edits a workflow.
   such word pass.
 - **Private terms**: a private list of words, such as private project names. The list is
   never committed (see [Private terms](#private-terms)). Invisible characters are removed
-  from a line, and from each term, first: the characters Unicode lists as default ignorable
-  (Default_Ignorable_Code_Point), such as a zero-width space, a zero-width joiner or a soft
-  hyphen. So a line gives the same result with and without them. Visible format characters,
-  such as the Arabic number sign (U+0600), stay. Terms are then compared after Unicode
+  from a line, and from each term, first: every format character (Unicode category Cf) and
+  every character Unicode lists as default ignorable (Default_Ignorable_Code_Point), such as
+  a zero-width space, a zero-width joiner, a soft hyphen or the Arabic number sign (U+0600).
+  So a line gives the same result with and without them. Terms are then compared after Unicode
   compatibility and case folding of the whole line (Unicode's compatibility caseless match,
   plus one Turkish adjustment). STRASSE matches the word written with a German sharp s, and
   full-width letters, ligatures and the Turkish capital I with a dot match too. A text gives

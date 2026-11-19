@@ -1670,6 +1670,21 @@ k0 = (50000, 50000 + len(half))
 k1 = (k0[1], k0[1] + len(half))
 report("E1: two touching key blocks of %d bytes are read whole, apart, with no flag" % len(half),
        too_long is False and inside(k0, extra) and inside(k1, extra), "too long %s, extra %s" % (too_long, extra[:4]))
+# E10. RED WHEN: a merged span longer than WINDOW sets the flag although each key block in it is
+# at most WINDOW bytes, or a key block in it gets no chunk of its own: here two 48 000-byte key
+# blocks whose bodies are one encoded run each, joined by a 13 000-byte encoded run overlapping both.
+def body_key(n):
+    return (dash + "BEGIN PRIVATE KEY" + dash).encode() + b"QUJD" * (n // 4) + (dash + "END PRIVATE KEY" + dash).encode()
+ka = body_key(48000)
+kb = body_key(48000)
+text = words_text(50000, ka + b"QUJD" * 3250 + kb)
+k0 = (50000, 50000 + len(ka))
+k1 = (50000 + len(ka) + 13000, 50000 + len(ka) + 13000 + len(kb))
+spans, extra, too_long = extra_chunks(text)
+merged_len = k1[1] - k0[0]
+report("E10: a %d-byte merged span of two key blocks sets no flag and each block is read whole" % merged_len,
+       merged_len > W and scan._key_spans(text) == [k0, k1] and too_long is False and inside(k0, extra)
+       and inside(k1, extra), "key spans %s, too long %s, extra %s" % (scan._key_spans(text)[:3], too_long, extra[:4]))
 EOF
 # py_verdicts PY ARGS...: run a Python check and turn its `ok NAME` / `bad NAME - DETAIL` lines into verdicts.
 py_verdicts() {
@@ -1910,15 +1925,14 @@ def run_report(terms, add):
 # U+0307 (dot above) that follows an i with only combining characters between is dropped (W1).
 # Dropping it before or after canonical reordering gives the same text, since reordering only
 # moves combining characters within their run.
-# The invisible characters: Unicode's Default_Ignorable_Code_Point (16.0, the same in 15.0), as
-# hex ranges. Not all of category Cf: U+0600-U+0605, U+06DD, U+070F, U+0890-U+0891, U+08E2,
-# U+FFF9-U+FFFB, U+110BD, U+110CD and U+13430-U+1343F are visible and stay (A2).
+# The invisible characters (E7): every character of category Cf, and Unicode's
+# Default_Ignorable_Code_Point (16.0, the same in 15.0), written here as hex ranges.
 INVISIBLE = ((0xAD, 0xAD), (0x34F, 0x34F), (0x61C, 0x61C), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
              (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F),
              (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
              (0xE0000, 0xE0FFF))
 def invisible(c):
-    return any(a <= ord(c) <= b for a, b in INVISIBLE)
+    return unicodedata.category(c) == "Cf" or any(a <= ord(c) <= b for a, b in INVISIBLE)
 def strip(s):
     return "".join(c for c in s if not invisible(c))
 T = scan.Terms(["x"], None)
@@ -2195,7 +2209,7 @@ INVISIBLE = ((0xAD, 0xAD), (0x34F, 0x34F), (0x61C, 0x61C), (0x115F, 0x1160), (0x
              (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
              (0xE0000, 0xE0FFF))
 def invisible(c):
-    return any(a <= ord(c) <= b for a, b in INVISIBLE)
+    return unicodedata.category(c) == "Cf" or any(a <= ord(c) <= b for a, b in INVISIBLE)
 def strip(s):
     return "".join(c for c in s if not invisible(c))
 def chars():
@@ -2266,18 +2280,30 @@ for term, text, want in (("acme\u2026labs", "acme  labs", 0), ("acme\u2026labs",
     report("C4: the term %s in %s gives %d" % (ascii(term), ascii(text), want), count([term], text) == want,
            ascii(found([term], text)))
 
-# A2. RED WHEN: the invisible set is not exactly Default_Ignorable_Code_Point: all of category Cf
-# is removed (so U+0600, a visible sign, vanishes from inside a term), or one of these code points
-# is kept (it then splits the term).
+# E7 (replaces A2; fail closed). RED WHEN: a character of category Cf, or of
+# Default_Ignorable_Code_Point, is kept inside a term instead of removed (it then splits the term
+# and hides it).
 kept = [hex(ord(c)) for c in chars() if invisible(c) and count(A, "ac" + c + "me") != 1]
-report("A2: every invisible character inside the term is removed (%d code points)"
-       % sum(b - a + 1 for a, b in INVISIBLE), not kept, "kept: %s" % kept[:10])
-visible_cf = [c for c in chars() if unicodedata.category(c) == "Cf" and not invisible(c)]
-removed = [hex(ord(c)) for c in visible_cf if count(A, "ac" + c + "me") != 0]
-report("A2: every visible format character (%d) inside the term keeps it apart" % len(visible_cf),
-       len(visible_cf) >= 20 and not removed, "removed: %s" % removed[:10])
-# A2 partner. RED WHEN: a visible format character next to the term hides it (it is a break).
-report("A2 partner: U+0600 before the term is a break", count(A, "\u0600acme") == 1, ascii(found(A, "\u0600acme")))
+report("E7: every invisible character inside the term is removed (%d code points)"
+       % sum(1 for c in chars() if invisible(c)), not kept, "kept: %s" % kept[:10])
+every_cf = [c for c in chars() if unicodedata.category(c) == "Cf"]
+kept = [hex(ord(c)) for c in every_cf if count(A, "ac" + c + "me") != 1]
+report("E7: each of the %d characters of category Cf inside the term keeps it found" % len(every_cf),
+       len(every_cf) >= 160 and not kept, "kept: %s" % kept[:10])
+# E7 partner. RED WHEN: visible characters are removed too (a visible letter inside the term
+# then no longer keeps it apart).
+for c in ("x", "\u00e9", "\u0600x"):
+    report("E7 partner: %s inside the term keeps it apart" % ascii(c), count(A, "ac" + c + "me") == 0,
+           ascii(found(A, "ac" + c + "me")))
+# E7 partner. RED WHEN: a removed format character still acts as a break (x then U+0600 then the
+# term must read as xacme, part of a longer word).
+report("E7 partner: x + U+0600 + the term is clean", count(A, "x\u0600acme") == 0, ascii(found(A, "x\u0600acme")))
+
+# E10. RED WHEN: the word test reads a neighbouring Kelvin sign (U+212A) as it is written, not
+# as the letter K its NFC form is: it is an ASCII letter after the term, so the term is part of
+# a longer word.
+for text in ("acme\u212a", "\u212aacme"):
+    report("E10: the term next to a Kelvin sign is clean (%s)" % ascii(text), count(A, text) == 0, ascii(found(A, text)))
 
 # R14 and W3. RED WHEN: Unicode data changes the attached characters that are not marks (the
 # test then names the new set), or an attached character is not read as part of the unit before
