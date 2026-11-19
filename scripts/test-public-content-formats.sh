@@ -1925,6 +1925,9 @@ for shape in base64 hex percent; do
 done
 "$REAL_PY" -I -c 'import sys; sys.stdout.write("some words of text\n" * 2632 + "QUJD" * 22501 + "\n" + "more words of text\n" * 5000)' >"$WORK/longrun.txt"
 _text "$WORK/longrun.txt"
+# Encoded runs partner. RED WHEN: an encoded run longer than 90 000 bytes blocks the check (exit 2)
+# instead of being read in the ordinary windows.
+expect_rc "Encoded runs partner: a clean text holding a 90 004-byte base64 run is not blocked" 0 @scanned
 for spaces in 50000 50001 50002 50003; do
   _kgen overlap "$WORK/overlap.txt" "$spaces" >/dev/null
   # RED WHEN: the fixture stops being a key gitleaks reports when it reads the base64 run alone.
@@ -1936,9 +1939,6 @@ for spaces in 50000 50001 50002 50003; do
   expect_rc "Overlapping runs: the key in a base64 run overlapping a percent run is found ($spaces spaces)" 1 \
     "private-key at demo:1" @scanned
 done
-# Encoded runs partner. RED WHEN: an encoded run longer than 90 000 bytes blocks the check (exit 2)
-# instead of being read in the ordinary windows.
-expect_rc "Encoded runs partner: a clean text holding a 90 004-byte base64 run is not blocked" 0 @scanned
 
 echo "== (l) private terms: one fold, one word test"
 TERMPY="$WORK/terms.py"
