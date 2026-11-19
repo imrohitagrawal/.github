@@ -128,12 +128,17 @@ RETRY_PREFIX = b"\n" * 100_000  # put before a chunk gitleaks skipped, so it can
 # some window. A window can start just after a byte that is not a letter or digit (the // of a
 # URL), so a rule that looks at the character before a match can match there although it would
 # not in the whole text; this can only add a finding, never hide one.
-# The private-key rule has no upper length, so each key block of a long text that no window
-# holds whole (_key_spans: from its BEGIN marker to the first END marker at least KEY_MIN_BODY
-# characters after it; blocks never overlap) is also read as a chunk of its own (_plan), and a
-# block longer than WINDOW blocks the check, naming the place. So the chunks of one text add up
-# to at most 9n/4 + 2 * WINDOW bytes. Private terms are matched in Python on the whole text,
-# never on windows.
+# Some matches can be longer than the overlap: the private-key rule has no upper length, and
+# gitleaks decodes encoded text before it matches. So in a long text the planner (_plan) also
+# reads whole each key span (_key_spans: as gitleaks finds them, a shorter header retried when
+# the longest has no END marker) and each run of encoded text longer than OVERLAP - 2 * EDGE
+# bytes, in the shapes gitleaks 8.30.1 decodes (base64, hex, percent and Unicode escapes),
+# also where a window holds them. Spans that overlap are merged into their union (spans that
+# only touch stay apart). The merged spans are packed in order into groups of at most WINDOW
+# bytes, each starting at a merged span's start, and each group is one chunk. A key span longer
+# than WINDOW blocks the check, naming the place. Windows add up to at most 5n/4 + WINDOW bytes
+# and groups (disjoint) to at most n; the size check is 13n/4 + 2 * WINDOW. Private terms are
+# matched in Python on the whole text, never on windows.
 GITLEAKS_PIECE = 100_000
 WINDOW = 90_000
 OVERLAP = 16_000
@@ -221,250 +226,216 @@ class Terms:
     """The private terms, and how to find and mask them: one fold, one word test, one pattern per
     term, used by find and mask alike.
 
-    Units. A line is split into units: a character that is not a mark (category M*) with every
-    mark after it. Marks at the start of a line, or right after an ignorable character, form a
-    unit with no base. An ignorable character (category Cf, and the other default-ignorable
-    characters in _IGNORABLE) is a unit of its own and folds to nothing.
-    Fold. A line is folded as one stream, so the result is Unicode's compatibility caseless match
-    (D146) of the whole line, NFKD(casefold(NFKD(casefold(NFD(line))))), by construction: each
-    character is decomposed and folded on its own, carrying the unit it came from (its owner),
-    and after each decomposition every run of combining marks is put in canonical order (a stable
-    sort on the combining class), as Unicode normalization does. Then U+0131 (dotless i) becomes
-    i, and a U+0307 (dot above) right after an i is dropped, so Turkish capital I with a dot and
-    dotless i fold to i. Ignorable characters are left out first. NFC and NFD spellings fold the
-    same. A term is folded the same way, then split into words on [-_. ]+; its pattern joins the
-    words with up to three separators, or up to the longest run of separators the term holds.
-    Word test. A hit counts only when it holds whole units: every unit that has a folded
-    character inside the hit has all its folded characters inside it (reordering can put another
-    unit's mark between one unit's characters, so adjacent owners are not enough), and the
-    nearest unit on each side that is not ignorable is not a word unit: one whose base
-    character's own Unicode category is Lu, Ll, Lt (a letter of a cased script) or Nd (a decimal
-    digit), with or without marks. Letters of scripts with no case (Lo) even with marks, modifier
-    letters (Lm), other numbers (Nl, No), punctuation, symbols, spaces and units with no base are
-    breaks: text in many caseless scripts has no spaces between words, so a term glued to it is
-    reported (fail closed). The test reads the original units, never folded ones (a symbol can
-    fold to letters).
+    Strip. Invisible characters (Unicode's Default_Ignorable_Code_Point, listed in _IGNORABLE as
+    escapes; not all of category Cf: U+0600 and the other visible format characters stay) are
+    removed from a line, and from each term, first. Every offset maps back to the original line,
+    so find and mask report and cover the text as written. A line gives the same result with and
+    without them.
+    Units. The stripped line is split into units: a character that is not attached, with every
+    attached character after it. An attached character is one of category M, or one whose first
+    folded character is of category M (U+0E33, U+0EB3, U+FF9E, U+FF9F; pinned by a test).
+    Attached characters at the start of a line form a unit with no base. In the original line an
+    invisible character stays in the unit before it.
+    Fold. Each unit is folded whole: Unicode's compatibility caseless match (D146),
+    NFKD(casefold(NFKD(casefold(NFD(unit))))), plus one Turkish adjustment: U+0131 (dotless i)
+    becomes i, and a U+0307 (dot above) that follows an i with only combining characters between
+    is dropped. No reordering crosses a unit, so the units' folds joined are D146 of the whole
+    stripped line with that adjustment. Precomposed and decomposed spellings fold the same.
+    Separators. A term is folded the same way, then split into words on [-_. ]+. Its words match
+    with nothing between them or up to N separators, where N is the term's longest run of
+    separator characters as written, and at least 1. Separators are counted as written, in the
+    line and in the term: a character whose fold is made only of separators (an ellipsis, a wide
+    space) counts as one.
+    Word test. A hit starts on a unit boundary. It ends on a unit boundary, or inside its last
+    unit where everything after the hit in that unit is attached or combining: written after the
+    base, or produced by decomposing a precomposed letter; never where the rest holds a letter of
+    the base's own fold (the term s is not found in U+00DF). A hit is part of a longer word, and
+    is not reported, only when the unit just before it, or the unit just after its last unit,
+    read in NFC, starts with an ASCII letter or digit. Everything else is a break, so a term glued
+    to it is reported (fail closed): accented, Greek and Cyrillic letters in either storage form,
+    letters of caseless scripts, other digits, punctuation, symbols, spaces and units with no
+    base. The test reads the original units, never folded ones (a symbol can fold to letters).
     Lines are split on \n only; no fold of another character holds a \n."""
 
-    _IGNORABLE = re.compile("[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2065\u3164\ufe00-\ufe0f\uffa0"
-                            "\ufff0-\ufff8\U000e0000-\U000e0fff]")
+    # Default_Ignorable_Code_Point (Unicode 16.0; the same in 15.0), as escapes.
+    _IGNORABLE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
+                            "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+                            "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
     _SEPARATORS = re.compile("[-_. ]+")
-    _WORD = ("Lu", "Ll", "Lt", "Nd")
-    _SKIP, _MARK, _OTHER = 0, 1, 2  # what a character is to the unit split (_kind)
-    # The steps of D146 after NFD, in order: a decomposition (then reordering) or a case fold.
-    _STEPS = ("NFD", "casefold", "NFKD", "casefold", "NFKD")
-    # Folded segments are cached by their text. A line of many distinct segments would grow the
-    # cache without end, so it is emptied when it reaches this many entries (a cache miss only
-    # costs a fold).
+    _INVISIBLE, _ATTACHED, _BASE = 0, 1, 2  # what a character is to the unit split (_kind)
+    # Folded units are cached by their text. A line of many distinct units would grow the cache
+    # without end, so it is emptied when it reaches this many entries (a miss only costs a fold).
     SEGMENT_CACHE_LIMIT = 4096
 
     def __init__(self, terms: list[str], warning: str | None) -> None:
         self.warning = warning
         self._kinds: dict[str, int] = {}
-        self._starters: dict[str, bool] = {}
-        self._segments: dict[str, tuple[str, list[int]]] = {}
+        self._segments: dict[str, str] = {}
+        self._letters: dict[str, int] = {}
         self.patterns: list[re.Pattern[str]] = []
+        self._most: list[int] = []  # per pattern: the separators allowed between two words
         for term in terms:
-            folded = self._line(term)[1]
+            _units, folded, owner = self._line(term)
             words = [w for w in self._SEPARATORS.split(folded) if w]
             if words:
-                most = max([3] + [len(run) for run in self._SEPARATORS.findall(folded)])
-                self.patterns.append(re.compile(("[-_. ]{0,%d}" % most).join(re.escape(w) for w in words)))
+                self.patterns.append(re.compile("[-_. ]*".join(re.escape(w) for w in words)))
+                self._most.append(max([1] + [owner[r.end() - 1] - owner[r.start()] + 1
+                                             for r in self._SEPARATORS.finditer(folded)]))
 
     def _ignorable(self, ch: str) -> bool:
-        return unicodedata.category(ch) == "Cf" or self._IGNORABLE.match(ch) is not None
+        return self._IGNORABLE.match(ch) is not None
 
     def _kind(self, ch: str) -> int:
         got = self._kinds.get(ch)
         if got is None:
             if self._ignorable(ch):
-                got = self._SKIP
+                got = self._INVISIBLE
+            elif unicodedata.category(ch)[0] == "M" or unicodedata.category(self._fold(ch)[:1] or "x")[0] == "M":
+                got = self._ATTACHED
             else:
-                got = self._MARK if unicodedata.category(ch)[0] == "M" else self._OTHER
+                got = self._BASE
             self._kinds[ch] = got
         return got
 
-    def _starts_segment(self, ch: str) -> bool:
-        """True when no reordering pass of the fold can move anything across CH: after each step,
-        the first character of what CH has become has combining class 0. So the text before CH
-        and the text from CH on fold independently."""
-        got = self._starters.get(ch)
+    def _fold(self, unit: str) -> str:
+        """D146 of UNIT plus the Turkish adjustment (see the class text)."""
+        got = self._segments.get(unit)
         if got is None:
-            got, first = True, ch
-            for step in self._STEPS:
-                first = (first.casefold() if step == "casefold" else unicodedata.normalize(step, first))[:1]
-                if not first or unicodedata.combining(first):
-                    got = False
-                    break
-            self._starters[ch] = got
+            n = unicodedata.normalize
+            got = n("NFKD", n("NFKD", n("NFD", unit).casefold()).casefold())
+            if "\u0131" in got:
+                got = got.replace("\u0131", "i")
+            if "\u0307" in got and "i" in got:
+                out, after_i = [], False
+                for c in got:
+                    if c == "\u0307" and after_i:
+                        continue
+                    if unicodedata.category(c)[0] != "M":
+                        after_i = c == "i"
+                    out.append(c)
+                got = "".join(out)
+            if len(unit) <= 32:
+                if len(self._segments) >= self.SEGMENT_CACHE_LIMIT:
+                    self._segments.clear()
+                self._segments[unit] = got
         return got
 
-    @staticmethod
-    def _reorder(chars: list[str], src: list[int]) -> None:
-        """Canonical ordering, in place: each run of characters with a combining class above 0
-        stably sorted by that class, SRC moved along."""
-        ccc = [unicodedata.combining(c) for c in chars]
-        i, n = 0, len(chars)
-        while i < n:
-            if not ccc[i]:
-                i += 1
-                continue
-            j = i + 1
-            while j < n and ccc[j]:
-                j += 1
-            if j - i > 1:
-                order = sorted(range(i, j), key=ccc.__getitem__)
-                chars[i:j] = [chars[k] for k in order]
-                src[i:j] = [src[k] for k in order]
-            i = j
-
-    def _fold_segment(self, seg: str) -> tuple[str, list[int]]:
-        """(folded SEG, for each folded character the index in SEG of the character it came
-        from). A step that would change nothing is skipped (checked on the whole text)."""
-        chars, src = list(seg), list(range(len(seg)))
-        for step in self._STEPS:
-            text = "".join(chars)
-            if step == "casefold":
-                if text.casefold() == text:
-                    continue
-            elif unicodedata.is_normalized(step, text):
-                continue
-            out_c: list[str] = []
-            out_s: list[int] = []
-            for c, k in zip(chars, src):
-                got = c.casefold() if step == "casefold" else unicodedata.normalize(step, c)
-                out_c.extend(got)
-                out_s.extend([k] * len(got))
-            chars, src = out_c, out_s
-            if step != "casefold":
-                self._reorder(chars, src)
-        if "\u0131" in chars or "\u0307" in chars:
-            out_c, out_s = [], []
-            for c, k in zip(chars, src):
-                if c == "\u0131":
-                    c = "i"
-                elif c == "\u0307" and out_c and out_c[-1] == "i":
-                    continue
-                out_c.append(c)
-                out_s.append(k)
-            chars, src = out_c, out_s
-        return "".join(chars), src
-
     def _line(self, line: str) -> tuple[Sequence[str], str, Sequence[int]]:
-        """(units, folded line, owner): owner[k] is the unit that folded character k came from.
-        A pure-ASCII line takes a fast path with the same results (one unit per character)."""
+        """(units, folded line, owner): units are the original line cut where each unit's first
+        kept character is (an invisible character stays in the unit before it, or in the first
+        unit), and owner[k] is the unit folded character k came from. A pure-ASCII line takes a
+        fast path with the same results (one unit per character)."""
         if line.isascii():
             return line, line.lower(), range(len(line))
         return self._general(line)
 
     def _general(self, line: str) -> tuple[list[str], str, list[int]]:
-        """_line for any line. The stream is folded in segments, each starting at a character
-        no reordering can cross (_starts_segment), so each segment folds on its own."""
-        starts: list[int] = []  # where each unit starts in LINE
-        folded: list[str] = []
-        owner: list[int] = []
-        seg: list[str] = []
-        seg_owner: list[int] = []
-
-        def flush() -> None:
-            text = "".join(seg)
-            got = self._segments.get(text)
-            if got is None:
-                got = self._fold_segment(text)
-                if len(text) <= 32:
-                    if len(self._segments) >= self.SEGMENT_CACHE_LIMIT:
-                        self._segments.clear()
-                    self._segments[text] = got
-            folded.append(got[0])
-            owner.extend([seg_owner[k] for k in got[1]])
-
-        kinds, starters = self._kinds, self._starters  # read directly: this loop runs per character
-        takes_marks = False
+        """_line for any line."""
+        cuts: list[int] = []  # where each unit's first kept character is in LINE
+        keep: list[list[str]] = []  # the kept characters of each unit
+        kinds = self._kinds  # read directly: this loop runs per character
         for i, ch in enumerate(line):
             kind = kinds.get(ch)
             if kind is None:
                 kind = self._kind(ch)
-            if kind == self._SKIP:
-                starts.append(i)
-                takes_marks = False
-                continue
-            if not (takes_marks and kind == self._MARK):
-                starts.append(i)
-                takes_marks = True
-            if seg:
-                starter = starters.get(ch)
-                if starter is None:
-                    starter = self._starts_segment(ch)
-                if starter:
-                    flush()
-                    seg, seg_owner = [], []
-            seg.append(ch)
-            seg_owner.append(len(starts) - 1)
-        if seg:
-            flush()
-        bounds = starts + [len(line)]
+            if kind == self._BASE or (kind == self._ATTACHED and not keep):
+                cuts.append(i)
+                keep.append([ch])
+            elif kind == self._ATTACHED:
+                keep[-1].append(ch)
+        folded: list[str] = []
+        owner: list[int] = []
+        for k, chars in enumerate(keep):
+            got = self._fold("".join(chars))
+            folded.append(got)
+            owner.extend([k] * len(got))
+        if not cuts:
+            return ([line] if line else []), "", owner
+        bounds = [0] + cuts[1:] + [len(line)]
         return [line[a:b] for a, b in zip(bounds, bounds[1:])], "".join(folded), owner
 
+    def _kept(self, unit: str) -> str:
+        return unit if unit.isascii() else self._IGNORABLE.sub("", unit)
+
     def _word(self, unit: str) -> bool:
-        return unicodedata.category(unit[0]) in self._WORD
+        """True when UNIT, read in NFC with its invisible characters removed, starts with an
+        ASCII letter or digit."""
+        first = unit[:1] if len(unit) == 1 else unicodedata.normalize("NFC", self._kept(unit))[:1]
+        return first.isascii() and first.isalnum()
 
-    @staticmethod
-    def _extent(units: Sequence[str], owner: Sequence[int]) -> tuple[list[int], list[int]]:
-        """(first, last): the first and last position in the folded line of each unit's folded
-        characters (a unit with none keeps first past the end and last at -1)."""
-        first, last = [len(owner)] * len(units), [-1] * len(units)
-        for k, o in enumerate(owner):
-            if k < first[o]:
-                first[o] = k
-            last[o] = k
-        return first, last
-
-    def _alone(self, units: Sequence[str], owner: Sequence[int], extent: tuple[list[int], list[int]],
-               s: int, e: int, lo: int, hi: int) -> bool:
-        """The hit [s, e) of the folded line, covering units [lo, hi), holds every folded
-        character of each unit it touches, with no word unit next to it (ignorable units skipped)."""
-        first, last = extent
-        for o in owner[s:e]:
-            if first[o] < s or last[o] >= e:
-                return False
-        k = lo - 1
-        while k >= 0 and self._ignorable(units[k][0]):
-            k -= 1
-        if k >= 0 and self._word(units[k]):
-            return False
-        k = hi
-        while k < len(units) and self._ignorable(units[k][0]):
-            k += 1
-        return not (k < len(units) and self._word(units[k]))
+    def _base_letters(self, unit: str) -> int:
+        """How many folded characters of UNIT's base (its first kept character, unless that is
+        attached) are not combining characters."""
+        kept = self._kept(unit)[:1]
+        if not kept or self._kind(kept) != self._BASE:
+            return 0
+        got = self._letters.get(kept)
+        if got is None:
+            got = sum(1 for c in self._fold(kept) if unicodedata.category(c)[0] != "M")
+            self._letters[kept] = got
+        return got
 
     def _hits(self, line: str, edges: bool) -> tuple[Sequence[str], list[tuple[int, int]]]:
-        """(units, hits) of LINE: each hit is a range of units [first, last + 1), sorted (the
-        units its folded characters came from; reordering can move a mark's folded character
-        past another unit's, so the range runs from the least owner to the greatest). With
-        EDGES, a hit must pass the word test, and the search goes on at a counted hit's end, or
-        one past a rejected hit's start. Without (masking), every match counts and the search
-        always goes on one past its start, so overlapping matches are all found."""
+        """(units, hits) of LINE: each hit is a range of units [first, last + 1), sorted. A hit's
+        separator runs each span at most the pattern's allowance of units. With EDGES, a hit must
+        also pass the word test (see the class text), and the search goes on at a counted hit's
+        end, or one past a rejected hit's start. Without (masking), every match counts and the
+        search always goes on one past its start, so overlapping matches are all found."""
         units, folded, owner = self._line(line)
-        extent: tuple[list[int], list[int]] | None = None  # built at the first hit that needs it
+        n, count = len(folded), len(units)
+        words: dict[int, bool] = {}
+
+        def word(k: int) -> bool:
+            got = words.get(k)
+            if got is None:
+                got = words[k] = self._word(units[k])
+            return got
+
         out = []
-        for pattern in self.patterns:
+        for pattern, most in zip(self.patterns, self._most):
             pos = 0
             while True:
                 m = pattern.search(folded, pos)
                 if m is None:
                     break
                 s, e = m.span()
-                span = owner[s:e]
-                lo, hi = min(span), max(span) + 1
-                if edges:
-                    if extent is None:
-                        extent = self._extent(units, owner)
-                    if not self._alone(units, owner, extent, s, e, lo, hi):
-                        pos = s + 1
-                        continue
+                lo, hi = owner[s], owner[e - 1] + 1
+                good = all(owner[r.end() - 1] - owner[r.start()] < most for r in self._SEPARATORS.finditer(folded, s, e))
+                if good and edges:
+                    good = not ((s and owner[s - 1] == lo) or (lo and word(lo - 1)) or (hi < count and word(hi)))
+                    if good and e < n and owner[e] == hi - 1:
+                        # The hit ends inside its last unit: every letter of that unit's base must
+                        # be inside the hit (the base's letters come first among the unit's
+                        # folded characters that are not combining).
+                        start = bisect.bisect_left(owner, hi - 1)
+                        good = sum(1 for c in folded[start:e] if unicodedata.category(c)[0] != "M") \
+                            >= self._base_letters(units[hi - 1])
+                if not good:
+                    pos = s + 1
+                    continue
                 out.append((lo, hi))
                 pos = e if edges else s + 1
         return units, sorted(out)
+
+    def _spans(self, units: Sequence[str], hits: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Each hit as (start, end) in the line: from its first unit's first kept character to
+        just after its last unit's last kept character (invisible characters at either end of a
+        hit are not part of it)."""
+        if isinstance(units, str):  # the ASCII fast path: one unit per character
+            return hits
+        at = [0]
+        for u in units:
+            at.append(at[-1] + len(u))
+        line = "".join(units)
+        out = []
+        for a, b in hits:
+            s, e = at[a], at[b]
+            while s < e and self._ignorable(line[s]):
+                s += 1
+            while e > s and self._ignorable(line[e - 1]):
+                e -= 1
+            out.append((s, e))
+        return out
 
     def find(self, text: str) -> list[tuple[int, str]]:
         """(line number, matched original text) of each term in TEXT."""
@@ -472,7 +443,8 @@ class Terms:
         if self.patterns:
             for n, line in enumerate(text.split("\n"), 1):
                 units, hits = self._hits(line, True)
-                out.extend((n, "".join(units[a:b])) for a, b in hits)
+                if hits:
+                    out.extend((n, line[s:e]) for s, e in self._spans(units, hits))
         return out
 
     def mask(self, text: str) -> str:
@@ -489,10 +461,10 @@ class Terms:
                     else:
                         merged.append([a, b])
                 parts, k = [], 0
-                for a, b in merged:
-                    parts += ["".join(units[k:a]), "<private>"]
-                    k = b
-                lines.append("".join(parts) + "".join(units[k:]))
+                for s, e in self._spans(units, [(a, b) for a, b in merged]):
+                    parts += [line[k:s], "<private>"]
+                    k = e
+                lines.append("".join(parts) + line[k:])
             text = "\n".join(lines)
         for rx in _public_regexes():
             text = rx.sub("<redacted>", text)
@@ -524,9 +496,9 @@ def load_terms() -> Terms:
     Both set and naming different folders: ScanError (the variable must not silently replace
     the recorded list). Neither set: no private terms, with a warning (CI, other machines).
     A folder whose list is missing, unreadable or empty: ScanError (fail closed); so is a list
-    holding a term that yields no pattern, does not find its own text, or starts with a
-    combining mark (its first unit that is not ignorable has no base). The error names the
-    line, never the term."""
+    holding a term that yields no pattern (only separators), does not find its own text, or
+    starts with a combining mark (its first visible character is attached: see Terms). The
+    error names the line, never the term."""
     env = os.environ.get("PRIVATE_NOTES_DIR") or None
     recorded = _recorded_notes_dir()
     if env and recorded and not _same_folder(env, recorded):
@@ -546,8 +518,8 @@ def load_terms() -> Terms:
                 if ln.strip() and not ln.lstrip().startswith("#")]
     for n, term in numbered:
         one = Terms([term], None)
-        units = [u for u in one._line(term)[0] if not one._ignorable(u[0])]
-        if units and unicodedata.category(units[0][0])[0] == "M":
+        visible = one._IGNORABLE.sub("", term)
+        if visible and one._kind(visible[0]) == one._ATTACHED:
             raise ScanError(f"the private term list ({where}) could not be used: the term on line {n} "
                             "starts with a combining mark")
         if not one.patterns or not one.find(term):
@@ -1106,54 +1078,100 @@ def _body_end(text: bytes, at: int) -> int:
 
 
 def _key_spans(text: bytes) -> list[tuple[int, int]]:
-    """(start, end) of each private-key match of TEXT, as gitleaks finds them: from a BEGIN
-    marker to the end of the first END marker that starts at least KEY_MIN_BODY characters
-    after the BEGIN marker ends. A BEGIN marker with no such END marker is no key; the search
-    then goes on one byte after its start, as Go's FindAll goes on one character later (a
-    finditer would go on after its greedy header, which can hold the next real BEGIN marker).
-    After a match the search goes on at its end, so spans never overlap."""
+    """(start, end) of each private-key match of TEXT, as gitleaks finds them. TEXT and the
+    offsets are bytes. A match runs from a BEGIN marker to the end of the first END marker that
+    starts at least KEY_MIN_BODY characters after the header ends (just after its closing
+    dashes). The longest header is tried first; when it has no such END marker, each shorter
+    header the BEGIN line allows is tried in turn, as Go's backtracking does. A BEGIN marker with
+    no END marker for any header is no key, and the search goes on one byte after its start (Go's
+    FindAll goes on one character later; a BEGIN marker is ASCII, so no match can start inside a
+    character). After a match the search goes on at its end, so key spans never overlap each
+    other; encoded runs can overlap them, and _plan merges those."""
     ends = list(_KEY_END.finditer(text))
     starts = [m.start() for m in ends]
     out: list[tuple[int, int]] = []
     pos = 0
     while True:
-        m = _KEY_BEGIN.search(text, pos)
-        if m is None:
+        begin = _KEY_BEGIN.search(text, pos)
+        if begin is None:
             return out
-        i = bisect.bisect_left(starts, _body_end(text, m.end()))
-        if i == len(ends):
-            pos = m.start() + 1
+        m: re.Match[bytes] | None = begin
+        while m is not None:
+            i = bisect.bisect_left(starts, _body_end(text, m.end()))
+            if i < len(ends):
+                break
+            # A shorter header can end at an earlier marker (the header class holds every letter
+            # of PRIVATE KEY and the dash), so its END marker can be nearer.
+            m = _KEY_BEGIN.match(text, m.start(), m.end() - 1)
+        if m is None:
+            pos = begin.start() + 1
             continue
         out.append((m.start(), ends[i].end()))
         pos = ends[i].end()
 
 
+# The encoded shapes gitleaks 8.30.1 decodes before it matches (its own patterns): base64,
+# hex, percent escapes (from the first escape of a line to its last) and Unicode escapes
+# (\uXXXX with one or two backslashes, or U+XXXX followed by a space).
+_ENCODED = (re.compile(rb"[A-Za-z0-9_/+-]{16,}={0,2}"), re.compile(rb"[0-9A-Fa-f]{32,}"),
+            re.compile(rb"%[0-9A-Fa-f]{2}(?:[^\n]*%[0-9A-Fa-f]{2})?"),
+            re.compile(rb"(?:U\+[0-9A-Fa-f]{4}(?:[\t\n\f\r ]|$))+|(?:\\{1,2}[Uu][0-9A-Fa-f]{4})+"))
+
+
 def _plan(text: bytes) -> tuple[list[tuple[int, int]], bool]:
-    """The chunks of TEXT as (start, end), sorted by start, and whether a key block was too long
-    to be read in one piece. A text that fits in one gitleaks piece is one chunk. A longer text:
-    its windows, plus each key span (_key_spans) that no window holds whole; a span longer than
-    WINDOW is not added and sets the flag (the caller blocks, naming the place). Windows add up
-    to at most 1.25n + WINDOW bytes; the key spans added never overlap, so they add up to at
-    most n. So all chunks add up to at most 9n/4 + 2 * WINDOW; a plan over that is a ScanError
-    (it cannot happen; the check guards later edits)."""
+    """The chunks of TEXT as (start, end), sorted by start, and whether a span was too long to be
+    read in one piece. A text that fits in one gitleaks piece is one chunk. A longer text has its
+    windows, plus groups of long spans. The long spans are each key span (_key_spans) and each
+    run of encoded text longer than OVERLAP - 2 * EDGE and at most WINDOW bytes, also where a
+    window holds them. Spans that overlap are merged into their union; spans that only touch
+    stay apart. The merged spans are packed in order into groups: a group starts at a merged
+    span's start and takes each next merged span while that span still ends within WINDOW bytes
+    of the group's start; the next span starts a new group. Each group, from its first span's
+    start to its last span's end, is one chunk. A key span longer than WINDOW is not added and
+    sets the flag (the caller blocks, naming the place); a longer encoded run is left to the
+    windows. A merged span longer than WINDOW whose key spans are each at most WINDOW keeps only
+    those key spans (disjoint, each read whole); its encoded runs are left to the windows.
+    Windows add up to at most 5n/4 + WINDOW bytes, and groups, being disjoint, to at most n.
+    The size check is 13n/4 + 2 * WINDOW; a plan over that is a ScanError (it cannot happen;
+    the check guards later edits)."""
     n = len(text)
     if n <= GITLEAKS_PIECE - 100:
         return [(0, n)], False
-    wins = _windows(text)
-    starts = [at for at, _end in wins]
-    spans = list(wins)
+    raw = [(at, end, True) for at, end in _key_spans(text)]
+    for rx in _ENCODED:
+        raw += [(m.start(), m.end(), False) for m in rx.finditer(text)
+                if OVERLAP - 2 * EDGE < m.end() - m.start() <= WINDOW]
+    raw.sort()
+    merged: list[list[tuple[int, int, bool]]] = []  # each merged span, as the spans it holds
+    reach = -1
+    for span in raw:
+        if merged and span[0] < reach:
+            merged[-1].append(span)
+            reach = max(reach, span[1])
+        else:
+            merged.append([span])
+            reach = span[1]
+    pieces: list[tuple[int, int]] = []
     too_long = False
-    for at, end in _key_spans(text):
-        # Windows start and end in order, so the last one starting at or before AT ends last.
-        i = bisect.bisect_right(starts, at) - 1
-        if i >= 0 and wins[i][1] >= end:
+    for held in merged:
+        at, last = held[0][0], max(span[1] for span in held)
+        if last - at <= WINDOW:
+            pieces.append((at, last))
             continue
-        if end - at > WINDOW:
-            too_long = True
-            continue
-        spans.append((at, end))
+        for s, e, key in held:
+            if key and e - s > WINDOW:
+                too_long = True
+            elif key:
+                pieces.append((s, e))
+    chunks: list[tuple[int, int]] = []
+    for at, end in pieces:
+        if chunks and end - chunks[-1][0] <= WINDOW:
+            chunks[-1] = (chunks[-1][0], end)
+        else:
+            chunks.append((at, end))
+    spans = _windows(text) + chunks
     spans.sort(key=lambda span: span[0])  # stable: the first window stays first
-    if sum(end - at for at, end in spans) > 9 * n // 4 + 2 * WINDOW:
+    if sum(end - at for at, end in spans) > 13 * n // 4 + 2 * WINDOW:
         raise ScanError("the scan plan for a long text exceeds its size bound")
     return spans, too_long
 
