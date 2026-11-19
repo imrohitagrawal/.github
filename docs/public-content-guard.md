@@ -107,18 +107,41 @@ Until one of these is in place, review every pull request that edits a workflow.
   sessions. The bare prefix, the bare word, `claude.ai` alone, and a short commit id with no
   such word pass.
 - **Private terms**: a private list of words, such as private project names. The list is
-  never committed (see [Private terms](#private-terms)). Terms are compared after Unicode
-  compatibility and case folding of the whole line (STRASSE matches the word written with a
-  German sharp s; full-width letters, ligatures and the Turkish capital I with a dot match),
-  with nothing or up to three of `-`, `_`, `.` or space between their words (more, when the
-  term itself holds a longer run). A term is part of a longer word when the character next to
-  it is a word character: one whose own Unicode category is an upper-case, lower-case or
-  title-case letter (Lu, Ll, Lt: the letters of scripts with case, such as Latin, Greek and
-  Cyrillic) or a decimal digit (Nd), together with any combining marks (accents written after
-  a character) on it. Everything else is a break: letters of scripts without case (Han, Kana,
-  Thai, Arabic and others), modifier letters, other numbers, punctuation and symbols, so a term
-  next to them is reported. Invisible characters such as a zero-width space are skipped. `_`
-  counts as a break, so `term_client` matches.
+  never committed (see [Private terms](#private-terms)). Invisible characters are removed
+  from a line, and from each term, first: the characters Unicode lists as default ignorable
+  (Default_Ignorable_Code_Point), such as a zero-width space, a zero-width joiner or a soft
+  hyphen. So a line gives the same result with and without them. Visible format characters,
+  such as the Arabic number sign (U+0600), stay. Terms are then compared after Unicode
+  compatibility and case folding of the whole line (Unicode's compatibility caseless match,
+  plus one Turkish adjustment). STRASSE matches the word written with a German sharp s, and
+  full-width letters, ligatures and the Turkish capital I with a dot match too. A text gives
+  the same result in both Unicode storage forms: a precomposed letter, or a letter followed by
+  a combining accent.
+  - Separators: a term's words may have nothing between them, or one of `-`, `_`, `.` or
+    space. A term that itself holds a longer run of these allows nothing, or runs up to that
+    length. Separators are counted as written, in the line and in the term: a character that
+    folds to several of them, such as an ellipsis, counts as one, and so does a character that
+    folds to one, such as a wide space.
+  - Attached characters: a combining character (Unicode category M, such as an accent written
+    after a letter) belongs to the character before it. So does a character whose fold starts
+    with a combining character: the half-width Katakana sound marks, and the Thai and Lao sara
+    am.
+  - Where a hit starts and ends: a hit starts at a character as written, together with the
+    characters attached to it. It ends at the end of a character as written, or inside its
+    last character where everything after the hit in that character is attached or combining:
+    written as a separate accent, or produced by the decomposition of a precomposed letter. So
+    a term whose last letter carries an accent is reported, in either storage form. A hit
+    never ends inside the fold of a letter itself: the term `s` does not match a German sharp
+    s.
+  - Longer words: a term is part of a longer word, and is not reported, only when an ASCII
+    letter or digit (`A` to `Z`, `a` to `z`, `0` to `9`, with or without marks on it) is
+    written directly before the hit, or directly after it and the attached characters that end
+    it. Each neighbouring character is read in its composed form (NFC), so an `e` followed by
+    a combining acute reads as an e with an acute, which is not ASCII. Everything else is a
+    break, so a term next to it is reported. That includes a combining accent after the term,
+    accented, Greek and Cyrillic letters in either storage form, letters of scripts without
+    case (Han, Kana, Thai, Arabic and others), other digits, punctuation and symbols. `_`
+    counts as a break, so `term_client` matches.
 
 The public rules live in [`public-content/gitleaks-public.toml`](../public-content/gitleaks-public.toml).
 Secrets and the public rules run as two separate gitleaks passes. One layered config does not
@@ -248,23 +271,42 @@ that holds one (a `curl` command with a blank line in it, a PGP key block). So:
   before, moved back by up to 2 000 bytes to a line start or to just after a character that is
   not a letter or digit, so windows overlap by at least 14 000 bytes. A match of up to that
   length is wholly inside some window. A longer match that crosses a window edge can be
-  missed. Where a window edge falls inside a run of letters and digits with no break within
+  missed. Key blocks and long runs of encoded text are the exception: they are read whole,
+  or, if too long, block the check (below). Where a window edge falls inside a run of letters and digits with no break within
   2 000 bytes, a rule that needs a word boundary can match there although it would not match
   in the whole text (this can only add a finding). Likewise, a window can start just after a
   character that is not a letter or digit (for example the `//` of a URL), so a rule that
   looks at the character before a match can match there although it would not in the whole
   text; this can only add a finding, never hide one.
-- The private-key rule has no length limit. So in a text longer than one piece, each key
-  block that no window already holds is also read as a piece of its own; a block a window
-  holds is not read again. A block runs from its BEGIN marker to the first END marker at
-  least 64 characters after it. The END marker is any `KEY-----` or `KEY BLOCK-----`,
-  including the end of a later key's own BEGIN line; a BEGIN marker with none of these after
-  it is not a key. The Kelvin sign and the long s count as k and s, as they do in gitleaks. A
-  key block longer than 90 000 bytes blocks the check and names the place (the file, commit
-  or message), saying "a private key block (or text shaped like one) crosses a scan window",
-  with the fix: remove the key from the commits. The text of the pieces of one text adds up to
-  at most 2.25 times its size plus 180 000 bytes; each piece's file adds 37 bytes to that (a
-  line break before the text, and a line break and a 35-byte proof-of-reading line after it).
+- Some matches can be longer than the overlap: the private-key rule has no length limit, and
+  gitleaks decodes encoded text (such as base64) before it matches. So in a text longer than
+  one piece, the guard also reads these spans whole, also where a window already holds them:
+  - Each key block, found the way gitleaks finds it. A block runs from its BEGIN marker to the
+    first END marker that starts at least 64 characters after its header ends. The header is
+    the BEGIN marker itself, from `-----BEGIN` to the `-----` that closes `PRIVATE KEY` or
+    `PRIVATE KEY BLOCK`; the 64 characters are counted from just after those closing dashes.
+    The END marker is any `KEY-----` or `KEY BLOCK-----`, including the end of a later key's
+    own BEGIN line. A BEGIN line can hold more than one place where its header could end. When
+    the longest header has no END marker far enough after it, a shorter one is tried, as
+    gitleaks' own pattern does; a BEGIN marker with none of these after any of its headers is
+    not a key. The Kelvin sign and the long s count as k and s, as they do in gitleaks.
+  - Each run of encoded text longer than 12 000 bytes (the 16 000-byte overlap, less twice the
+    2 000 bytes an edge may move back), in a shape gitleaks 8.30.1 decodes: base64 (letters,
+    digits, `+`, `/`, `-` and `_`, then up to two `=`), hex, percent escapes (from the first
+    `%XX` of a line to its last one) and Unicode escapes (`\uXXXX` with one or two
+    backslashes, or `U+XXXX` followed by a space).
+
+  Spans that overlap or touch (one ends where the next starts) are merged into one span. The
+  merged spans are read in groups, in order. A group starts at the start of a merged span and
+  takes each next merged span while the group, from its first span's start to its last span's
+  end, fits in 90 000 bytes. The next span starts a new group, and each group is read as one
+  piece. A merged span longer than 90 000 bytes blocks the check and names the place (the
+  file, commit or message), saying "a private key block (or text shaped like one) crosses a
+  scan window", with the fix: remove the key from the commits. The text of the pieces of one
+  text adds up to at most 3.25 times its size plus 180 000 bytes (the guard's own size check:
+  the windows add up to at most 1.25 times the size plus 90 000 bytes, and the groups, which
+  never overlap, to at most the size). Each piece's file adds 37 bytes to that: a line break
+  before the text, and a line break and a 35-byte proof-of-reading line after it.
 - Private terms are matched on the whole text, never on windows, so a window edge never
   changes whether a term is inside a longer word.
 
@@ -476,9 +518,10 @@ The hook blocks the push, and the CI step fails, when a check cannot finish:
 - an archive cannot be read completely, or is a format the guard cannot open (see
   [What is checked](#what-is-checked));
 - the notes folder is set but its term list is missing, unreadable or empty, or holds a term
-  made only of separators (hyphen, underscore, full stop, space), that does not match its own
-  text, or that starts with a combining mark (the message names the line number, never the
-  term);
+  that is one of these: made only of separators (hyphen, underscore, full stop, space); one
+  that does not match its own text; or one whose first visible character is attached (a
+  combining character, or a character whose fold starts with one). The message names the
+  line number, never the term;
 - the allowed address list is missing, unreadable, or has a line that is not an address;
 - `PRIVATE_NOTES_DIR` differs from the recorded notes folder;
 - a destination tip is missing locally and cannot be fetched;
