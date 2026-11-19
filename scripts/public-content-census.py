@@ -124,7 +124,7 @@ DECISIONS = {
     "spelling: separator: run of two": "answer 3 (2026-11-17): one separator unless the term holds more (D4)",
     "spelling: separator: run of three": "answer 3 (2026-11-17): one separator unless the term holds more (D4)",
     "spelling: separator: invisible between two spaces": "O4 + D4: an invisible character is absent, so two spaces",
-    "spelling: visible format character inside": "A2: only Default_Ignorable_Code_Point is invisible",
+    "spelling: visible format character inside": "E7: every format character is removed before folding",
     "after: combining mark, then ASCII letter": "D2: an ASCII letter after the marks ending a hit joins it",
     "after: attached character, then ASCII letter": "D2 + W3: an ASCII letter after attached characters joins",
     "before: ASCII letter with a mark": "D2: an ASCII letter, with or without marks, joins the term",
@@ -132,8 +132,8 @@ DECISIONS = {
     "before: ASCII letter, then attached character": "W3: the attached character belongs to the letter",
     "before: invisible, then ASCII letter": "O4: an invisible character is absent",
     "after: invisible, then ASCII letter": "O4: an invisible character is absent",
-    "before: visible format character, then ASCII letter": "A2: a visible format character is a break",
-    "after: visible format character, then ASCII letter": "A2: a visible format character is a break",
+    "before: visible format character, then ASCII letter": "E7: the format character is removed, so the letter joins (as O4)",
+    "after: visible format character, then ASCII letter": "E7: the format character is removed, so the letter joins (as O4)",
 }
 
 
