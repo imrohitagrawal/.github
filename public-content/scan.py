@@ -85,6 +85,7 @@ import argparse
 import bisect
 import bz2
 import io
+import itertools
 import json
 import lzma
 import math
@@ -290,8 +291,8 @@ class Terms:
         if got is None:
             if self._ignorable(ch):
                 got = self._INVISIBLE
-            elif unicodedata.category(ch)[0] == "M" or unicodedata.category(self._fold(ch)[:1] or "x")[0] == "M":
-                got = self._ATTACHED
+            elif unicodedata.category(ch)[0] == "M" or unicodedata.category(self._fold(ch)[0])[0] == "M":
+                got = self._ATTACHED  # no character outside _IGNORABLE folds to nothing (pinned by a test)
             else:
                 got = self._BASE
             self._kinds[ch] = got
@@ -330,43 +331,42 @@ class Terms:
         return self._general(line)
 
     def _general(self, line: str) -> tuple[list[str], str, list[int]]:
-        """_line for any line."""
-        cuts: list[int] = []  # where each unit's first kept character is in LINE
-        keep: list[list[str]] = []  # the kept characters of each unit
-        kinds = self._kinds  # read directly: this loop runs per character
-        for i, ch in enumerate(line):
-            kind = kinds.get(ch)
-            if kind is None:
-                kind = self._kind(ch)
-            if kind == self._BASE or (kind == self._ATTACHED and not keep):
-                cuts.append(i)
-                keep.append([ch])
-            elif kind == self._ATTACHED:
-                keep[-1].append(ch)
-        folded: list[str] = []
-        owner: list[int] = []
-        for k, chars in enumerate(keep):
-            got = self._fold("".join(chars))
-            folded.append(got)
-            owner.extend([k] * len(got))
-        if not cuts:
-            return ([line] if line else []), "", owner
-        bounds = [0] + cuts[1:] + [len(line)]
-        return [line[a:b] for a, b in zip(bounds, bounds[1:])], "".join(folded), owner
-
-    def _kept(self, unit: str) -> str:
-        return unit if unit.isascii() else self._IGNORABLE.sub("", unit)
+        """_line for any line. Each distinct character of the line is classed once (_kind); a
+        regex over the line's own invisible and attached characters then cuts it into units."""
+        special = [ch for ch in set(line) if self._kind(ch) != self._BASE]
+        if not special:
+            units = list(line)
+            kept: list[str] = units
+        else:
+            cls = "[" + "".join(re.escape(ch) for ch in special) + "]"
+            lead = re.match(cls + "*", line).group()  # type: ignore[union-attr]
+            units = re.findall("[^" + cls[1:] + cls + "*", line[len(lead):])
+            if lead:
+                if units and all(self._kind(ch) == self._INVISIBLE for ch in lead):
+                    units[0] = lead + units[0]  # invisible characters before the first unit join it
+                else:
+                    units.insert(0, lead)  # attached characters at the start form a unit with no base
+            invisible = any(self._kind(ch) == self._INVISIBLE for ch in special)
+            kept = [self._IGNORABLE.sub("", u) for u in units] if invisible else units
+        cache = self._segments
+        folds = [cache.get(u) or self._fold(u) for u in kept]
+        lens = list(map(len, folds))
+        if len(lens) == sum(lens):
+            owner = list(range(len(lens)))
+        else:
+            owner = list(itertools.chain.from_iterable(map(itertools.repeat, range(len(lens)), lens)))
+        return units, "".join(folds), owner
 
     def _word(self, unit: str) -> bool:
         """True when UNIT, read in NFC with its invisible characters removed, starts with an
         ASCII letter or digit."""
-        first = unit[:1] if len(unit) == 1 else unicodedata.normalize("NFC", self._kept(unit))[:1]
+        first = unit[:1] if unit.isascii() else unicodedata.normalize("NFC", self._IGNORABLE.sub("", unit))[:1]
         return first.isascii() and first.isalnum()
 
     def _base_letters(self, unit: str) -> int:
         """How many folded characters of UNIT's base (its first kept character, unless that is
         attached) are not combining characters."""
-        kept = self._kept(unit)[:1]
+        kept = next((ch for ch in unit if not self._ignorable(ch)), "")
         if not kept or self._kind(kept) != self._BASE:
             return 0
         got = self._letters.get(kept)
@@ -400,7 +400,8 @@ class Terms:
                     break
                 s, e = m.span()
                 lo, hi = owner[s], owner[e - 1] + 1
-                good = all(owner[r.end() - 1] - owner[r.start()] < most for r in self._SEPARATORS.finditer(folded, s, e))
+                good = all(owner[r.end() - 1] - owner[r.start()] < most
+                           for r in self._SEPARATORS.finditer(folded, s, e))
                 if good and edges:
                     good = not ((s and owner[s - 1] == lo) or (lo and word(lo - 1)) or (hi < count and word(hi)))
                     if good and e < n and owner[e] == hi - 1:
@@ -417,16 +418,13 @@ class Terms:
                 pos = e if edges else s + 1
         return units, sorted(out)
 
-    def _spans(self, units: Sequence[str], hits: list[tuple[int, int]]) -> list[tuple[int, int]]:
-        """Each hit as (start, end) in the line: from its first unit's first kept character to
-        just after its last unit's last kept character (invisible characters at either end of a
-        hit are not part of it)."""
+    def _spans(self, line: str, units: Sequence[str], hits: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Each hit as (start, end) in LINE: from its first unit's first kept character to just
+        after its last unit's last kept character (invisible characters at either end of a hit
+        are not part of it)."""
         if isinstance(units, str):  # the ASCII fast path: one unit per character
             return hits
-        at = [0]
-        for u in units:
-            at.append(at[-1] + len(u))
-        line = "".join(units)
+        at = [0, *itertools.accumulate(map(len, units))]
         out = []
         for a, b in hits:
             s, e = at[a], at[b]
@@ -444,7 +442,7 @@ class Terms:
             for n, line in enumerate(text.split("\n"), 1):
                 units, hits = self._hits(line, True)
                 if hits:
-                    out.extend((n, line[s:e]) for s, e in self._spans(units, hits))
+                    out.extend((n, line[s:e]) for s, e in self._spans(line, units, hits))
         return out
 
     def mask(self, text: str) -> str:
@@ -461,7 +459,7 @@ class Terms:
                     else:
                         merged.append([a, b])
                 parts, k = [], 0
-                for s, e in self._spans(units, [(a, b) for a, b in merged]):
+                for s, e in self._spans(line, units, [(a, b) for a, b in merged]):
                     parts += [line[k:s], "<private>"]
                     k = e
                 lines.append("".join(parts) + line[k:])
