@@ -1399,6 +1399,13 @@ def report(name, good, detail=""):
     print(("ok " if good else "bad ") + name + ("" if good else " - " + detail))
 def bound(n):
     return 9 * n // 4 + 2 * W
+def not_whole(spans, text):
+    """The plan's spans other than the whole text: a long text is also read whole, as one more
+    chunk (tested on its own, in (n)); the bounds below are those of the other chunks."""
+    rest = list(spans)
+    if len(text) > scan.GITLEAKS_PIECE - 100 and (0, len(text)) in rest:
+        rest.remove((0, len(text)))
+    return rest
 def keys_of(spans, wins):
     rest = list(wins)
     out = []
@@ -1417,12 +1424,15 @@ texts = (("32 lines of back-to-back blocks", b"\n".join([line] * 32)),
 # chunk bytes grow far past 2.25 times the text).
 # (Changed: every key block now gets a chunk, also one a window holds; the old wording
 # named that skip as the cause.)
+# (Changed: the one chunk that is the whole text is left out of the count.)
 for label, text in texts:
     written = []
     with scan.Scanner(scan.Terms([], None)) as sc:
-        sc._write = lambda meta, chunk, shift, terms: written.append(len(chunk))
+        sc._write = lambda meta, chunk, *rest, **kw: written.append(len(chunk))
         try:
             sc.add("demo", text)
+            if len(text) in written:
+                written.remove(len(text))
             report("T1: %s: chunk bytes within 9n/4 + 2W" % label, sum(written) <= bound(len(text)),
                    "%d bytes in %d chunks for %d" % (sum(written), len(written), len(text)))
         except scan.ScanError as exc:
@@ -1436,6 +1446,7 @@ for label, text in texts:
     except AttributeError as exc:
         report(name, False, "no planner (%s)" % exc)
         continue
+    spans = not_whole(spans, text)
     keys = sorted(keys_of(spans, scan._windows(text)))
     n = len(text)
     good = (sum(e - s for s, e in spans) <= bound(n) and not too_long
@@ -1451,6 +1462,8 @@ for label, text in texts:
 # (Changed: the bound was 13n/4 + 2 * WINDOW before such runs got pieces of their own.)
 # (Changed: overlapping key spans are now merged into one span, so the old fixture, 100
 # copies of one span, no longer reaches the check; the windows are patched instead.)
+# (A long text is also read whole: that chunk's n bytes are counted on both sides, in the plan and
+# in its size check, so the same window counts pass and fail.)
 text = b"!" * 200000
 n = len(text)
 real_w = scan._windows
@@ -1473,7 +1486,7 @@ real = scan._key_spans
 try:
     scan._key_spans = lambda t: [(80000, 170000)] * 100
     spans, too_long = scan._plan(text)
-    extra = keys_of(spans, scan._windows(text))
+    extra = keys_of(not_whole(spans, text), scan._windows(text))
     report("T8b: 100 copies of one key span are read as one chunk", extra == [(80000, 170000)] and not too_long,
            "extra chunks %s, too long %s" % (extra[:3], too_long))
 except scan.ScanError as exc:
@@ -1514,6 +1527,7 @@ pieces = [p.encode("utf-8", "surrogateescape") for p in (
 # (Changed: the clause "no window holds a key span whole" is removed; every key span now
 # has a chunk, so that clause fails on the fixed planner. A text whose merged spans are too long
 # is left out of these two checks and counted.)
+# (Changed: these bounds are those of the chunks other than the one that is the whole text.)
 fails = []
 too_long_texts = 0
 for it in range(300):
@@ -1532,6 +1546,7 @@ for it in range(300):
     except AttributeError as exc:
         fails.append("no planner (%s)" % exc)
         break
+    spans = not_whole(spans, text)
     wins = scan._windows(text)
     keys = sorted(keys_of(spans, wins))
     n = len(text)
@@ -1595,6 +1610,7 @@ for body_len, want in ((64, 1), (63, 0)):
 # The chunks beside the windows ("extra" chunks) of a plan.
 def extra_chunks(text):
     spans, too_long = scan._plan(text)
+    spans = not_whole(spans, text)
     return spans, keys_of(spans, scan._windows(text)), too_long
 def inside(span, chunks):
     return any(s <= span[0] and span[1] <= e for s, e in chunks)
@@ -1675,8 +1691,9 @@ big = (dash + "BEGIN PRIVATE KEY" + dash + "\n").encode() + (b"QUJD" * 16 + b"\n
 text = words_text(50000, big)
 report("Encoded runs partner: a %d-byte raw key block sets the too-long flag" % len(big), len(big) > W and extra_chunks(text)[2] is True,
        "too long %s" % extra_chunks(text)[2])
-# Touching spans. RED WHEN: spans that only touch (one ends where the next starts) are merged: two
-# back-to-back key blocks of about 48 000 bytes then form one span over WINDOW and the text blocks.
+# Touching spans. RED WHEN: either key block is not read whole in a chunk of its own, or the pair
+# sets the too-long flag. (Merging spans that only touch does not turn it red: each block is still
+# read whole as a key block of the longer merged span; that mutant is equivalent.)
 half = (dash + "BEGIN PRIVATE KEY" + dash + "\n").encode() + (b"QUJD" * 16 + b"\n") * 735 \
     + (dash + "END PRIVATE KEY" + dash).encode()
 text = words_text(50000, half + half)
@@ -1759,9 +1776,9 @@ line = b"%41" + hexes[:59990] + b"%aB" + hexes[:79990] + b"\n"
 text = line * 10
 plan_report("Overlapping runs, dense: 10 lines of a 60 000-byte percent run overlapping an 80 000-byte hex run",
             text, runs_of(text))
-# Touching runs. RED WHEN: spans that only touch are merged (a 60 000-byte key block and the
-# 40 006-byte percent run starting where it ends then form one span over WINDOW, and the run
-# is read in no chunk of its own), or either span is not read whole.
+# Touching runs. RED WHEN: the 60 000-byte key block or the 40 006-byte percent run starting where
+# it ends is not read whole in a chunk of its own. (Merging touching spans is an equivalent mutant
+# here: the merged span is longer than WINDOW, and each is still read whole on its own.)
 rnd6 = random.Random(6)
 body6 = bytes(rnd6.choice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") for _ in range(58000))
 key6 = ((dash + "BEGIN PRIVATE KEY" + dash + "\n").encode() + b"\n".join(body6[i:i + 64] for i in range(0, len(body6), 64))
@@ -1771,8 +1788,9 @@ text = b"words of text\n" * 100 + key6 + pct6 + b"\n" + b"more words\n" * 1000
 at6 = 1400
 plan_report("Touching runs: a %d-byte key block and the percent run touching it each lie whole in a chunk of their own"
             % len(key6), text, [(at6, at6 + len(key6)), (at6 + len(key6), at6 + len(key6) + len(pct6))])
-# Touching runs partner. RED WHEN: touching encoded runs are merged: a 63 000-byte run of U+
-# escapes, then a 42 006-byte percent run starting where it ends.
+# Touching runs partner. RED WHEN: the 63 000-byte run of U+ escapes or the 42 006-byte percent run
+# starting where it ends is not read whole in a chunk of its own (merging touching runs is an
+# equivalent mutant, as above).
 text = b"U+0041 " * 9000 + b"%41" + b"!" * 42000 + b"%41"
 plan_report("Touching runs: a U+ escape run and the percent run touching it each lie whole in a chunk of their own",
             text, [(0, 63000), (63000, 105006)])
@@ -2060,10 +2078,13 @@ POOL = (list("abcinpxyzIK019 -_.") + [
     "\U000e0041", "\u2122", "\u00bd", "\u2460"])
 rnd = random.Random(20261118)
 bad = []
+# The fold may write the iota an iota subscript (U+0345) folds to as one character of its own (the
+# last character of the fold of alpha + U+0345); it is read back as iota here.
+IOTA = T._line("\u03b1\u0345")[1][1:]
 for _ in range(20000):
     s = "".join(rnd.choice(POOL) for _ in range(rnd.randint(0, 12)))
     units, folded, owner = T._line(s)
-    if folded != d146(s) or len(owner) != len(folded) or "".join(units) != s \
+    if folded.replace(IOTA, "\u03b9") != d146(s) or len(owner) != len(folded) or "".join(units) != s \
             or any(not 0 <= k < len(units) for k in owner) or any(a > b for a, b in zip(owner, owner[1:])):
         bad.append(s)
 # T16. RED WHEN: a fold step is left out (the first NFKD: U+1D6A4, a dotless i only NFKD
@@ -2073,8 +2094,14 @@ for _ in range(20000):
 # (Changed: the oracle removes the invisible characters by its own hex list, drops the
 # dot above as described above, and owners must never decrease. The units still join to the line as
 # written: an invisible character stays in the unit before it.)
+# (Changed: the iota of an iota subscript is read back from the fold's own character for it.)
 report("T16: 20 000 random lines fold to whole-string D146 with owners that never decrease", not bad,
        "%d lines differ, first %s" % (len(bad), ascii(bad[:3])))
+# T16 partner. RED WHEN: the iota of an iota subscript is written as more than one character, or as
+# a character the fold of another of the characters above gives, or a separator.
+report("T16 partner: an iota subscript folds to one character, iota or one no other test character folds to",
+       len(IOTA) == 1 and (IOTA == "\u03b9" or all(IOTA not in d146(c) for c in POOL)) and IOTA not in "-_. ",
+       ascii(IOTA))
 # T16 partner. RED WHEN: an NFKD pass or the dotless-i step is left out (the reported case: a
 # mathematical dotless i inside a term).
 report("T16: the term pin is found in p + U+1D6A4 + n", found(["pin"], "p\U0001d6a4n") == ["p\U0001d6a4n"],
@@ -2494,6 +2521,137 @@ for terms, text in ((["s"], "\u00df"), (["f"], "\ufb00")):
     report("Hangul storage forms partner: %s stays clean in %s" % (ascii(terms[0]), ascii(text)),
            count(terms, text) == 0, ascii(found(terms, text)))
 
+# Every character is written as an escape. U+1FB3 is alpha with an iota subscript (U+0345); its
+# canonical decomposition is alpha + U+0345, and U+0345 folds to iota (U+03B9).
+SUB = ("\u03b2\u1fb3", "\u03b2\u03b1\u0345")  # beta + alpha with an iota subscript, in both storage forms
+FOLLOWERS = (("an acute", "\u0301"), ("a grave below", "\u0316"), ("a cedilla", "\u0327"), ("a Thai tone mark", "\u0e48"),
+             ("a perispomeni", "\u0342"), ("a zero-width joiner then an acute", "\u200d\u0301"))
+# Iota subscript then a mark. RED WHEN: a mark of a lower combining class than the iota subscript
+# (230 and below; 240 for U+0345) after a term's last letter with an iota subscript is put before
+# the iota by canonical reordering and the term's folded text no longer matches: find misses it
+# and mask leaves it showing. Each case in both storage forms of the term and of the text, and in
+# NFC and NFD.
+for term in SUB:
+    for label, follower in FOLLOWERS:
+        bad = []
+        for written in SUB:
+            for text in {written + follower, nfc(written + follower), nfd(written + follower)}:
+                if count([term], "x " + text + " y") != 1 or built([term]).mask(text) != "<private>":
+                    bad.append((ascii(text), ascii(found([term], "x " + text + " y")), ascii(built([term]).mask(text))))
+        report("Iota subscript then a mark: %s is found and masked with %s after it" % (ascii(term), label), not bad, str(bad[:2]))
+# Iota subscript then a mark, partner. RED WHEN: an ASCII letter after those marks no longer makes
+# the hit part of a longer word.
+for term in SUB:
+    for label, follower in FOLLOWERS:
+        texts = [w + follower + "x" for w in SUB]
+        got = [count([term], t) for t in texts]
+        report("Iota subscript then a mark, partner: %s is clean with %s and a letter after it" % (ascii(term), label),
+               got == [0, 0], str(got))
+# Iota subscript, invisible characters. RED WHEN: an invisible character (a zero-width joiner or
+# non-joiner, a combining grapheme joiner) between the letter with the iota subscript and the mark
+# after it changes the result, in the term or in the text.
+for inv in ("\u200d", "\u034f", "\u200c"):
+    for term_inv in (False, True):
+        bad = []
+        for term in SUB:
+            t = term + (inv + "\u0301" if term_inv else "")
+            for written in SUB:
+                for text in (written + inv + "\u0301", written + "\u0301"):
+                    if count([t], "x " + text + " y") != 1 or built([t]).mask(text) != "<private>":
+                        bad.append((ascii(t), ascii(text)))
+        report("Iota subscript, invisible characters: U+%04X %s keeps the term found and masked"
+               % (ord(inv), "in the term and the text" if term_inv else "in the text"), not bad, str(bad[:3]))
+# Iota written plainly. RED WHEN: a plain iota in a term stops matching an iota subscript in the
+# text (or the other way round): a term written with a plain iota is found and masked where the
+# text has the letter with an iota subscript, in both storage forms, with or without a mark after it.
+plain = "\u03b2\u03b1\u03b9"
+for text in SUB + tuple(w + "\u0301" for w in SUB):
+    report("Iota written plainly: %s is found and masked in %s" % (ascii(plain), ascii(text)),
+           count([plain], "x " + text + " y") == 1 and built([plain]).mask(text) == "<private>",
+           "find %s, mask %s" % (ascii(found([plain], "x " + text + " y")), ascii(built([plain]).mask(text))))
+for term in SUB:
+    report("Iota written plainly: %s is found and masked in %s" % (ascii(term), ascii(plain)),
+           count([term], "x " + plain + " y") == 1 and built([term]).mask(plain) == "<private>",
+           ascii(found([term], "x " + plain + " y")))
+# Iota written plainly, partner. RED WHEN: marks are allowed before a plain iota in the text: an
+# acute then a plain iota is a different spelling (alpha with an acute, then a separate iota),
+# not an iota subscript, so the term with an iota subscript is clean there.
+for term in SUB + (plain,):
+    text = "\u03b2\u03b1\u0301\u03b9"
+    report("Iota written plainly, partner: %s is clean in %s" % (ascii(term), ascii(text)),
+           count([term], "x " + text + " y") == 0, ascii(found([term], "x " + text + " y")))
+# Literal characters a fold could use inside. RED WHEN: a term or a text holding U+1FBE (prosgegrammeni,
+# which decomposes to a plain iota) or the noncharacter U+FDD0 is read as something it is not:
+# U+1FBE acts as a plain iota; U+FDD0 matches only itself.
+pros = "\u03b2\u03b1\u1fbe"
+for text in SUB + (plain, SUB[0] + "\u0301"):
+    report("Literal characters: %s is found in %s" % (ascii(pros), ascii(text)), count([pros], "x " + text + " y") == 1,
+           ascii(found([pros], "x " + text + " y")))
+nonchar = "\u03b2\u03b1\ufdd0"
+report("Literal characters: %s is found in itself" % ascii(nonchar),
+       count([nonchar], "x " + nonchar + " y") == 1 and built([nonchar]).mask(nonchar) == "<private>",
+       ascii(found([nonchar], "x " + nonchar + " y")))
+for text in SUB + (plain, SUB[0] + "\u0301"):
+    report("Literal characters partner: %s is clean in %s" % (ascii(nonchar), ascii(text)),
+           count([nonchar], "x " + text + " y") == 0, ascii(found([nonchar], "x " + text + " y")))
+for term in SUB + (plain,):
+    text = "\u03b2\u03b1\ufdd0"
+    report("Literal characters partner: %s is clean in %s" % (ascii(term), ascii(text)),
+           count([term], "x " + text + " y") == 0, ascii(found([term], "x " + text + " y")))
+# Iota subscript, first use. RED WHEN: the table of marks of each combining class is read before it
+# is built: in a fresh process where the only term ends in a letter with an iota subscript (no other
+# combining character in any term), an acute after it then hides the term or raises an error.
+code = ("import sys; sys.path.insert(0, sys.argv[1]); import scan; "
+        "t = scan.Terms(['\\u03b6\\u1fb3'], None); "
+        "print(len(t.find('x \\u03b6\\u1fb3\\u0301 y')), t.mask('\\u03b6\\u1fb3\\u0301'))")
+import subprocess
+r = subprocess.run([sys.executable, "-I", "-B", "-c", code, sys.argv[1]], capture_output=True, text=True)
+report("Iota subscript, first use: in a fresh process zeta + alpha with an iota subscript is found and masked with an acute after it",
+       r.returncode == 0 and r.stdout.strip() == "1 <private>", "exit %d: %s %s" % (r.returncode, r.stdout.strip(), r.stderr.strip()[-200:]))
+
+# Same fold, same result. RED WHEN: two terms that fold the same (Unicode's compatibility caseless
+# match, D146) and allow the same separators give different results on a text: the iota subscript,
+# a plain iota and their storage forms are spellings of one term. Random terms and texts, seeded.
+def d146_stripped(s):
+    n = unicodedata.normalize
+    s = strip(s)
+    return n("NFKD", n("NFKD", n("NFD", s).casefold()).casefold())
+pool = [chr(c) for c in range(0x1F80, 0x1FFD) if "\u0345" in nfd(chr(c))] + list(
+    "\u0323\u0316\u0301\u0300\u0342\u0313\u0314\u0308\u0345\u034f\u200d\u200c\u00df\u03b9\u0399\u1fbe\u037a"
+    "\u03b1\u03b2\u03b6\u03c9\u0390\u03b0\u0e48\u0327abcz -")
+foll = ["", "\u0301", "\u0316", "\u0e48", "\u200d\u0301", "x", "\u0345", "\u03b9", "\u0301\u0345"]
+rnd = random.Random(20261120)
+def variants(t):
+    return {t, nfc(t), nfd(t), t.upper(), t.lower(), t.replace("\u03b9", "\u0345"), t.replace("\u0345", "\u03b9"),
+            nfd(t).replace("\u0345", "\u03b9"), nfc(t.replace("\u03b9", "\u0345"))}
+differ, groups, pairs = [], 0, 0
+for _ in range(1500):
+    t = "".join(rnd.choice(pool) for _ in range(rnd.randint(1, 6)))
+    f0 = d146_stripped(t)
+    group = []
+    for v in sorted(variants(t)):
+        tv = built([v])
+        if v.strip() and d146_stripped(v) == f0 and tv.patterns:
+            group.append(v)
+    by_allow = {}
+    for v in group:
+        by_allow.setdefault(tuple(built([v])._most), []).append(v)
+    for same in by_allow.values():
+        if len(same) < 2:
+            continue
+        groups += 1
+        texts = [" " + form(x + fl) + " end" for x in same for fl in foll for form in (nfc, nfd)]
+        texts.append(" " + "".join(rnd.choice(pool) for _ in range(8)) + " ")
+        for text in texts:
+            got = {(bool(built([v]).find(text)), "<private>" in built([v]).mask(text)) for v in same}
+            pairs += len(same)
+            if len(got) > 1 and len(differ) < 5:
+                differ.append((ascii(same), ascii(text)))
+            elif len(got) > 1:
+                differ.append(None)
+report("Same fold, same result: %d groups of terms that fold the same give one result on every text" % groups,
+       groups >= 200 and not differ, "%d texts differ, first %s" % (len(differ), differ[:3]))
+
 # Escapes only. RED WHEN: a literal invisible or combining character (or any non-ASCII character other than
 # the right single quote U+2019 of one reported-speech pattern) is written into scan.py: write
 # escapes instead, so a reader sees every character.
@@ -2521,6 +2679,392 @@ expect_rc "T14: 80 000 lines each holding a term are reported to line 80000" 1 "
 if "$REAL_PY" -I -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "$secs"; then
   ok "T14: 80 000 term findings in a 4.5 MB text take under 10 s (${secs} s)"
 else bad "T14: 80 000 term findings in a 4.5 MB text take under 10 s" "${secs} s"; fi
+
+echo "== (n) a long text is also read whole, as gitleaks reads a file"
+# A text longer than one gitleaks piece is read in windows and pieces, and also whole, as one more
+# chunk: gitleaks decodes encoded text in several passes over the whole file, so a part of a text
+# can decode differently from the whole. Each case below compares the guard with whole-file
+# gitleaks on the same text (the oracle). Every key, token and value is built at run time.
+WHOLEPY="$WORK/whole.py"
+cat >"$WHOLEPY" <<'EOF'
+import base64, binascii, hashlib, json, os, random, re, shutil, subprocess, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import scan
+GITLEAKS, RULES, WORK = sys.argv[2], sys.argv[3], sys.argv[4]
+def report(name, good, detail=""):
+    print(("ok " if good else "bad ") + name + ("" if good else " - " + detail))
+dash = b"-" * 5
+def pem(n=3000, seed=3):
+    rnd = random.Random(seed)
+    raw = bytes(rnd.choice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") for _ in range(n))
+    return (dash + b"BEGIN RSA PRIVATE " + b"KEY" + dash + b"\n" + b"\n".join(raw[i:i + 64] for i in range(0, n, 64))
+            + b"\n" + dash + b"END RSA PRIVATE " + b"KEY" + dash + b"\n")
+def words(n, seed=5):
+    rnd = random.Random(seed)
+    out = b""
+    while len(out) < n:
+        out += b"word %d and more words here\n" % rnd.randint(0, 99999)
+    return out[:n]
+PEM = pem()
+def r64(filler=b"x"):
+    return base64.b64encode(filler * 36000 + PEM + filler * 300)
+def rhex(filler=b"x"):
+    return binascii.hexlify(filler * 18000 + PEM + filler * 300)
+def up(s):
+    return b"".join(b"U+%04X " % c for c in s)
+def ue(s):
+    return b"".join(b"\\u%04X" % c for c in s)
+def pc(s):
+    return b"".join(b"%%%02X" % c for c in s)
+def build(lead, trail=b"", filler=b"x", run=r64, rstart=50000, shift=1):
+    """Words, then on one line q= + LEAD + an encoded run holding a key + TRAIL, then words to 118 000 bytes."""
+    pre = b"q=" + lead
+    head = words(max(0, rstart - len(pre) - 1) + shift) + b"\n"
+    body = head + pre + run(filler) + trail + b"\n"
+    return body + words(max(0, 118000 - len(body)))
+def tail_case(enc, extra, shift):
+    """A base64 run holding a key whose last EXTRA-odd characters are written as escapes."""
+    body = b"x" * 36000 + PEM
+    body += b"x" * next(k for k in range(300, 310) if (len(body) + k) % 3 == 0)
+    k = base64.b64encode(body)
+    cut = len(k) - extra
+    cut -= (cut % 4) - 1 if cut % 4 >= 1 else 3
+    head = words(50000 + shift - 3) + b"\n"
+    line = head + b"q=" + k[:cut] + enc(k[cut:]) + b"\n"
+    return line + words(max(0, 118000 - len(line)))
+
+CASES = []  # (class, name, text)
+def case(cls, name, text):
+    CASES.append((cls, name, text))
+# The table: an escape lead glued to a base64 run holding a key (and the run then a trail).
+SHIFT0 = {"REAL q=\\u0020*9000+R", "REAL q=\\\\u0020*9000+R", "REAL uesc both sides"}
+table = []
+for g in range(4):
+    table.append(("pct20x60+glue%d" % g, b"%20" * 60 + b"zzzz"[:g], b"", b"x"))
+for k in (60, 61, 62, 63):
+    table.append(("pct41x%d" % k, b"%41" * k, b"", b"x"))
+for k in (60, 61, 62, 63):
+    table.append(("uesc0020x%d" % k, b"\\u0020" * k, b"", b"x"))
+for k in (60, 61, 62, 63):
+    table.append(("uesc0041x%d" % k, b"\\u0041" * k, b"", b"x"))
+table.append(("uesc2bs0020x60", b"\\\\u0020" * 60, b"", b"x"))
+for m in (16, 17, 18, 19):
+    table.append(("hex20x%d fillA" % m, b"20" * m, b"", b"A"))
+    table.append(("hex20x%d fillx" % m, b"20" * m, b"", b"x"))
+for k in (1, 2, 3):
+    table.append(("Uplus0020x60+U+0020glued" + "k%d" % k, b"U+0020 " * 60 + b"U+0020" + b"zzz"[:k - 1], b"", b"x"))
+table.append(("Uplus0020x60 spaced", b"U+0020 " * 60, b"", b"x"))
+for g in range(4):
+    table.append(("pct20x60+%dhexdig" % g, b"%20" * 60 + b"012"[:g], b"", b"A"))
+table.append(("rev R+pct20x60", b"", b"%20" * 60, b"x"))
+table.append(("rev R+uesc0020x60", b"", b"\\u0020" * 60, b"x"))
+for m in (16, 17, 18, 19):
+    table.append(("rev R+hex20x%d" % m, b"", b"20" * m, b"x"))
+table.append(("rev pct20 both sides", b"%20" * 60, b"%20" * 60, b"x"))
+table.append(("REAL q=%20*15000+R", b"%20" * 15000, b"", b"x"))
+table.append(("REAL q=\\u0020*9000+R", b"\\u0020" * 9000, b"", b"x"))
+table.append(("REAL q=%41*15001+R", b"%41" * 15001, b"", b"x"))
+table.append(("pct both sides long, spaced", b"%20" * 15000 + b" ", b" " + b"%20" * 10, b"x"))
+table.append(("pct20x60 spaced", b"%20" * 60 + b" ", b"", b"x"))
+table.append(("REAL q=%20*15000+R+%20", b"%20" * 15000, b"%20", b"x"))
+table.append(("REAL q=\\\\u0020*9000+R", b"\\\\u0020" * 9000, b"", b"x"))
+table.append(("pct00 nonprintable + R", b"%20" * 59 + b"%00", b"", b"x"))
+table.append(("pct QUJD wordchars + R", b"%20" * 56 + b"%51%55%4A%44", b"", b"x"))
+table.append(("uesc QUJD wordchars + R", b"\\u0020" * 56 + b"\\u0051\\u0055\\u004A\\u0044", b"", b"x"))
+table.append(("pct20 + hex20x16 + R fillA", b"%20" * 60 + b"20" * 16, b"", b"A"))
+table.append(("REAL q=%20*15000+R+%20 fillA", b"%20" * 15000, b"%20", b"A"))
+table.append(("REAL uesc both sides", b"\\u0020" * 9000, b"\\u0020", b"x"))
+for name, lead, trail, filler in table:
+    case("table", name, build(lead, trail, filler, shift=0 if name in SHIFT0 else 1))
+# Nested escapes: an escape of an escape, decoded over more than one pass.
+for name, lead, filler in (("%2520x60", b"%2520" * 60, b"x"), ("%5Cu0020x60", b"%5Cu0020" * 60, b"x"),
+                           ("\\u002520x60", b"\\u002520" * 60, b"x"), ("%20x60+%2520", b"%20" * 60 + b"%2520", b"x"),
+                           ("%20x60+%25%320", b"%20" * 60 + b"%25%320", b"x"), ("%252520x60", b"%252520" * 60, b"x"),
+                           ("%2520x60 fillA", b"%2520" * 60, b"A")):
+    case("nested", name, build(lead, b"", filler))
+# Every offset: 0 to 3 bytes between the lead and a base64 run, 0 to 1 before a hex run.
+for lead in (b"%20", b"\\u0020", b"%2520", b"%5Cu0020", b"%25%320", b"%252520", b"U+0020 ", b"20"):
+    for rname, run, pads in (("b64", r64, (b"", b"A", b"AA", b"AAA", b".", b"..", b"...")), ("hex", rhex, (b"", b"a", b"."))):
+        for pad in pads:
+            case("offset", "%sx60 pad=%r R=%s" % (lead.decode(), pad.decode(), rname), build(lead * 60 + pad, run=run))
+# The same with a long lead (q= then 15 000 escapes), so the encoded text is longer than WINDOW.
+LONG = {("%2520", "", "b64"): (115097, 0), ("%2520", "A", "b64"): (50000, 0), ("%2520", "AA", "b64"): (50000, 0),
+        ("%2520", "AAA", "b64"): (50000, 0), ("%2520", ".", "b64"): (113321, 0), ("%2520", "..", "b64"): (111545, 2),
+        ("%2520", "...", "b64"): (111546, 0), ("\\u0020", "", "b64"): (112327, 0), ("\\u0020", "A", "b64"): (50000, 0),
+        ("\\u0020", "AA", "b64"): (50000, 0), ("\\u0020", "AAA", "b64"): (50000, 0), ("\\u0020", ".", "b64"): (112328, 1),
+        ("\\u0020", "..", "b64"): (112329, 0), ("\\u0020", "...", "b64"): (112330, 0), ("%2520", "", "hex"): (122205, 0),
+        ("%2520", "a", "hex"): (50000, 0), ("%2520", ".", "hex"): (123983, 0), ("\\u0020", "", "hex"): (121212, 0),
+        ("\\u0020", "a", "hex"): (50000, 0), ("\\u0020", ".", "hex"): (50000, 0)}
+for lead in (b"%20", b"%2520", b"\\u0020"):
+    for rname, run, pads in (("b64", r64, (b"", b"A", b"AA", b"AAA", b".", b"..", b"...")), ("hex", rhex, (b"", b"a", b"."))):
+        for pad in pads:
+            rstart, shift = LONG.get((lead.decode(), pad.decode(), rname), (50000, 1))
+            case("long lead", "q=%sx15000 pad=%r R=%s" % (lead.decode(), pad.decode(), rname),
+                 build(lead * 15000 + pad, run=run, rstart=rstart, shift=shift))
+# A lead whose decoded text ends in base64 characters that join the run: E(D[:-t]) + D[-t:].
+for n in (10, 30, 300):
+    d = base64.b64encode(b"xxx" * n)
+    for en, f in (("U+", up), ("\\u", ue), ("%", pc)):
+        for t in (1, 2, 3, 5, 6):
+            case("joined lead", "%s N=%d t=%d" % (en, n, t), build(f(d[:-t]) + d[-t:]))
+# A run whose last characters are written as escapes (the text after the run).
+for en, f, shift in (("\\u", ue, 1), ("U+", up, 0), ("%", pc, 1)):
+    for extra in (40, 400):
+        case("escaped tail", "%s tail=%d" % (en, extra + 3), tail_case(f, extra, shift))
+# Two runs of U+ escapes with two plain letters between them: decoded, they join into one run.
+for size in (3000, 1000, 300):
+    for nl in (True, False):
+        a = up(b"ICAg" * 3143 + b"I")
+        if nl:
+            a = a[:-1] + b"\n"
+        text = b"!!" + a + b"CA" + up(b"g" + base64.b64encode(pem(size)))
+        case("across a gap", "key of %d, %s" % (size, "line break" if nl else "space"), text + b"!" * max(0, 118000 - len(text)))
+# Escapes, a hyphen, then percent escapes glued to the run.
+for shift in range(4):
+    head = words(50000 + shift) + b"\n"
+    text = head + b"\\u0041" * 400 + b"-" + b"%49%43%41%67" + r64() + b"\n"
+    case("escapes and a hyphen", "shift %d" % shift, text + words(max(0, 118000 - len(text))))
+# Seeded layouts: a long escape lead before a run holding a key, over 105 000 to 200 000 bytes;
+# every fourth one has "ustar" at byte 257, so gitleaks reads it as a tar file.
+LEADS = [b"%20", b"\\u0020", b"%2520", b"U+0020 ", b"%41", b"\\u0041"]
+def layout(seed):
+    rnd = random.Random(seed)
+    body = b"x" * rnd.randint(10000, 40000) + PEM + b"x" * rnd.randint(0, 400)
+    run = base64.b64encode(body) if rnd.random() < 0.7 else binascii.hexlify(body)
+    u = rnd.choice(LEADS)
+    lead = u * rnd.randint(2000, 16000) + bytes(rnd.choice(b"A.a") for _ in range(rnd.randint(0, 3)))
+    line = rnd.choice([b"q=", b" ", b""]) + lead + run
+    head = words(rnd.randint(1000, 60000), seed=seed) + b"\n"
+    data = head + line + b"\n"
+    return data + words(max(0, rnd.randint(105000, 200000) - len(data)), seed=seed + 1)
+for seed in range(9040, 9080):
+    text = layout(seed)
+    if seed % 4 == 0:
+        text = text[:257] + b"ustar" + text[262:]
+    case("seeded", "seed %d%s" % (seed, ", ustar at 257" if seed % 4 == 0 else ""), text)
+
+# The oracle: gitleaks (default rules, then the public rules) reading each text as one file, behind
+# 100 000 line breaks so that no text is skipped as a binary file; lines are counted back.
+def oracle(texts):
+    d = tempfile.mkdtemp(dir=WORK)
+    for i, t in enumerate(texts):
+        with open(os.path.join(d, "f%04d" % i), "wb") as fh:
+            fh.write(b"\n" * 100000 + t)
+    out = [set() for _ in texts]
+    for extra in ([], ["--config", RULES]):
+        rep = os.path.join(WORK, "oracle.json")
+        subprocess.run([GITLEAKS, "dir", d, "--no-banner", "--ignore-gitleaks-allow", "--report-format", "json",
+                        "--report-path", rep, "--exit-code", "0", "--log-level", "error"] + extra, check=True)
+        for f in json.load(open(rep)):
+            out[int(os.path.basename(f["File"])[1:])].add((f["RuleID"], int(f["StartLine"]) - 100000))
+    shutil.rmtree(d)
+    return out
+texts = [t for _c, _n, t in CASES]
+want = oracle(texts)
+# The guard, through Scanner.run(): every text one place. The raw findings are kept beside the
+# report so that each can be traced to its chunk.
+places = ["case-%03d" % i for i in range(len(CASES))]
+plans = [scan._plan(t)[0] for t in texts]
+got = [set() for _ in texts]
+head_part = [set() for _ in texts]
+whole_idx = {}
+with scan.Scanner(scan.Terms([], None)) as sc:
+    for i, t in enumerate(texts):
+        start = len(sc.chunks)
+        sc.add(places[i], t)
+        if (0, len(t)) in plans[i]:
+            whole_idx[start + plans[i].index((0, len(t)))] = i
+    # The chunk files, byte for byte, before the run.
+    files_bad = []
+    for i, t in enumerate(texts):
+        idxs = [k for k, c in enumerate(sc.chunks) if c["place"] == places[i]]
+        whole = 0
+        for k, (s0, e0) in zip(idxs, plans[i]):
+            raw_file = (sc.src / sc._name(k)).read_bytes()
+            tail = b"\n\n" + sc._canary(k).encode()
+            if raw_file == t + tail:
+                whole += 1
+            elif raw_file != b"\n" + t[s0:e0] + tail:
+                files_bad.append((CASES[i][1], k, s0, e0))
+        if whole != 1 or len(idxs) != len(plans[i]):
+            files_bad.append((CASES[i][1], "whole-text files: %d of %d chunks" % (whole, len(idxs))))
+    raw = []
+    real_findings = sc.findings
+    def keep():
+        out = real_findings()
+        raw.extend(out)
+        return out
+    sc.findings = keep
+    lines = sc.run()
+    at = {p: i for i, p in enumerate(places)}
+    for ln in lines:
+        m = re.fullmatch(r"(\S+) at (case-\d{3}):(\d+)", ln)
+        if not m:
+            got[0].add(("unparsed", ln))
+            continue
+        got[at[m.group(2)]].add((m.group(1), int(m.group(3))))
+    for rule, idx, line, _t in raw:
+        chunk = sc.chunks[idx]
+        if chunk["kind"] == "display" or idx in whole_idx:
+            continue
+        head_part[at[chunk["place"]]].add((rule, line))
+
+classes = sorted({c for c, _n, _t in CASES}, key=[c for c, _n, _t in CASES].index)
+# A long text is read whole. RED WHEN: the whole text is not one of a long text's chunks, or that
+# chunk is cut short, starts with a byte the text does not have, or its line numbers are off: a
+# key that gitleaks reports when it reads the file whole is then missed. Each case: everything
+# whole-file gitleaks reports is reported, on the same line.
+for cls in classes:
+    idx = [i for i, (c, _n, _t) in enumerate(CASES) if c == cls]
+    missed = [(CASES[i][1], sorted(want[i] - got[i])) for i in idx if want[i] - got[i]]
+    report("A long text is read whole (%s): all %d texts report everything whole-file gitleaks reports, on its line"
+           % (cls, len(idx)), not missed, "%d missed, first %s" % (len(missed), missed[:2]))
+# A long text is read whole, property. RED WHEN: the whole-text chunk is removed, cut short or
+# read with its lines shifted, or the guard reports a finding that neither its other chunks nor
+# whole-file gitleaks report (rule, place and line, each once).
+bad = [(CASES[i][1], sorted(got[i] ^ (head_part[i] | want[i]))) for i in range(len(CASES)) if got[i] != head_part[i] | want[i]]
+report("A long text is read whole, property: on %d texts the report is the other chunks' findings plus whole-file gitleaks'"
+       % len(CASES), not bad, "%d differ, first %s" % (len(bad), bad[:2]))
+# Partner. RED WHEN: the fixtures change so that the other chunks alone report everything whole-file
+# gitleaks reports (the cases above would then pass with no whole-text chunk).
+only = sum(1 for i in range(len(CASES)) if want[i] - head_part[i])
+keys = sum(1 for i in range(len(CASES)) if any(r == "private-key" for r, _l in want[i]))
+report("A long text is read whole, partner: whole-file gitleaks reports a key in 168 texts, and 93 of them hold a finding "
+       "only the whole text gives", (keys, only) == (168, 93), "%d with a key, %d only from the whole text" % (keys, only))
+
+# Whole-text chunk, bytes. RED WHEN: a byte is put before the whole text (a line break moves every
+# cut gitleaks makes in a long file), the text is cut short, or a chunk does not end with two line
+# breaks and its canary line. Each long text has exactly one chunk file that is the text, two
+# line breaks and the canary; every other chunk file is a line break, its span, two line breaks
+# and the canary.
+report("Whole-text chunk, bytes: each of %d long texts has one chunk file that is the text as written" % len(CASES),
+       not files_bad, "%d differ, first %s" % (len(files_bad), files_bad[:3]))
+# Whole-text chunk, plan. RED WHEN: the whole text is not a span of a long text's plan, is there more
+# than once, or the spans are not sorted by their start.
+plan_bad = [CASES[i][1] for i, t in enumerate(texts) if plans[i].count((0, len(t))) != 1
+            or plans[i] != sorted(plans[i], key=lambda s: s[0])]
+report("Whole-text chunk, plan: each of %d long texts has the whole text as one span, once, and sorted spans" % len(CASES),
+       not plan_bad, "%d differ, first %s" % (len(plan_bad), plan_bad[:3]))
+# Whole-text chunk, plan partner. RED WHEN: a text that fits in one gitleaks piece gets more than its
+# one chunk.
+short = words(scan.GITLEAKS_PIECE - 100)
+report("Whole-text chunk, plan partner: a text of one piece is one chunk", scan._plan(short)[0] == [(0, len(short))],
+       str(scan._plan(short)[0][:3]))
+# Other chunks unchanged. RED WHEN: a span of the plan other than the whole text is changed, dropped or
+# added (the windows and the key and run pieces are pinned, per group of cases, by a digest).
+def digest(idx):
+    h = hashlib.sha256()
+    for i in idx:
+        rest = list(plans[i])
+        if (0, len(texts[i])) in rest:
+            rest.remove((0, len(texts[i])))
+        h.update(repr(rest).encode() + b";")
+    return h.hexdigest()[:16]
+PINNED = {"table": "474cd94fb8f7b434", "nested": "fb408aadf3803fe3", "offset": "320f18e9976c490e",
+          "long lead": "e35956b296383757", "joined lead": "c478c0a17e79279e", "escaped tail": "c2e64cd326358a5a",
+          "across a gap": "ca26a7109bcc9743", "escapes and a hyphen": "d11749e4bfbbad2e", "seeded": "025b07ea32820dfb"}
+for cls in classes:
+    d = digest([i for i, (c, _n, _t) in enumerate(CASES) if c == cls])
+    report("Other chunks unchanged: the %s cases keep their windows and pieces" % cls, d == PINNED.get(cls), "digest %s" % d)
+
+# Two texts for the retry cases in the shell part: a key only the whole text gives, on line 1 and
+# on a later line (the line whole-file gitleaks gives is written beside each).
+for name, cls, case_name in (("whole-line1", "across a gap", "key of 3000, line break"),
+                             ("whole-late", "joined lead", "U+ N=10 t=1")):
+    i = next(k for k, (c, n, _t) in enumerate(CASES) if (c, n) == (cls, case_name))
+    with open(os.path.join(WORK, name + ".txt"), "wb") as fh:
+        fh.write(texts[i])
+    with open(os.path.join(WORK, name + ".line"), "w") as fh:
+        fh.write("%d\n" % min(l for r, l in want[i] if r == "private-key"))
+
+# Values at the very end of a text. Each value is written as U+ escapes, the last escape with
+# nothing after it, in a short text (one piece) and in a long one; built here, so no file holds it.
+rnd = random.Random(9)
+def pick(alphabet, n):
+    return bytes(rnd.choice(alphabet) for _ in range(n))
+VALUES = (("aws-access-token", b"AK" + b"IA" + pick(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 16)),
+          ("openrouter-api-key", b"sk-" + b"or-v1-" + pick(b"0123456789abcdef", 64)),
+          ("home-folder-path", b"/" + b"Users/" + b"jdoe"),
+          ("generic-api-key", b"api_" + b"token = " + pick(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123456789", 32)))
+ends = []
+for rule, value in VALUES:
+    for pad in (60, 150000):
+        for tail in (b"", b"\n"):
+            body = b"lorem ipsum dolor\n" * (pad // 18)
+            ends.append((rule, pad, tail, body + b"x " + up(value).rstrip(b" ") + tail))
+end_want = oracle([t for _r, _p, _tail, t in ends])
+end_got = [set() for _ in ends]
+with scan.Scanner(scan.Terms([], None)) as sc:
+    for i, (_r, _p, _tail, t) in enumerate(ends):
+        sc.add("end-%02d" % i, t)
+    for ln in sc.run():
+        m = re.fullmatch(r"(\S+) at end-(\d{2}):(\d+)", ln)
+        if m:
+            end_got[int(m.group(2))].add((m.group(1), int(m.group(3))))
+for i, (rule, pad, tail, t) in enumerate(ends):
+    size = "one piece" if len(t) <= scan.GITLEAKS_PIECE - 100 else "a long text"
+    where = "with nothing after it" if not tail else "then a line break"
+    line = t.count(b"\n") + (0 if tail else 1)
+    # Value at the end, partner. RED WHEN: the fixture stops being a value whole-file gitleaks
+    # reports on its line.
+    if not tail and pad == 60:
+        report("Value at the end, partner: whole-file gitleaks reports the U+-escaped %s value" % rule,
+               (rule, line) in end_want[i], str(sorted(end_want[i])))
+    # Value at the end. RED WHEN: a chunk's text is followed by only one line break before its
+    # canary line (a value written as escapes at the very end of a text is then missed). With a
+    # line break after the value, the case is a partner: it is found either way.
+    report("Value at the end: a U+-escaped %s value at the end of %s, %s, is reported on line %d" % (rule, size, where, line),
+           end_got[i] == end_want[i] and (rule, line) in end_got[i],
+           "got %s, whole-file %s" % (sorted(end_got[i]), sorted(end_want[i])))
+
+# Line numbers of a long text. RED WHEN: the report's duplicate test is removed, or the whole-text
+# chunk's lines are off by one (a finding on line 1 is then reported twice, on two lines). The
+# token is a GitHub token shape built at run time.
+tok = lambda: b"gh" + b"p_" + pick(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 36)
+body = b"\n".join(b"word %d filler text here" % i for i in range(6000))
+for label, text, line in (("on line 1", tok() + b"\n" + body + b"\n", 1),
+                          ("on the last line, with nothing after it", body + b"\n" + tok(), 6001)):
+    with scan.Scanner(scan.Terms([], None)) as sc:
+        sc.add("demo", text)
+        out = [ln for ln in sc.run() if ln.startswith("github-pat ")]
+    report("Line numbers of a long text: a token %s is reported once, on line %d" % (label, line),
+           out == ["github-pat at demo:%d" % line], str(out))
+# Private terms of a long text. RED WHEN: more than one chunk of a long text is matched for
+# private terms (the whole-text chunk too): the term is then found twice. The same case shows it
+# is found.
+term = "zebra" + "corn"
+text = body + b"\nwe build " + term.encode() + b" next\n" + body
+with scan.Scanner(scan.Terms([term], None)) as sc:
+    sc._pass = lambda exe, cfg, n: []
+    sc.add("demo", text)
+    hits = [(line, t) for rule, _idx, line, t in sc.findings() if rule == "private-term"]
+report("Private terms of a long text: the term on line 6001 is found once", hits == [(6001, term)], str(hits))
+EOF
+mkdir -p "$WORK/whole" || die "mkdir whole"
+py_verdicts "$WHOLEPY" "$ROOT/public-content" "$REAL_GITLEAKS" "$RULES" "$WORK/whole"
+# whole_case NAME FILE LINE MODE: text mode with the MODE wrapper first on PATH; exit 1 and the
+# report names the key on exactly LINE.
+whole_case() {
+  rm -f "$WORK/wrap-$4.state"
+  PATH="$WORK/wrap-$4:$PATH" _text "$2"
+  if [ "$(rc)" = 1 ] && grep -q -x -F -e "  - private-key at demo:$3" "$ERR" && [ -s "$GLLOG" ] && ! _leaks "$OUT" "$ERR"; then
+    ok "$1"
+  else
+    bad "$1" "exit $(rc)$(_hint)"
+  fi
+}
+for f in whole-line1 whole-late; do
+  [ -s "$WORK/whole/$f.txt" ] && [ -s "$WORK/whole/$f.line" ] || die "whole fixture $f"
+  wl="$(cat "$WORK/whole/$f.line")"
+  # Whole text (end to end). RED WHEN: a long text is not also read whole, or that chunk's lines are
+  # off: a key that whole-file gitleaks reports is missed or put on another line.
+  whole_case "Whole text: a key only the whole text gives is reported on line $wl" "$WORK/whole/$f.txt" "$wl" pass
+  # Whole text, read again. RED WHEN: the whole-text chunk read again behind the 100 000 line breaks
+  # (after gitleaks skipped every chunk once) is read with a byte more or less before the text, or
+  # its lines are counted from the wrong start.
+  whole_case "Whole text, read again: the same key is reported on line $wl when every chunk is read a second time" \
+    "$WORK/whole/$f.txt" "$wl" skiponce
+done
 
 echo
 echo "${PASS} passed, ${FAIL} failed, ${SKIPPED} skipped"
