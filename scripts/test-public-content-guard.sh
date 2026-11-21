@@ -245,6 +245,16 @@ for v in "${TERM_A}_labs" "Zebracorn Labs" "ZEBRACORN.LABS"; do
   _text "we build $v next"
   expect_rc "text: private term variant ($(printf '%s' "$v" | sed "s/[Zz][Ee][Bb][Rr][Aa][Cc][Oo][Rr][Nn]/T/"))" 1 private-term
 done
+# T9: the term strasse-labs spelled with a sharp s (escaped for _u, so this file holds ASCII only).
+_term_notes "$WORK/fold-notes" 'stra\u00dfe-labs'
+for v in 'STRASSE-LABS' 'strasse labs' '\uff33\uff34\uff32\uff21\uff33\uff33\uff25-labs'; do
+  PRIVATE_NOTES_DIR="$WORK/fold-notes" _text "we build $(_u "$v") next"
+  # T9. RED WHEN: terms are compared with IGNORECASE instead of Unicode case folding.
+  expect_rc "T9: a folded spelling of the term is found ($v)" 1 private-term
+done
+PRIVATE_NOTES_DIR="$WORK/fold-notes" _text "we build $(_u 'Stra\u00dfe-Labs') next"
+# T9 partner. RED WHEN: the term's own spelling in another case is no longer found.
+expect_rc "T9 partner: the term's own spelling in title case is found" 1 private-term
 # RED WHEN: --ignore-gitleaks-allow is dropped (content could silence itself).
 _text "see $HOMEP gitleaks:allow"
 expect_rc "text: inline gitleaks:allow is ignored" 1 home-folder-path
@@ -885,8 +895,9 @@ gpush "$D" "$D.git" origin main
 expect_pushed "names: a file named ':notes' pushes cleanly" scanned
 GIT_LITERAL_PATHSPECS=1 commit_file "$D" ":dirty" "see $HOMEP" "a dirty file named :dirty"
 gpush "$D" "$D.git" origin main
-# RED WHEN: a ':' name is skipped instead of scanned (partner of the case above).
-expect_blocked "names: a dirty file named ':dirty' is blocked" home-folder-path ":dirty"
+# RED WHEN: a ':' name is skipped instead of scanned (partner of the case above). A ':' is
+# outside the names a report may print, so the place is withheld.
+expect_blocked "names: a dirty file named ':dirty' is blocked" home-folder-path "withheld"
 git -C "$D" reset -q --hard origin/main
 commit_file "$D" "img/logo@""2x.png" "png bytes" "retina image"
 gpush "$D" "$D.git" origin main

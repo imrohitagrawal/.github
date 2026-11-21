@@ -873,8 +873,56 @@ jobs:
           EXPECT_RESULT: success
           # Anchored to the runner's timestamp: the step's env block prints the PR
           # body's later lines raw, without one, so body text cannot stand in.
-          EXPECT_PATTERN: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z public-content guard: scanned this pull request: clean$'
+          EXPECT_PATTERN: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z public-content guard: scanned this pull request: clean for the public rules \(private terms are not checked in CI\)$'
           FAILURE_HINT: "The public-content scan did not run to completion in the python-only fixture job. Its steps in reusable-pr-quality.yml run only on pull_request events from a public repository; a green job without this line means the guard was skipped for every public caller."
+        run: scripts/assert-fixture-job.sh
+
+  # The public-content workflow end to end on this repository's own pull
+  # request: the relative-path call runs the PR's own
+  # reusable-public-content.yml and scan.py, both jobs, from checkout to the
+  # scan. Pull requests only: on push the workflow would scan the push (its
+  # own path), and workflow_dispatch is no event it handles.
+  # Red when: reusable-public-content.yml fails on a clean pull request (a
+  # broken checkout, ref check, gitleaks download or scan), or the call is
+  # removed (the assert job below then has no job to read).
+  public-content-workflow:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/reusable-public-content.yml
+
+  # Proves the public-content job reached the pull request branch and the scan
+  # finished clean, not just that the called workflow went green (a job that
+  # ends early with exit 0 is green too).
+  # Red when: the public-content job no longer prints the clean line for a
+  # pull request (the pull_request branch is skipped, misrouted to the
+  # "not this job's event" notice, or the scan exits before it).
+  assert-public-content-workflow-pr-clean:
+    name: assert the public-content workflow scanned this pull request clean
+    needs: [public-content-workflow]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the public-content job printed the clean line
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TARGET_JOB: public-content-workflow / public-content
+          ACTUAL_RESULT: ${{ needs.public-content-workflow.result }}
+          EXPECT_RESULT: success
+          # Anchored to the runner's timestamp, so the echoed script text of the
+          # step cannot stand in for the line it prints.
+          EXPECT_PATTERN: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z public-content guard: scanned this pull request: clean for the public rules \(private terms are not checked in CI\)$'
+          FAILURE_HINT: "reusable-public-content.yml did not scan this pull request to completion in its public-content job. A green job without this line means the pull_request branch never ran."
         run: scripts/assert-fixture-job.sh
 
   assert-semgrep-actually-ran:
@@ -1079,6 +1127,7 @@ jobs:
       - assert-yarn-install-ran
       - assert-node-build-violation-blocks
       - assert-public-content-scan-ran
+      - assert-public-content-workflow-pr-clean
       - retrofit-script-tests
     if: always()
     runs-on: ubuntu-latest
@@ -1111,6 +1160,7 @@ jobs:
           NODE_BUILD_ASSERT: ${{ needs.assert-node-build-violation-blocks.result }}
           RETROFIT_SCRIPT_TESTS: ${{ needs.retrofit-script-tests.result }}
           PUBLIC_CONTENT_ASSERT: ${{ needs.assert-public-content-scan-ran.result }}
+          PUBLIC_CONTENT_WORKFLOW_ASSERT: ${{ needs.assert-public-content-workflow-pr-clean.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "node-only: $NODE_ONLY"
@@ -1136,14 +1186,18 @@ jobs:
           echo "assert-node-build-violation-blocks: $NODE_BUILD_ASSERT"
           echo "retrofit-script-tests: $RETROFIT_SCRIPT_TESTS"
           echo "assert-public-content-scan-ran: $PUBLIC_CONTENT_ASSERT ($EVENT_NAME)"
+          echo "assert-public-content-workflow-pr-clean: $PUBLIC_CONTENT_WORKFLOW_ASSERT ($EVENT_NAME)"
           FAILED=0
-          # The public-content assertion runs only on pull requests; anywhere else
-          # it is skipped, and only then is "skipped" a pass.
-          if [ "$EVENT_NAME" = pull_request ]; then
-            [ "$PUBLIC_CONTENT_ASSERT" = success ] || FAILED=1
-          else
-            [ "$PUBLIC_CONTENT_ASSERT" = skipped ] || FAILED=1
-          fi
+          # The public-content assertions run only on pull requests; anywhere else
+          # they are skipped, and only then is "skipped" a pass.
+          # Red when: either assertion is skipped or fails on a pull request.
+          for r in "$PUBLIC_CONTENT_ASSERT" "$PUBLIC_CONTENT_WORKFLOW_ASSERT"; do
+            if [ "$EVENT_NAME" = pull_request ]; then
+              [ "$r" = success ] || FAILED=1
+            else
+              [ "$r" = skipped ] || FAILED=1
+            fi
+          done
           for r in "$NODE_ONLY" "$NODE_PNPM_ONLY" "$PYTHON_ONLY" "$MONOREPO" "$ROOT_MAKEFILE_SEMGREP" "$MAKEFILE_TRUST_POSITIVE" "$PYTHON_DEV_GROUP" \
             "$NEGATIVE_ASSERT" "$PYTHON_NEGATIVE_ASSERT" "$BANDIT_BLOCKING_ASSERT" \
             "$NPM_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_BLOCKING_ASSERT" "$PIP_AUDIT_ADVISORY_ASSERT" \

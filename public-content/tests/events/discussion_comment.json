@@ -1,0 +1,16 @@
+{
+  "action": "created",
+  "discussion": {
+    "number": 5,
+    "html_url": "https://github.com/acme/pub/discussions/5",
+    "title": "A clean discussion title",
+    "body": "A clean discussion body."
+  },
+  "comment": {
+    "id": 6006,
+    "html_url": "https://github.com/acme/pub/discussions/5#discussioncomment-6006",
+    "body": "@@comment.body@@"
+  },
+  "repository": {"full_name": "acme/pub", "private": false, "html_url": "https://github.com/acme/pub", "default_branch": "main"},
+  "sender": {"login": "octo-person", "type": "User"}
+}

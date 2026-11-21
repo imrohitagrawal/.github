@@ -5,13 +5,62 @@ The public-content guard stops content that must not be public from being publis
 people. It is not a defence against someone who wants to get round it: anyone can edit the
 hook, call the API with curl, or push with `--no-verify`.
 
-This version covers two ways of publishing:
+It has three layers:
 
-- **pushes**, through a git pre-push hook installed for a user account. It runs for every
-  client that uses that account's git: a terminal, Codex, Claude Code.
-- **pull requests**, through a CI step in `reusable-pr-quality.yml` on public repositories.
+- **a git pre-push hook** installed for a user account. It runs for every client that uses
+  that account's git: a terminal, Codex, Claude Code.
+- **a CI step** in `reusable-pr-quality.yml` that checks pull requests on public repositories.
+- **the public-content workflow** (`reusable-public-content.yml`, called by
+  [`templates/caller-public-content.yml`](../templates/caller-public-content.yml)). It checks
+  every pull request, every push to GitHub, and the text of issues, comments, reviews,
+  discussions and releases, however they were posted: the web, `gh`, an MCP tool, the API.
 
-It does not look at `gh` calls or GitHub MCP tool calls (comments, issues, releases, gists).
+## Scope: what blocks and what only raises an alarm
+
+Only the first two layers run before the content is public. Everything else the guard sees is
+already public when it is checked. A red run there is an alarm after publication, not a block.
+
+| What is published | Layer | When it acts |
+| --- | --- | --- |
+| A push from a machine with the hook installed | pre-push hook | blocks before publication |
+| A pull request's commits (merge into the default branch) | PR check (`quality-gate`, `public-content`) | blocks the merge when a ruleset requires it; the PR's own commits are already public on its branch |
+| A push of a branch or tag without the hook (another machine, `--no-verify`, the web editor) | `public-content` on `push` | alarm after publication |
+| A pull request's title and body | `public-content` on `pull_request` | alarm after publication (it can stop a merge, not the posting) |
+| Issues, issue and PR comments, reviews, review comments, discussions, discussion comments, releases | `public-content-text` | alarm after publication |
+| Release assets, wiki pages, commit comments, gists, labels, milestones | none in CI | not checked here (see [When no run happens](#when-no-run-happens)) |
+
+**A green run is not a statement that the content is safe to publish.** It means no secrets,
+home-folder paths, email addresses, transcript names, agent ids or session links were found.
+CI has no private term list, so private project names and other private words are never
+checked in CI. Every clean line says so: "clean for the public rules (private terms are not
+checked in CI)". It is printed by the scanner after a real scan only, never after the "not a
+public repository" notice.
+
+`public-content` is the job a ruleset may require; it blocks a merge only when a ruleset
+requires it. A check from a reusable workflow is named `<caller job> / <called job>`, so for a
+caller whose job is named `public-content` (as in the template) the check to require is
+`public-content / public-content`. A caller job with another name shows that name before the
+slash. Every `pull_request` action, `edited` included, runs its full check (commits, title and
+body), so editing a PR's text can never turn a red commit result green. `public-content-text` is never a required check. Its runs
+attach to the latest commit of the default branch, so a red mark on the default branch can come
+from a comment, not from code.
+
+**A required check can be replaced by the pull request it checks.** On `pull_request`, GitHub
+runs the caller workflow as the pull request has it, so a pull request can edit
+`.github/workflows/public-content.yml` to skip the scan while keeping a job of the same name.
+The ruleset matches the check by name only, so that job satisfies it. The repository owner can
+close this in one of two ways:
+
+- **Require the workflow, not only the check.** A ruleset rule that requires a workflow to pass
+  runs that workflow from a fixed ref chosen in the ruleset, not from the pull request. GitHub
+  offers this rule in organization rulesets only.
+- **Require code-owner review of workflow changes.** A `CODEOWNERS` entry for
+  `.github/workflows/` plus a ruleset that requires review from code owners means no pull
+  request that edits a workflow can merge without a code owner's approval. A code owner cannot
+  approve their own pull request, so this needs a second person (see
+  [branch protection](branch-protection.md)).
+
+Until one of these is in place, review every pull request that edits a workflow.
 
 ## What it blocks
 
@@ -57,22 +106,64 @@ It does not look at `gh` calls or GitHub MCP tool calls (comments, issues, relea
   false alarm), and links to Claude Code
   sessions. The bare prefix, the bare word, `claude.ai` alone, and a short commit id with no
   such word pass.
-- **Private terms**: a private list of words, such as private project names. The list is
-  never committed (see [Private terms](#private-terms)). A term matches in any case, with one
-  `-`, `_`, `.` or space, or nothing, between its words. It does not match inside a longer run
-  of letters and digits; `_` and other marks count as breaks, so `term_client` matches.
+- **Private terms**: a private list of words, such as private project names. The list is never
+  committed (see [Private terms](#private-terms)). Invisible characters are removed from a
+  line, and from each term, first: every format character (Unicode category Cf) and every
+  character Unicode lists as default ignorable (Default_Ignorable_Code_Point), such as a
+  zero-width space, a zero-width joiner or a soft hyphen. Visible format characters, such as
+  the Arabic number sign (U+0600), are removed too. So a line gives the same result with and
+  without them. Terms are then compared after Unicode compatibility and case folding of the
+  whole line (Unicode's compatibility caseless match, plus one Turkish adjustment). STRASSE
+  matches the word written with a German sharp s, and full-width letters, ligatures and the
+  Turkish capital I with a dot match too. A text gives the same result in both Unicode storage
+  forms: a precomposed letter, or a letter followed by a combining accent; and a Hangul
+  syllable, or its conjoining letters (jamo).
+  - Separators: a term's words may have nothing between them, or one of `-`, `_`, `.` or
+    space. A term that itself holds a longer run of these allows nothing, or runs up to that
+    length. Separators are counted as written, in the line and in the term: a character that
+    folds to several of them, such as an ellipsis, counts as one, and so does a character that
+    folds to one, such as a wide space.
+  - Attached characters: a combining character (Unicode category M, such as an accent written
+    after a letter) belongs to the character before it. So does a character whose fold starts
+    with a combining character: the half-width Katakana sound marks, and the Thai and Lao sara
+    am.
+  - Where a hit starts and ends: a hit starts at a character as written, together with the
+    characters attached to it; a Hangul syllable counts as its jamo. It ends at the end of a
+    character as written, or inside its last character where everything after the hit in that
+    character is attached or combining: written as a separate accent, or a combining character
+    of a precomposed letter's canonical decomposition (also one that folds to a letter, such
+    as the Greek iota subscript). So a term whose last letter carries an accent is reported,
+    in either storage form, also when another mark follows it. A hit never ends inside the
+    fold of a letter itself: the term `s` does not match a German sharp s.
+  - Greek iota subscript: it matches an iota, and an iota in a term matches it, also when
+    other combining marks stand between the letter and the subscript (Unicode's canonical
+    order puts them there). So a mark written after a letter with an iota subscript does not
+    split a term.
+  - Longer words: a term is part of a longer word, and is not reported, only when the
+    character written directly before the hit, or directly after it and the attached
+    characters that end it, read in its composed form (NFC), starts with an ASCII letter or
+    digit (`A` to `Z`, `a` to `z`, `0` to `9`). So an `e` followed by a combining acute reads
+    as an e with an acute, which is not ASCII, and the Kelvin sign reads as `K`. An ASCII
+    letter with an accent is a break when the two compose into one letter (`z` and an acute: a
+    z with an acute), and part of the word when they do not (`x` and an acute). Everything
+    else is a break, so a term next to it is reported. That includes a combining accent after
+    the term, accented, Greek and Cyrillic letters in either storage form, letters of scripts
+    without case (Han, Kana, Thai, Arabic and others), other digits, punctuation and symbols.
+    `_` counts as a break, so `term_client` matches.
 
 The public rules live in [`public-content/gitleaks-public.toml`](../public-content/gitleaks-public.toml).
 Secrets and the public rules run as two separate gitleaks passes. One layered config does not
 work: gitleaks' default allowlist silently drops any match that contains `/home/`. Private
 terms are matched by the scanner itself.
 
-A report names the rule and the place (a file and line, a commit, a ref). A match inside an
-archive names the archive's path followed by "(inside the archive)". It never repeats the
-matched text. Every path shown in a place is checked first: a private term shows as
-`<private>`, other matches as `<redacted>`, and a path that holds a secret, or that the masks
-cannot clean, is withheld. A file the guard cannot read completely blocks the check on its
-own; the other findings are listed once it is fixed.
+A report names the rule and the place (the file and line, the commit, the ref or the
+message). A match inside an archive names the archive's path followed by "(inside the
+archive)". It never repeats the matched text. A path is printed only when it is plain (letters, digits, `.`, `_`, `/` and `-`;
+no space, colon, percent sign, line break, other control or non-ASCII character) and its raw
+name, scanned before anything is escaped, matches no rule; a private term in it shows as
+`<private>`. Any other path is withheld, and a fixed placeholder stands in for it. A file the
+guard cannot read completely blocks the check on its own; the other findings are listed once
+it is fixed.
 
 ### Warnings that never block
 
@@ -176,6 +267,73 @@ lines (no signature can be sniffed there; line numbers are mapped back). If that
 the check blocks. gitleaks' log is read at debug level: any warning or error other than its
 count of findings, or a line that is not a log line, blocks.
 
+gitleaks reads a file in pieces of 100 000 bytes. It extends each piece to the next blank line
+(two line breaks with only spaces or tabs between them; a Windows line end counts too), but by
+at most 25 000 bytes. A match across the end of a piece is cut in two and missed: in a long
+line, or in lines with no blank line near, at an arbitrary byte; and at a blank line, a match
+that holds one (a `curl` command with a blank line in it, a PGP key block). So:
+
+- A text that fits in one piece is handed to gitleaks whole.
+- A longer text is also handed to gitleaks whole, as one more piece, written as it stands
+  (nothing before it), so gitleaks cuts it where it would cut the text as a file of its own.
+  So whatever gitleaks finds in the text as a file is found: gitleaks decodes encoded text in
+  several passes over the whole text, so no part of a text is sure to decode as the whole
+  does. This includes runs of encoded text longer than 90 000 bytes, which are read the way
+  gitleaks reads a file and never block the check. The windows and spans below add what that
+  piece's own cuts can miss.
+- A longer text is handed over as windows of at most 90 000 bytes, each read whole and each
+  with its own proof-of-reading line. A window starts at most 74 000 bytes after the one
+  before, moved back by up to 2 000 bytes to a line start or to just after a character that is
+  not a letter or digit, so windows overlap by at least 14 000 bytes. A match of up to that
+  length is wholly inside some window. A longer match that crosses a window edge is missed by
+  the windows (the whole-text piece above still reads it as gitleaks reads a file). Key blocks and runs of encoded text of up to 90 000 bytes are the exception: they
+  are read whole (below), and a key block longer than that blocks the check. Where a window
+  edge falls inside a run of letters and digits with no break within 2 000 bytes, a rule that
+  needs a word boundary can match there although it would not match in the whole text (this
+  can only add a finding). Likewise, a window can start just after a character that is not a
+  letter or digit (for example the `//` of a URL), so a rule that looks at the character
+  before a match can match there although it would not in the whole text; this can only add a
+  finding, never hide one.
+- Some matches can be longer than the overlap: the private-key rule has no length limit, and
+  gitleaks decodes encoded text (such as base64) before it matches. So in a text longer than
+  one piece, the guard also reads these spans whole, also where a window already holds them:
+  - Each key block, found the way gitleaks finds it. A block runs from its BEGIN marker to the
+    first END marker that starts at least 64 characters after its header ends. The header is
+    the BEGIN marker itself, from `-----BEGIN` to the `-----` that closes `PRIVATE KEY` or
+    `PRIVATE KEY BLOCK`; the 64 characters are counted from just after those closing dashes.
+    The END marker is any `KEY-----` or `KEY BLOCK-----`, including the end of a later key's
+    own BEGIN line. A BEGIN line can hold more than one place where its header could end. When
+    the longest header has no END marker far enough after it, a shorter one is tried, as
+    gitleaks' own pattern does; a BEGIN marker with none of these after any of its headers is
+    not a key. The Kelvin sign and the long s count as k and s, as they do in gitleaks.
+  - Each run of encoded text longer than 12 000 bytes (the 16 000-byte overlap, less twice the
+    2 000 bytes an edge may move back) and at most 90 000 bytes, in a shape gitleaks 8.30.1
+    decodes: base64 (letters, digits, `+`, `/`, `-` and `_`, then up to two `=`), hex, percent
+    escapes (from the first `%XX` of a line to its last one) and Unicode escapes (`\uXXXX` with
+    one or two backslashes, or `U+XXXX` followed by a space).
+
+  Spans that overlap are merged into one span; spans that only touch (one ends where the next
+  starts) stay apart. The merged spans are read in groups, in order. A group starts at the
+  start of a merged span and takes each next merged span while the group, from its first
+  span's start to its last span's end, fits in 90 000 bytes. The next span starts a new group,
+  and each group is read as one piece. In a merged span longer than 90 000 bytes, its key
+  blocks are packed into groups the same way, and each of its runs of encoded text is read as
+  a piece of its own; these pieces may overlap. A key block longer than 90 000 bytes blocks
+  the check and names the place (the file, commit or message), saying "a private key block (or
+  text shaped like one) crosses a scan window", with the fix: remove the key from the commits.
+  The text of the pieces of one text adds up to at most 7.25 times its size plus 90 000 bytes,
+  which is the guard's own size check: the windows add up to at most 1.25 times the size plus
+  90 000 bytes, the groups, which never overlap, to at most the size, the runs read as
+  pieces of their own to at most four times the size (the runs of each of the four encoded
+  shapes never overlap), and the whole text once more. Each piece's file adds 38 bytes to
+  that: a line break before the text (none before the whole text), and two line breaks and a
+  35-byte proof-of-reading line after it. The two line breaks keep a value encoded at the very
+  end of the text apart from that line.
+- Private terms are matched on the whole text, never on windows, so a window edge never
+  changes whether a term is inside a longer word.
+
+Line numbers are those of the whole text.
+
 What passes: the allowed addresses, the rules' own allowlists, and, on author, committer and
 tagger lines only, an address that is the configured `user.email` (as git sees it for that
 push or CI run) or is already used as an author or committer address on the destination's
@@ -237,8 +395,125 @@ the caller pins, never from the PR's own tree. A step before the checkout stops 
 that repository or commit is empty, which would otherwise make the checkout fall back to the
 PR's own tree. In this repository, `self-test.yml` calls the workflow by relative path, so a
 PR here runs its own copy of the scanner: changes to the guard need a human review. The title
-and body reach the scanner only as environment variables, so text such as `$(...)` in a PR body
-is never run; if either variable is missing, the step fails. CI has no private term list.
+and body reach the scanner only through the event file (`--event-path "$GITHUB_EVENT_PATH"`),
+never through environment variables, whose values a step prints in its public log; text such
+as `$(...)` in a PR body is never run. Run by hand, `scan.py ci` without `--event-path` still
+reads `PR_TITLE` and `PR_BODY`, and fails when either is missing. CI has no private term list.
+
+## The public-content workflow
+
+`reusable-public-content.yml` runs on `workflow_call` only, with a read-only token, in two jobs
+that are never skipped: no job or step condition can skip a scan, nothing is allowed to fail
+quietly, and no concurrency setting cancels a running check. Each job reads the event name in
+its steps; an event that belongs to the other job ends with a one-line notice and success. The
+scanner is checked out from the workflow's own commit, after the same repository and commit
+check as the CI step, and gitleaks comes from the same checksum-verified release. A private
+repository passes with the notice "not a public repository: nothing scanned".
+
+- **Pull requests** (`public-content`): `scan.py ci --event-path`, the CI step's full check.
+- **Pushes** (`public-content`): `scan.py push`, in a full-history checkout (a shallow one is
+  refused), judged by the history that existed before the push:
+  - a delete passes ("ref deleted: nothing to scan") only when the ref is gone from the
+    checkout and from the remote;
+  - an existing ref: the commits in `after ^before`. For a force push, `before` is fetched by
+    commit id; if that fails, the push is checked as a new ref, and the log says so;
+  - a new ref: the commits not in the default branch's tip, or the whole history when the
+    pushed ref is the default branch at that tip (a repository's first push);
+  - a new default branch (`before` all zeros on the branch the event names as
+    `repository.default_branch`, or `--default-branch`): its whole history, whatever the
+    checkout's default tip is now. A later push may already have moved that tip past the
+    pushed commit, which would otherwise hide the first push's commits;
+  - always: the ref name, and for a tag the tag object (message and tagger), even when no
+    commit is new.
+  A missing commit or input stops the check (exit 2). Other branches do not count as
+  published: two branches pushed at once to the same new commit would hide each other.
+- **Text events** (`public-content-text`): `scan.py event`, which reads the event file and
+  checks a fixed list of fields: an issue's or discussion's title and body, a comment's or
+  review's body, a release's name, body and tag name. A report names the event, the object by
+  a fixed label and its number (`issue #7`, `pull request #12`, `discussion #5`,
+  `comment 1001`, `review 2002`, `release 8008`) and the field, never the text and never the
+  object's link or any other text from the event: a link can hold the matched text (a token in
+  the repository path, a tag name in a release link). An event or action the list does not
+  hold fails with "is not handled by the public-content guard; nothing was scanned and nothing
+  is known to have leaked. Update the caller or the event map; check the text by hand
+  meanwhile".
+
+Every output names places the same way, through one renderer in the scanner. A place prints
+only fixed labels, numbers and validated commit ids, plus a file name or `--label` only when
+it is plain (see "What it blocks" above) and its raw name matches no rule under the
+public rules or gitleaks' rules; otherwise a fixed placeholder stands in for it ("the ref
+name", "a file name (withheld)", "a file whose name is withheld", "the input (label
+withheld)"). Ref names and event payload text are never printed. The same rule covers
+findings, warnings, the unreadable-archive error and the workflow error lines, so a name can
+neither leak a secret nor start a line of its own. Under GitHub Actions each
+finding is also printed as a workflow error line,
+`::error title=public-content guard::<rule> in <place>`, so the run's summary names the rule
+and place, not only "exit code 1". The matched text is never printed.
+
+### When no run happens
+
+A check that never runs reports nothing, red or green:
+
+- GitHub sends no push event when more than three tags are pushed at once.
+- A pushed commit can delete or change its own repository's caller workflow, so the push that
+  removes the guard is not checked by it.
+- A repository whose own pull request caller still skips drafts (`if: draft == false`) does not
+  check a draft until that repository moves to the new caller.
+- Commit comments have no workflow trigger (GitHub's list of events that trigger workflows has
+  none for them), so no caller can run on one and CI never checks them. Only a scheduled
+  sweep could see them; that sweep is planned and not built yet.
+- Release assets and wiki pages are not text events; they are left to the same scheduled
+  sweep, which is planned and not built yet.
+- Refs pushed after this one do not count as published for it; a later push is checked by its
+  own event.
+- A pull request that edits its own caller workflow runs its own version of it, so a required
+  `public-content / public-content` check can pass from a modified caller (see
+  [What is not covered](#what-is-not-covered)).
+
+## When a text event goes red
+
+The text is already public. Act on it, not on the check.
+
+- **Your own text, or an agent's**: delete it, or edit it and then delete the old version from
+  the edit history (GitHub keeps edits). Rotate any secret it held. Treat the content as
+  published: someone may have read or copied it.
+- **Someone else's text**: if someone else wrote it, do not edit or delete it: report the rule,
+  place and run link to the repository owner. The owner decides what to do.
+- An edit can bring an old match back: when an edit of cleaned text goes red, clean the match
+  again.
+- Never edit the guard or its rules, and never re-run the check, to get a green result.
+
+## When a push goes red
+
+The commits, tag or branch are already public. Rewrite or delete them: rewrite the commits
+and force-push the branch, or delete the tag or branch. That is not enough on its own: GitHub
+keeps commits that no ref reaches any more, and anyone who has a commit's id can still open
+it for a time, so treat the content as published. Rotate any secret it held, at once and
+before the rewrite. Never edit the guard or its rules, and never re-run the check, to get a
+green result.
+
+## Adding the caller
+
+The caller template pins the reusable workflow by commit. Until a tag of this repository holds
+`reusable-public-content.yml`, the template's commit is an all-zero placeholder and is not
+ready to copy. Once that tag exists:
+
+1. Copy `templates/caller-public-content.yml` to `.github/workflows/public-content.yml` in the
+   public repository, and replace the placeholder commit with the tag's commit (the template's
+   comment says how).
+2. Add it next to the pull request caller: step 3 of [repo onboarding](repo-onboarding.md)
+   names both callers.
+3. Require the check `public-content / public-content` in the repository's ruleset (the
+   caller's job name, then the called job's name). Never require `public-content-text`. A pull
+   request can replace that check by editing its own caller; see the note under
+   [Scope](#scope-what-blocks-and-what-only-raises-an-alarm) for the two ways to close that.
+
+Cutting the tag and changing rulesets are the repository owner's actions.
+
+## Not in this version
+
+The scheduled sweep (commit comments, release assets, wiki pages), an agent check right after
+it posts text, and a list of failed runs at the end of a session are not in this version.
 
 ## Private terms
 
@@ -264,7 +539,11 @@ The hook blocks the push, and the CI step fails, when a check cannot finish:
   (even after the one retry), or writes a report that cannot be read;
 - an archive cannot be read completely, or is a format the guard cannot open (see
   [What is checked](#what-is-checked));
-- the notes folder is set but its term list is missing, unreadable or empty;
+- the notes folder is set but its term list is missing, unreadable or empty, or holds a term
+  that is one of these: made only of separators (hyphen, underscore, full stop, space); one
+  that does not match its own text; or one whose first visible character is attached (a
+  combining character, or a character whose fold starts with one). The message names the
+  line number, never the term;
 - the allowed address list is missing, unreadable, or has a line that is not an address;
 - `PRIVATE_NOTES_DIR` differs from the recorded notes folder;
 - a destination tip is missing locally and cannot be fetched;
@@ -288,9 +567,10 @@ ignored.
 
 ## What is not covered
 
-- `gh` calls and GitHub MCP tool calls, from any client.
-- Anything else that does not go through `git push` or a PR: `curl`, a web browser, another
-  API client.
+- Before publication, anything that does not go through `git push` with the hook or a PR:
+  `gh`, GitHub MCP tools, `curl`, a web browser. The public-content workflow checks their text
+  events and pushes only after publication (see [Scope](#scope-what-blocks-and-what-only-raises-an-alarm)),
+  and not at all in the cases under [When no run happens](#when-no-run-happens).
 - A machine where the hook is not installed, and private terms in CI.
 - Pushes made with `--no-verify`.
 - A setting that replaces or switches off the hook for one repository or one command: git uses
@@ -299,17 +579,19 @@ ignored.
   `hook.public-content.enabled=false` switches it off.
 - A push run with `HOME` or `GIT_CONFIG_GLOBAL` pointing somewhere else: git then does not
   read the global config that installs the hook, so the hook does not run.
-- PR titles and bodies are public as soon as they are posted. The CI step finds a problem
-  after publication; it can stop a merge, not the publication. A title or body edited after
-  the check ran is not checked again, because the caller template does not run on `edited`.
+- PR titles and bodies are public as soon as they are posted. The checks find a problem
+  after publication; they can stop a merge, not the publication. `caller-pr-quality.yml` does
+  not run on `edited`; the public-content workflow does, with the full check.
 - Content pushed while a repository was private is not checked again when the repository is
   made public.
 - File names inside archives as names (their contents are checked; a name of 12 or more
   printable characters is also read from the archive's own bytes).
 - Text in images (pixels) and the gaps listed under [What is checked](#what-is-checked).
 - The content of embedded repositories (submodules): only their paths are checked.
-- A pull request that edits the repository's own caller workflow: the check that runs is the
-  one in the PR, so such a PR can change or remove it for itself. Review those edits.
+- A pull request that edits the repository's own caller workflow: on `pull_request` GitHub runs
+  the PR's version of the caller, so such a PR can change or remove the check for itself. A
+  required check is matched by name only, so a modified caller that still has a job named
+  `public-content` can satisfy it without scanning anything. Review those edits.
 - Git LFS objects. The LFS client uploads them on its own; only the small pointer files go
   through `git push`.
 - Someone determined to get round it. The hook can be edited or removed by the same user.
@@ -349,8 +631,12 @@ git hook list pre-push
   it as zip, tar.gz or tar.xz, which the guard reads completely; or keep it in a private
   repository.
 - **A push that says to fetch**: run `git fetch`, then push again.
-- **A PR**: amend or rebase the commits and push. For the title or body, edit it, then push a
-  new commit (or close and reopen the PR) so the check runs again.
+- **A PR**: amend or rebase the commits and push. For the title or body, edit it; the edit is
+  checked again by the public-content workflow. The old text stays in the edit history: delete
+  that version too (see [When a text event goes red](#when-a-text-event-goes-red)).
+- **A push, a comment or other text found after publication**: see
+  [When a text event goes red](#when-a-text-event-goes-red). Do not re-run the check to get
+  a green result.
 - **A false positive**: open an issue in this repository. Do not edit the guard or its rules
   to get past it, and do not use `--no-verify`.
 
@@ -365,7 +651,13 @@ and a fake `gh`:
 - `scripts/test-public-content-formats.sh`: file formats, the gitleaks retry, gitlinks;
 - `scripts/test-public-content-zip-headers.sh`: each zip entry's local header against its
   central directory;
-- `scripts/test-public-content-real-tools.sh`: archives as common tools write them.
+- `scripts/test-public-content-real-tools.sh`: archives as common tools write them;
+- `scripts/test-public-content-events.sh`: `scan.py event` for every mapped event and field,
+  and `scan.py ci --event-path`;
+- `scripts/test-public-content-push.sh`: `scan.py push` (fast-forward, force push, new branch,
+  first push, tags, merge, delete, refusals);
+- `scripts/test-public-content-workflow-shape.sh`: the shape of the public-content workflow,
+  its caller template and the PR step.
 
 They run in `self-lint.yml` with gitleaks installed from the checksum-verified release. The
 cases that need a config-based hook are skipped on git older than 2.54.

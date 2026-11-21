@@ -1,0 +1,17 @@
+{
+  "action": "created",
+  "pull_request": {
+    "number": 12,
+    "html_url": "https://github.com/acme/pub/pull/12",
+    "title": "A clean pull request title",
+    "body": "A clean pull request body."
+  },
+  "comment": {
+    "id": 3003,
+    "html_url": "https://github.com/acme/pub/pull/12#discussion_r3003",
+    "path": "src/app.py",
+    "body": "@@comment.body@@"
+  },
+  "repository": {"full_name": "acme/pub", "private": false, "html_url": "https://github.com/acme/pub", "default_branch": "main"},
+  "sender": {"login": "octo-person", "type": "User"}
+}

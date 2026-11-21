@@ -1,0 +1,11 @@
+{
+  "action": "created",
+  "comment": {
+    "id": 4004,
+    "html_url": "https://github.com/acme/pub/commit/3333333333333333333333333333333333333333#commitcomment-4004",
+    "commit_id": "3333333333333333333333333333333333333333",
+    "body": "@@comment.body@@"
+  },
+  "repository": {"full_name": "acme/pub", "private": false, "html_url": "https://github.com/acme/pub", "default_branch": "main"},
+  "sender": {"login": "octo-person", "type": "User"}
+}
