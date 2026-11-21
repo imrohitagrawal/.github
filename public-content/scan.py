@@ -245,6 +245,10 @@ class Terms:
     becomes i, and a U+0307 (dot above) that follows an i with only combining characters between
     is dropped. No reordering crosses a unit, so the units' folds joined are D146 of the whole
     stripped line with that adjustment. Precomposed and decomposed spellings fold the same.
+    Iota subscript. U+0345 folds to an iota, written as _IOTA_MARK (in a term and in a line
+    alike), after the marks of a lower combining class that canonical reordering puts before
+    it. In a term, a plain iota and that mark each match a plain iota, or marks of a lower
+    class and the mark; so a mark after an iota subscript does not split a term.
     Separators. A term is folded the same way, then split into words on [-_. ]+. Its words match
     with nothing between them or up to N separators, where N is the term's longest run of
     separator characters as written, and at least 1. Separators are counted as written, in the
@@ -301,25 +305,42 @@ class Terms:
                                              for r in self._SEPARATORS.finditer(folded)]))
 
     _LOWER: dict[int, str] = {}  # combining class -> regex class of the marks of a lower class
+    # The iota of an iota subscript (U+0345, combining class 240) in a fold. No fold yields it
+    # otherwise: U+1FBE has a canonical decomposition (to iota), and every fold ends in NFKD.
+    _IOTA_MARK = "\u1fbe"
+    # Stand-ins for U+0345 while a unit is folded: noncharacters, which no fold changes and no
+    # reordering moves a mark across. A unit holds at most one base character, so one of the two
+    # is never in it.
+    _HELD = ("\ufdd0", "\ufdd1")
 
     @classmethod
     def _word_pattern(cls, word: str) -> str:
         """WORD (folded) as a regex. Before each combining character of the word, marks of a
         lower combining class may stand in the text: canonical reordering puts a mark the text
         adds after an accented letter (a grave below after an e-acute) between the letter and
-        its own accent."""
+        its own accent. A plain iota and _IOTA_MARK each match a plain iota, or marks of a
+        lower class than U+0345 and _IOTA_MARK."""
         out = []
         for ch in word:
+            if ch in ("\u03b9", cls._IOTA_MARK):
+                out.append("(?:\u03b9|" + cls._lower(240) + cls._IOTA_MARK + ")")
+                continue
             ccc = unicodedata.combining(ch)
             if ccc:
-                if not cls._LOWER:
-                    marks = [chr(cp) for cp in range(0x110000) if unicodedata.combining(chr(cp))]
-                    for c in sorted({unicodedata.combining(m) for m in marks}):
-                        lower = "".join(m for m in marks if unicodedata.combining(m) < c)
-                        cls._LOWER[c] = "[" + re.escape(lower) + "]*" if lower else ""
-                out.append(cls._LOWER[ccc])
+                out.append(cls._lower(ccc))
             out.append(re.escape(ch))
         return "".join(out)
+
+    @classmethod
+    def _lower(cls, ccc: int) -> str:
+        """The regex of any run of marks of a combining class below CCC (the table is built on
+        first use)."""
+        if not cls._LOWER:
+            marks = [chr(cp) for cp in range(0x110000) if unicodedata.combining(chr(cp))]
+            for c in sorted({unicodedata.combining(m) for m in marks}):
+                lower = "".join(m for m in marks if unicodedata.combining(m) < c)
+                cls._LOWER[c] = "[" + re.escape(lower) + "]*" if lower else ""
+        return cls._LOWER[ccc]
 
     def _ignorable(self, ch: str) -> bool:
         return self._IGNORABLE.match(ch) is not None
@@ -337,11 +358,15 @@ class Terms:
         return got
 
     def _fold(self, unit: str) -> str:
-        """D146 of UNIT plus the Turkish adjustment (see the class text)."""
+        """D146 of UNIT plus the Turkish adjustment, with the iota of an iota subscript written
+        as _IOTA_MARK (see the class text)."""
         got = self._segments.get(unit)
         if got is None:
             n = unicodedata.normalize
-            got = n("NFKD", n("NFKD", n("NFD", unit).casefold()).casefold())
+            held = self._HELD[self._HELD[0] in unit]
+            got = n("NFD", unit).replace("\u0345", held)  # after NFD's reordering
+            got = n("NFKD", got.casefold()).replace("\u0345", held)
+            got = n("NFKD", got.casefold()).replace(held, self._IOTA_MARK)
             if "\u0131" in got:
                 got = got.replace("\u0131", "i")
             if "\u0307" in got and "i" in got:
