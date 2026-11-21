@@ -1211,8 +1211,9 @@ def _plan(text: bytes) -> tuple[list[tuple[int, int]], bool]:
     windows. In a merged span longer than WINDOW, its key spans are grouped the same way and each
     of its encoded runs is a piece of its own, not grouped (such pieces may overlap). Windows add
     up to at most 5n/4 + WINDOW bytes, groups (disjoint) to at most n, and the runs read on their
-    own to at most 4n (the runs of one shape never overlap; four shapes). The size check is
-    25n/4 + WINDOW; a plan over that is a ScanError (it cannot happen; the check guards later
+    own to at most 4n (the runs of one shape never overlap; four shapes). A longer text is also
+    read whole: (0, n) is one more chunk (n bytes), after the first window. The size check is
+    25n/4 + WINDOW + n; a plan over that is a ScanError (it cannot happen; the check guards later
     edits)."""
     n = len(text)
     if n <= GITLEAKS_PIECE - 100:
@@ -1251,9 +1252,11 @@ def _plan(text: bytes) -> tuple[list[tuple[int, int]], bool]:
             chunks[-1] = (chunks[-1][0], end)
         else:
             chunks.append((at, end))
-    spans = _windows(text) + chunks + alone
+    # The whole text is read too, as gitleaks reads a file: its decoder works on the whole text in
+    # several passes, so no part of a text is sure to decode as the whole does.
+    spans = _windows(text) + chunks + alone + [(0, n)]
     spans.sort(key=lambda span: span[0])  # stable: the first window stays first
-    if sum(end - at for at, end in spans) > 25 * n // 4 + WINDOW:
+    if sum(end - at for at, end in spans) > 25 * n // 4 + WINDOW + n:
         raise ScanError("the scan plan for a long text exceeds its size bound")
     return spans, too_long
 
@@ -1372,8 +1375,9 @@ class Scanner:
                kind: str, inside: bool) -> None:
         """TEXT as one chunk when it fits in one gitleaks piece, else as the chunks _plan gives:
         overlapping windows and each key block no window holds (see WINDOW). A key block too
-        long for one piece is recorded, and run blocks naming the place. The first chunk of a
-        text carries the private-term match for the whole text (see findings)."""
+        long for one piece is recorded, and run blocks naming the place. A longer text is also
+        written whole, as it stands (see _write). The first chunk of a text carries the
+        private-term match for the whole text (see findings)."""
         meta = {"place": place, "lines": lines, "names": names, "path": path, "archive": inside, "kind": kind}
         spans, too_long = _plan(text)
         if too_long:
@@ -1385,24 +1389,32 @@ class Scanner:
         whole.write_bytes(text)
         nl, last = 0, 0  # a running count of the line breaks before each chunk (spans are sorted)
         for n, (at, end) in enumerate(spans):
+            if (at, end) == (0, len(text)):
+                self._write(meta, text, 0, terms=False, lead=False)
+                continue
             nl += text.count(b"\n", last, at)
             last = at
             self._write(meta, text[at:end], nl, terms=whole if n == 0 else False)
 
-    def _write(self, meta: dict[str, object], text: bytes, shift: int, terms: Path | bool | None) -> None:
+    def _write(self, meta: dict[str, object], text: bytes, shift: int, terms: Path | bool | None,
+               lead: bool = True) -> None:
         # The leading newline keeps gitleaks from reading the first bytes as a binary file's
         # signature; line numbers are shifted back when read. The canary line ends the chunk.
         # shift: the lines of the whole text before this chunk's first line. terms: None, match
         # the private terms on this chunk's text; a path, on the whole text saved there; False,
         # not on this chunk (a later window or a key block of a text matched elsewhere).
+        # lead: False writes TEXT as it stands, with no leading newline (a long text read whole:
+        # gitleaks cuts a long file into pieces at byte counts, so one byte more before it moves
+        # every cut); a sniffed format is still caught by the canary and read again behind
+        # RETRY_PREFIX.
         idx = len(self.chunks)
-        (self.src / self._name(idx)).write_bytes(b"\n" + text + b"\n" + self._canary(idx).encode())
-        self.chunks.append(dict(meta, shift=shift, terms=terms))
+        (self.src / self._name(idx)).write_bytes(b"\n" * lead + text + b"\n" + self._canary(idx).encode())
+        self.chunks.append(dict(meta, shift=shift + (not lead), terms=terms, lead=lead))
 
     def _text(self, idx: int) -> bytes:
-        """A chunk's text, without the leading newline and the canary line."""
+        """A chunk's text, without the leading newline (when written) and the canary line."""
         raw = (self.src / self._name(idx)).read_bytes()
-        return raw[1:len(raw) - 1 - len(self._canary(idx))]
+        return raw[int(self.chunks[idx]["lead"]):len(raw) - 1 - len(self._canary(idx))]
 
     def run(self) -> list[str]:
         """The report: one line per new finding (rule and place), never the matched text. A
