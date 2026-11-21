@@ -1399,7 +1399,10 @@ class Scanner:
     def _write(self, meta: dict[str, object], text: bytes, shift: int, terms: Path | bool | None,
                lead: bool = True) -> None:
         # The leading newline keeps gitleaks from reading the first bytes as a binary file's
-        # signature; line numbers are shifted back when read. The canary line ends the chunk.
+        # signature; line numbers are shifted back when read. The canary line ends the chunk,
+        # after an empty line: gitleaks' decoder takes one whitespace character after each U+
+        # code point, so with one line break a value encoded at the very end of the text would
+        # run on into the canary, and a finding holding the canary is dropped.
         # shift: the lines of the whole text before this chunk's first line. terms: None, match
         # the private terms on this chunk's text; a path, on the whole text saved there; False,
         # not on this chunk (a later window or a key block of a text matched elsewhere).
@@ -1408,13 +1411,14 @@ class Scanner:
         # every cut); a sniffed format is still caught by the canary and read again behind
         # RETRY_PREFIX.
         idx = len(self.chunks)
-        (self.src / self._name(idx)).write_bytes(b"\n" * lead + text + b"\n" + self._canary(idx).encode())
+        (self.src / self._name(idx)).write_bytes(b"\n" * lead + text + b"\n\n" + self._canary(idx).encode())
         self.chunks.append(dict(meta, shift=shift + (not lead), terms=terms, lead=lead))
 
     def _text(self, idx: int) -> bytes:
-        """A chunk's text, without the leading newline (when written) and the canary line."""
+        """A chunk's text, without the leading newline (when written), the two line breaks after
+        it and the canary."""
         raw = (self.src / self._name(idx)).read_bytes()
-        return raw[int(self.chunks[idx]["lead"]):len(raw) - 1 - len(self._canary(idx))]
+        return raw[int(self.chunks[idx]["lead"]):len(raw) - 2 - len(self._canary(idx))]
 
     def run(self) -> list[str]:
         """The report: one line per new finding (rule and place), never the matched text. A
