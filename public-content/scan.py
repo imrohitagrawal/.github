@@ -66,7 +66,7 @@ file it could not open; so every chunk carries a canary line that proves it was 
 chunk without its canary is read once more behind newlines, or the check blocks.
 gitleaks also cuts a text longer than its read, so such a text is scanned as overlapping windows,
 each read whole and each with its own canary, and the key blocks no window holds whole as
-pieces of their own (see WINDOW).
+pieces of their own; it is also read whole, as gitleaks reads a file (see WINDOW).
 
 Exit status: 0 clean, 1 findings, 2 error. Every caller treats an error as a block: a check
 that could not run never counts as a pass. Reports name the rule and the place, never the
@@ -140,8 +140,11 @@ RETRY_PREFIX = b"\n" * 100_000  # put before a chunk gitleaks skipped, so it can
 # longer than WINDOW, its key spans are grouped the same way and each of its encoded runs is a
 # chunk of its own (such chunks may overlap). A key span longer than WINDOW blocks the check,
 # naming the place. Windows add up to at most 5n/4 + WINDOW bytes, groups (disjoint) to at most
-# n, and runs read on their own to at most 4n; the size check is 25n/4 + WINDOW. Private terms
-# are matched in Python on the whole text, never on windows.
+# n, and runs read on their own to at most 4n. A long text is also read whole, as one more chunk
+# written as it stands (no leading newline), so whatever gitleaks finds in the text as a file of
+# its own is found: gitleaks' decoder works on the whole text in several passes, so no part of a
+# text is sure to decode as the whole does. That chunk adds n; the size check is
+# 25n/4 + WINDOW + n. Private terms are matched in Python on the whole text, never on windows.
 GITLEAKS_PIECE = 100_000
 WINDOW = 90_000
 OVERLAP = 16_000

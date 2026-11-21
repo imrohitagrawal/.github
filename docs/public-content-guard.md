@@ -135,6 +135,10 @@ Until one of these is in place, review every pull request that edits a workflow.
     as the Greek iota subscript). So a term whose last letter carries an accent is reported,
     in either storage form, also when another mark follows it. A hit never ends inside the
     fold of a letter itself: the term `s` does not match a German sharp s.
+  - Greek iota subscript: it matches an iota, and an iota in a term matches it, also when
+    other combining marks stand between the letter and the subscript (Unicode's canonical
+    order puts them there). So a mark written after a letter with an iota subscript does not
+    split a term.
   - Longer words: a term is part of a longer word, and is not reported, only when the
     character written directly before the hit, or directly after it and the attached
     characters that end it, read in its composed form (NFC), starts with an ASCII letter or
@@ -270,12 +274,19 @@ line, or in lines with no blank line near, at an arbitrary byte; and at a blank 
 that holds one (a `curl` command with a blank line in it, a PGP key block). So:
 
 - A text that fits in one piece is handed to gitleaks whole.
+- A longer text is also handed to gitleaks whole, as one more piece, written as it stands
+  (nothing before it), so gitleaks cuts it where it would cut the text as a file of its own.
+  So whatever gitleaks finds in the text as a file is found: gitleaks decodes encoded text in
+  several passes over the whole text, so no part of a text is sure to decode as the whole
+  does. This includes runs of encoded text longer than 90 000 bytes, which are read the way
+  gitleaks reads a file and never block the check. The windows and spans below add what that
+  piece's own cuts can miss.
 - A longer text is handed over as windows of at most 90 000 bytes, each read whole and each
   with its own proof-of-reading line. A window starts at most 74 000 bytes after the one
   before, moved back by up to 2 000 bytes to a line start or to just after a character that is
   not a letter or digit, so windows overlap by at least 14 000 bytes. A match of up to that
-  length is wholly inside some window. A longer match that crosses a window edge can be
-  missed. Key blocks and runs of encoded text of up to 90 000 bytes are the exception: they
+  length is wholly inside some window. A longer match that crosses a window edge is missed by
+  the windows (the whole-text piece above still reads it as gitleaks reads a file). Key blocks and runs of encoded text of up to 90 000 bytes are the exception: they
   are read whole (below), and a key block longer than that blocks the check. Where a window
   edge falls inside a run of letters and digits with no break within 2 000 bytes, a rule that
   needs a word boundary can match there although it would not match in the whole text (this
@@ -310,12 +321,14 @@ that holds one (a `curl` command with a blank line in it, a PGP key block). So:
   a piece of its own; these pieces may overlap. A key block longer than 90 000 bytes blocks
   the check and names the place (the file, commit or message), saying "a private key block (or
   text shaped like one) crosses a scan window", with the fix: remove the key from the commits.
-  The text of the pieces of one text adds up to at most 6.25 times its size plus 90 000 bytes,
+  The text of the pieces of one text adds up to at most 7.25 times its size plus 90 000 bytes,
   which is the guard's own size check: the windows add up to at most 1.25 times the size plus
-  90 000 bytes, the groups, which never overlap, to at most the size, and the runs read as
+  90 000 bytes, the groups, which never overlap, to at most the size, the runs read as
   pieces of their own to at most four times the size (the runs of each of the four encoded
-  shapes never overlap). Each piece's file adds 37 bytes to that: a line break before the
-  text, and a line break and a 35-byte proof-of-reading line after it.
+  shapes never overlap), and the whole text once more. Each piece's file adds 38 bytes to
+  that: a line break before the text (none before the whole text), and two line breaks and a
+  35-byte proof-of-reading line after it. The two line breaks keep a value encoded at the very
+  end of the text apart from that line.
 - Private terms are matched on the whole text, never on windows, so a window edge never
   changes whether a term is inside a longer word.
 
